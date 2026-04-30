@@ -1,0 +1,42 @@
+artifact_path: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/models/m-e35afa0aedbb4569b88f490413723f9c/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.12.5
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.8.0
+    skops_trusted_types: null
+is_signature_from_type_hint: false
+mlflow_version: 3.11.1
+model_id: m-e35afa0aedbb4569b88f490413723f9c
+model_size_bytes: 34693756
+model_uuid: m-e35afa0aedbb4569b88f490413723f9c
+prompts: null
+run_id: 1d880ff9f5ea4e269a9466a21321fb39
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  serving_input_path: serving_input_example.json
+  type: dataframe
+signature:
+  inputs: '[{"type": "float", "name": "month_of_year", "required": true}, {"type":
+    "float", "name": "share_t", "required": true}, {"type": "float", "name": "avg_price_t",
+    "required": true}, {"type": "float", "name": "share_lag1", "required": true},
+    {"type": "float", "name": "share_lag2", "required": true}, {"type": "float", "name":
+    "share_lag3", "required": true}]'
+  outputs: '[{"type": "double", "name": "y_h1", "required": true}, {"type": "double",
+    "name": "y_h2", "required": true}, {"type": "double", "name": "y_h3", "required":
+    true}, {"type": "double", "name": "y_h4", "required": true}, {"type": "double",
+    "name": "y_h5", "required": true}, {"type": "double", "name": "y_h6", "required":
+    true}]'
+  params: null
+type_hint_from_example: false
+utc_time_created: '2026-04-30 17:11:25.021461'

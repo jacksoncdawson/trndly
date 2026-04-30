@@ -102,7 +102,12 @@ HM_TRANSACTIONS_CSV: Path = HM_KAGGLE_DIR / "transactions_train.csv"
 
 TREND_SIGNALS_GOOGLE_CSV: Path = TREND_SIGNALS_DIR / "trend_signals_google.csv"
 TREND_SIGNALS_HOLLISTER_CSV: Path = TREND_SIGNALS_DIR / "trend_signals_hollister.csv"
-TREND_SIGNALS_GAP_CSV: Path = TREND_SIGNALS_DIR / "trend_signals_gap.csv"
+# Historical cube outputs live outside pipelines/training/data (gitignored batch artifacts).
+PROCESSED_DATA_DIR: Path = PROJECT_ROOT / "data" / "processed"
+LOOKUP_CSV: Path = PROCESSED_DATA_DIR / "lookup.csv"
+MONTHLY_FINGERPRINT_PARQUET: Path = PROCESSED_DATA_DIR / "monthly_fingerprint.parquet"
+MONTHLY_UNIVARIATE_PARQUET: Path = PROCESSED_DATA_DIR / "monthly_univariate.parquet"
+FEATURE_TRAINING_CONTRACT_JSON: Path = PROCESSED_DATA_DIR / "feature_training_run.json"
 
 # Glob used by combine_trend_signals.py to auto-discover every per-source file
 # in TREND_SIGNALS_DIR without having to know them by name.

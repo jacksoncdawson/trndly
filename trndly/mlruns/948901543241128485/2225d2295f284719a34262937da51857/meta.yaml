@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/2225d2295f284719a34262937da51857/artifacts
+end_time: 1777571804913
+entry_point_name: ''
+experiment_id: '948901543241128485'
+lifecycle_stage: active
+run_id: 2225d2295f284719a34262937da51857
+run_name: fingerprint-winner
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777571801890
+status: 3
+tags: []
+user_id: vivianjohnson

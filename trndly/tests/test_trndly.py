@@ -31,6 +31,7 @@ from pipelines.training.feature_contract import (  # noqa: E402
     TIMEFRAMES,
     TREND_SIGNAL_COLUMNS,
     build_feature_frame,
+    load_seasonality_table,
     load_trend_lookup,
     normalize_token,
     prepare_training_frame,
@@ -38,6 +39,7 @@ from pipelines.training.feature_contract import (  # noqa: E402
 )
 from pipelines.training.paths import (  # noqa: E402
     DATA_DIR,
+    SEASONALITY_TABLE_CSV,
     TRAIN_CSV,
     TREND_SIGNALS_CSV,
 )
@@ -51,6 +53,13 @@ def trend_lookup():
     if not TREND_SIGNALS_CSV.exists():
         pytest.skip(f"Trend signals CSV missing at {TREND_SIGNALS_CSV}")
     return load_trend_lookup(TREND_SIGNALS_CSV)
+
+
+@pytest.fixture(scope="module")
+def seasonality_table():
+    if not SEASONALITY_TABLE_CSV.exists():
+        pytest.skip(f"Seasonality CSV missing at {SEASONALITY_TABLE_CSV}")
+    return load_seasonality_table(SEASONALITY_TABLE_CSV)
 
 
 @pytest.fixture(scope="module")
@@ -85,18 +94,18 @@ def sample_item():
 # ---------------------------------------------------------------------------
 # 1. Model inference
 # ---------------------------------------------------------------------------
-def test_model_can_make_inference(tiny_model, trend_lookup, sample_item):
+def test_model_can_make_inference(tiny_model, trend_lookup, seasonality_table, sample_item):
     """Test 1: the listing timeline model produces a prediction without error."""
-    frame = build_feature_frame([sample_item], trend_lookup)
+    frame = build_feature_frame([sample_item], trend_lookup, seasonality_table=seasonality_table)
     predictions = tiny_model.predict(frame)
 
     assert len(predictions) == 1
     assert predictions[0] is not None
 
 
-def test_inference_is_in_expected_range(tiny_model, trend_lookup, sample_item):
+def test_inference_is_in_expected_range(tiny_model, trend_lookup, seasonality_table, sample_item):
     """Test 2: predicted label is one of the documented timeframes."""
-    frame = build_feature_frame([sample_item], trend_lookup)
+    frame = build_feature_frame([sample_item], trend_lookup, seasonality_table=seasonality_table)
     prediction = str(tiny_model.predict(frame)[0])
 
     assert prediction in TIMEFRAMES, (
@@ -111,7 +120,7 @@ def test_inference_is_in_expected_range(tiny_model, trend_lookup, sample_item):
     ),
     strict=False,
 )
-def test_inference_trend_is_not_going_down(tiny_model, trend_lookup):
+def test_inference_trend_is_not_going_down(tiny_model, trend_lookup, seasonality_table):
     """Test 3: when we re-score yesterday's batch against today's model, the
     average alignment score for the predicted timeframe should not drop."""
     from pipelines.monitoring import detect_downtrend  # type: ignore[import-not-found]
@@ -120,12 +129,12 @@ def test_inference_trend_is_not_going_down(tiny_model, trend_lookup):
         {"item_name": "Item A", "color": "black", "category": "tops", "material": "cotton"},
         {"item_name": "Item B", "color": "red",   "category": "dress", "material": "silk"},
     ]
-    frame = build_feature_frame(items, trend_lookup)
+    frame = build_feature_frame(items, trend_lookup, seasonality_table=seasonality_table)
     preds_today = tiny_model.predict(frame)
 
     # Placeholder "yesterday" scores - in real use these come from the monitoring store.
     yesterday_scores = np.full(len(items), 0.5)
-    today_scores = frame[[f"avg_{tf}" for tf in TIMEFRAMES]].max(axis=1).to_numpy()
+    today_scores = frame["avg_current"].to_numpy()
 
     assert not detect_downtrend(yesterday_scores, today_scores, preds_today)
 
@@ -133,16 +142,31 @@ def test_inference_trend_is_not_going_down(tiny_model, trend_lookup):
 # ---------------------------------------------------------------------------
 # 2. Feature engineering
 # ---------------------------------------------------------------------------
-def test_feature_creation_pipeline_produces_contract_columns(trend_lookup, sample_item):
+def test_feature_creation_pipeline_produces_contract_columns(trend_lookup, seasonality_table, sample_item):
     """Test 4: `build_feature_frame` emits the full feature vector contract."""
-    frame = build_feature_frame([sample_item], trend_lookup)
+    frame = build_feature_frame([sample_item], trend_lookup, seasonality_table=seasonality_table)
 
     assert list(frame.columns) == FEATURE_VECTOR_COLUMNS
     assert len(frame) == 1
     assert frame.notna().all().all(), "Feature frame should never contain NaNs."
-    assert ((frame >= 0.0) & (frame <= 1.0)).all().all(), (
-        "All feature values should be clipped into [0, 1]."
+
+    bounded = [
+        "color_current",
+        "category_current",
+        "material_current",
+        "avg_current",
+        "season_plus_0",
+        "season_plus_1",
+        "season_plus_2",
+        "season_plus_3",
+        "season_plus_6",
+    ]
+    assert ((frame[bounded] >= 0.0) & (frame[bounded] <= 1.0)).all().all(), (
+        "Trend + seasonal envelope features must stay inside [0, 1]."
     )
+    assert frame[["sin_month", "cos_month"]].abs().max().max() <= 1.0 + 1e-9
+    assert (frame[["months_until_peak", "months_since_peak"]] >= 0).all().all()
+    assert (frame[["months_until_peak", "months_since_peak"]] <= 11).all().all()
 
 
 def test_nulls_are_handled_safely_during_training_prep():

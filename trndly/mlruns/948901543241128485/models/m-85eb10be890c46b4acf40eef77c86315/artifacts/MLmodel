@@ -1,0 +1,41 @@
+artifact_path: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/models/m-85eb10be890c46b4acf40eef77c86315/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.12.5
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.8.0
+    skops_trusted_types: null
+is_signature_from_type_hint: false
+mlflow_version: 3.11.1
+model_id: m-85eb10be890c46b4acf40eef77c86315
+model_size_bytes: 19847082
+model_uuid: m-85eb10be890c46b4acf40eef77c86315
+prompts: null
+run_id: 923a8a15088847369be86707e521ea6e
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  serving_input_path: serving_input_example.json
+  type: dataframe
+signature:
+  inputs: '[{"type": "float", "name": "month_of_year", "required": true}, {"type":
+    "float", "name": "share_t", "required": true}, {"type": "float", "name": "share_lag1",
+    "required": true}, {"type": "float", "name": "share_lag2", "required": true},
+    {"type": "float", "name": "share_lag3", "required": true}]'
+  outputs: '[{"type": "double", "name": "y_h1", "required": true}, {"type": "double",
+    "name": "y_h2", "required": true}, {"type": "double", "name": "y_h3", "required":
+    true}, {"type": "double", "name": "y_h4", "required": true}, {"type": "double",
+    "name": "y_h5", "required": true}, {"type": "double", "name": "y_h6", "required":
+    true}]'
+  params: null
+type_hint_from_example: false
+utc_time_created: '2026-04-30 17:10:24.316807'

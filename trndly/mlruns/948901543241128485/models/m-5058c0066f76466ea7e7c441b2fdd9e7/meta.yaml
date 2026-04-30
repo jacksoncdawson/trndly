@@ -1,0 +1,10 @@
+artifact_location: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/models/m-5058c0066f76466ea7e7c441b2fdd9e7/artifacts
+creation_timestamp: 1777571801924
+experiment_id: '948901543241128485'
+last_updated_timestamp: 1777571804843
+model_id: m-5058c0066f76466ea7e7c441b2fdd9e7
+model_type: null
+name: model
+source_run_id: 2225d2295f284719a34262937da51857
+status: 2
+status_message: null

@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/6cedb40ace834e9ab28e9af39f31ec7c/artifacts
+end_time: 1777571736695
+entry_point_name: ''
+experiment_id: '948901543241128485'
+lifecycle_stage: active
+run_id: 6cedb40ace834e9ab28e9af39f31ec7c
+run_name: univariate-winner
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777571733350
+status: 3
+tags: []
+user_id: vivianjohnson

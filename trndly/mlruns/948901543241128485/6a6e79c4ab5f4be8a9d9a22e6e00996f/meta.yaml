@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/6a6e79c4ab5f4be8a9d9a22e6e00996f/artifacts
+end_time: 1777569457260
+entry_point_name: ''
+experiment_id: '948901543241128485'
+lifecycle_stage: active
+run_id: 6a6e79c4ab5f4be8a9d9a22e6e00996f
+run_name: univariate-cfg04
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777569456909
+status: 3
+tags: []
+user_id: vivianjohnson

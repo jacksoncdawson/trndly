@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/1e7ac4c7500e4501982146075be55d08/artifacts
+end_time: 1777569521868
+entry_point_name: ''
+experiment_id: '948901543241128485'
+lifecycle_stage: active
+run_id: 1e7ac4c7500e4501982146075be55d08
+run_name: fingerprint-cfg06
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777569511555
+status: 3
+tags: []
+user_id: vivianjohnson

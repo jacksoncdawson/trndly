@@ -1,53 +1,35 @@
 """
-H&M seasonal label + feature generator for trndly training data.
+H&M seasonal label generator for trndly training data.
 
 Reads the H&M Kaggle transaction history to produce real, labeled training
-data for the listing timeline classifier. The H&M data feeds the pipeline
-in two ways:
-
-  1. As LABELS — each (color, category, material) combo has a peak month, and
-     the months_until_peak from a given reference month maps to best_timeframe.
-  2. As FEATURES — the full 12-month historical purchase-share curve for each
-     combo (peak-normalized) is exposed at training and inference time so the
-     model sees the actual seasonality, not just the label distilled from it.
-
-Without (2) the model would receive identical inputs for all 12 reference
-months of a given combo and could not learn the seasonality at all.
+data for the listing timeline classifier. This replaces the fully synthetic
+train/val/test CSVs with examples where the best_timeframe label comes from
+actual historical purchase seasonality.
 
 HOW IT WORKS
 ------------
 1. Join articles.csv + transactions_train.csv on article_id.
 2. Map H&M attribute values to the feature_values in feature_contract.py
    (color, category, material).
-3. For each unique (color, category, material) combination, compute the
-   normalized 12-month purchase-share curve. Write that curve to
-   seasonality_table.csv (one row per combo, peak-normalized so max == 1.0).
-4. The peak month for each combo is argmax of its curve. Generate 12
-   training examples per combination — one for each reference month. For
-   each reference month, compute months_until_peak and map it to a
-   best_timeframe label:
+3. For each unique (color, category, material) combination, find the calendar
+   month when that combination historically sold fastest (peak_month).
+4. Generate 12 training examples per combination — one for each reference
+   month. For each reference month, compute months_until_peak and map it
+   to a best_timeframe label:
        0 months  → "current"
        1 month   → "next_week"
        2 months  → "next_month"
        3–4 months → "three_months"
        5+ months → "six_months"
-5. Load the canonical trend_signals.csv (produced by combine_trend_signals.py
-   from trend_signals_google/hollister/gap) and the freshly built
-   seasonality_table to compute each row's full feature vector via
-   feature_contract.item_to_feature_row.
-6. Shuffle and write as train/val/test CSVs into the data/ directory,
+5. Load the current trend_signals.csv (written by google_trends_collector.py)
+   to attach real current trend scores as input features.
+6. Shuffle and write as train/val/test CSVs into the synthetic_data directory,
    replacing the fully synthetic splits.
 
 PIPELINE ORDER
 --------------
-1. python google_trends_collector.py    # → trend_signals_google.csv
-2. python hollister_scraper.py          # → trend_signals_hollister.csv
-3. python gap_scraper.py                # → trend_signals_gap.csv
-4. python combine_trend_signals.py      # → canonical trend_signals.csv
-5. python hmn_seasonal_processor.py     # this script — consumes the combined
-                                        #   trend_signals.csv and writes
-                                        #   seasonality_table.csv +
-                                        #   train/val/test splits.
+Run google_trends_collector.py first (to produce a real trend_signals.csv),
+then run this script to produce real-labeled train/val/test splits.
 
 DATA REQUIRED
 -------------
@@ -82,25 +64,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from pipelines.training.feature_contract import (  # noqa: E402
-    DEFAULT_MISSING_SCORE,
     FEATURE_VECTOR_COLUMNS,
-    SEASONALITY_ID_COLUMNS,
-    SEASONALITY_MONTH_COLUMNS,
-    SEASONALITY_TABLE_COLUMNS,
     TARGET_COLUMN_DEFAULT,
     TIMEFRAMES,
-    build_seasonality_table,
+    SeasonalityTable,
     build_trend_lookup,
     item_to_feature_row,
+    load_seasonality_table,
     load_trend_signals_frame,
     normalize_token,
-    validate_seasonality_frame,
-)
-from pipelines.training.paths import (  # noqa: E402
-    DATA_DIR,
-    HM_ARTICLES_CSV,
-    HM_TRANSACTIONS_CSV,
-    TREND_SIGNALS_CSV,
 )
 
 # --------------------------------------------------------------------------- #
@@ -210,8 +182,17 @@ VAL_FRAC = 0.15
 # --------------------------------------------------------------------------- #
 
 def parse_args() -> argparse.Namespace:
-    default_trend_signals = TREND_SIGNALS_CSV
-    default_output = DATA_DIR
+    default_trend_signals = (
+        Path(__file__).resolve().parents[1]
+        / "training"
+        / "synthetic_data"
+        / "trend_signals.csv"
+    )
+    default_output = (
+        Path(__file__).resolve().parents[1]
+        / "training"
+        / "synthetic_data"
+    )
     parser = argparse.ArgumentParser(
         description=(
             "Generate real-labeled train/val/test splits from H&M seasonal "
@@ -220,30 +201,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--articles-path",
-        default=str(HM_ARTICLES_CSV),
-        help=(
-            "Path to the H&M articles.csv file from the Kaggle dataset. "
-            "Defaults to the path defined in paths.HM_ARTICLES_CSV "
-            "(data/hm_kaggle/articles.csv)."
-        ),
+        required=True,
+        help="Path to the H&M articles.csv file from the Kaggle dataset.",
     )
     parser.add_argument(
         "--transactions-path",
-        default=str(HM_TRANSACTIONS_CSV),
-        help=(
-            "Path to the H&M transactions_train.csv file from the Kaggle dataset. "
-            "Defaults to the path defined in paths.HM_TRANSACTIONS_CSV "
-            "(data/hm_kaggle/transactions_train.csv)."
-        ),
+        required=True,
+        help="Path to the H&M transactions_train.csv file from the Kaggle dataset.",
     )
     parser.add_argument(
         "--trend-signals-path",
         default=str(default_trend_signals),
-        help=(
-            "Path to the canonical trend_signals.csv produced by "
-            "combine_trend_signals.py (weighted mean of Google Trends + "
-            "Hollister + Gap per-source files)."
-        ),
+        help="Path to the trend_signals.csv produced by google_trends_collector.py.",
     )
     parser.add_argument(
         "--output-dir",
@@ -251,10 +220,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory to write train.csv, val.csv, test.csv.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for train/val/test shuffle.",
+        "--seasonality-table-path",
+        default=str(
+            Path(__file__).resolve().parents[1] / "training" / "data" / "seasonality_table.csv"
+        ),
+        help="Path to seasonality_table.csv for seasonal curve features.",
     )
     return parser.parse_args()
 
@@ -288,30 +258,18 @@ def extract_article_attributes(articles: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
-# Seasonality curve computation                                                 #
+# Peak month computation                                                        #
 # --------------------------------------------------------------------------- #
 
-def compute_seasonality_curves(
+def compute_peak_months(
     transactions: pd.DataFrame,
     attrs: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    For each unique (color, category, material) combination, compute the
-    full normalized 12-month purchase-share curve plus the total number of
-    transactions backing it.
+    For each unique (color, category, material) combination, find the
+    calendar month with the highest average purchase share.
 
-    Approach:
-      1. Compute each combo's monthly purchase share (combo_count / total_in_year_month)
-         then average that share across years to get a per-month value.
-      2. Pivot to one row per combo with columns month_1..month_12. Missing
-         months become 0.
-      3. Peak-normalize each row so the largest month becomes 1.0. Combos with
-         no transactions never make it this far (they're dropped at step 1).
-      4. Attach n_observations = total raw transaction count for the combo.
-
-    Returns:
-        DataFrame with the SEASONALITY_TABLE_COLUMNS schema:
-          color, category, material, month_1..month_12, n_observations.
+    Returns a DataFrame with columns: color, category, material, peak_month.
     """
     merged = transactions[["t_dat", "article_id"]].merge(attrs, on="article_id", how="left")
     merged = merged.dropna(subset=["color", "category", "material"])
@@ -334,60 +292,21 @@ def compute_seasonality_curves(
     combo_counts = combo_counts.merge(total_by_year_month, on=["year", "month"])
     combo_counts["share"] = combo_counts["count"] / combo_counts["total"]
 
-    # Average each combo's monthly share across years so seasonality dominates
-    # over year-specific noise.
     monthly_avg = (
         combo_counts.groupby(["color", "category", "material", "month"])["share"]
         .mean()
         .reset_index()
     )
 
-    # Pivot to wide form: one row per combo, 12 columns for months.
-    wide = monthly_avg.pivot_table(
-        index=["color", "category", "material"],
-        columns="month",
-        values="share",
-        fill_value=0.0,
+    peak_months = (
+        monthly_avg.loc[
+            monthly_avg.groupby(["color", "category", "material"])["share"].idxmax()
+        ][["color", "category", "material", "month"]]
+        .rename(columns={"month": "peak_month"})
+        .reset_index(drop=True)
     )
-    wide = wide.reindex(columns=range(1, 13), fill_value=0.0)
-    wide.columns = [f"month_{m}" for m in range(1, 13)]
-    wide = wide.reset_index()
 
-    # Peak-normalize each row so max == 1.0. Rows whose curve is entirely zero
-    # are filtered out (they carry no signal).
-    month_matrix = wide[SEASONALITY_MONTH_COLUMNS].to_numpy(dtype=float)
-    peaks = month_matrix.max(axis=1)
-    keep_mask = peaks > 0.0
-    wide = wide.loc[keep_mask].reset_index(drop=True)
-    month_matrix = month_matrix[keep_mask]
-    peaks = peaks[keep_mask]
-    wide[SEASONALITY_MONTH_COLUMNS] = month_matrix / peaks[:, None]
-
-    # n_observations = total raw transactions for the combo across all years/months.
-    n_obs = (
-        merged.groupby(["color", "category", "material"])["article_id"]
-        .count()
-        .rename("n_observations")
-        .reset_index()
-    )
-    wide = wide.merge(n_obs, on=SEASONALITY_ID_COLUMNS, how="left")
-    wide["n_observations"] = wide["n_observations"].fillna(0).astype(int)
-
-    return wide[SEASONALITY_TABLE_COLUMNS].copy()
-
-
-def derive_peak_months(seasonality_frame: pd.DataFrame) -> pd.DataFrame:
-    """
-    Pull the peak month (1..12) out of each combo's seasonality curve.
-
-    Returns:
-        DataFrame with columns: color, category, material, peak_month.
-    """
-    month_matrix = seasonality_frame[SEASONALITY_MONTH_COLUMNS].to_numpy(dtype=float)
-    peak_indices = np.argmax(month_matrix, axis=1)
-    peaks = seasonality_frame[SEASONALITY_ID_COLUMNS].copy()
-    peaks["peak_month"] = peak_indices + 1  # convert 0-indexed → 1..12
-    return peaks.reset_index(drop=True)
+    return peak_months
 
 
 # --------------------------------------------------------------------------- #
@@ -413,16 +332,11 @@ def timeframe_from_months(months: int) -> str:
 def build_training_rows(
     peak_months: pd.DataFrame,
     lookup: dict[str, dict[str, float]],
-    seasonality_table: dict,
+    seasonality_table: SeasonalityTable,
 ) -> list[dict[str, Any]]:
     """
     For each (color, category, material) combination × 12 reference months,
-    produce one training row whose features include both today's Google Trends
-    snapshot AND the historical seasonality curve evaluated at that ref_month.
-
-    Crucially, each ref_month yields a DIFFERENT feature row because the
-    seasonality features depend on ref_month — this is what lets the model
-    learn the seasonal pattern instead of collapsing to one prediction per combo.
+    produce one training row with real current features and an H&M-derived label.
     """
     rows: list[dict[str, Any]] = []
     item_index = 0
@@ -441,6 +355,7 @@ def build_training_rows(
                 lookup=lookup,
                 reference_month=ref_month,
                 seasonality_table=seasonality_table,
+                peak_month=int(peak_month),
             )
             months = months_until_peak(peak_month=peak_month, reference_month=ref_month)
             label = timeframe_from_months(months)
@@ -465,36 +380,21 @@ def split_rows(
     rows: list[dict],
     seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Split rows into train/val/test with **combo-level grouping**: every one of
-    a combo's 12 reference-month rows lands in the same split. This prevents
-    leakage where a combo's Jan row is in train and its Feb row is in test —
-    which would let the model trivially memorize per-combo seasonality and
-    inflate val/test metrics far above what it can actually generalize to a
-    brand-new combo at inference time.
-    """
-    all_rows = pd.DataFrame(rows)
-
-    combo_keys = (
-        all_rows[["color", "category", "material"]]
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
     rng = np.random.default_rng(seed)
-    combo_order = rng.permutation(len(combo_keys))
-    shuffled = combo_keys.iloc[combo_order].reset_index(drop=True)
+    indices = rng.permutation(len(rows))
+    n_train = int(len(rows) * TRAIN_FRAC)
+    n_val = int(len(rows) * VAL_FRAC)
 
-    n_train = int(len(shuffled) * TRAIN_FRAC)
-    n_val = int(len(shuffled) * VAL_FRAC)
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train : n_train + n_val]
+    test_idx = indices[n_train + n_val :]
 
-    train_combos = shuffled.iloc[:n_train]
-    val_combos = shuffled.iloc[n_train : n_train + n_val]
-    test_combos = shuffled.iloc[n_train + n_val :]
-
-    def _filter(combos: pd.DataFrame) -> pd.DataFrame:
-        return all_rows.merge(combos, on=["color", "category", "material"], how="inner").reset_index(drop=True)
-
-    return (_filter(train_combos), _filter(val_combos), _filter(test_combos))
+    all_rows = pd.DataFrame(rows)
+    return (
+        all_rows.iloc[train_idx].reset_index(drop=True),
+        all_rows.iloc[val_idx].reset_index(drop=True),
+        all_rows.iloc[test_idx].reset_index(drop=True),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -507,6 +407,7 @@ def main() -> None:
     articles_path = Path(args.articles_path).expanduser().resolve()
     transactions_path = Path(args.transactions_path).expanduser().resolve()
     trend_signals_path = Path(args.trend_signals_path).expanduser().resolve()
+    seasonality_path = Path(args.seasonality_table_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -514,6 +415,7 @@ def main() -> None:
         (articles_path, "articles.csv"),
         (transactions_path, "transactions_train.csv"),
         (trend_signals_path, "trend_signals.csv"),
+        (seasonality_path, "seasonality_table.csv"),
     ]:
         if not path.exists():
             print(f"ERROR: {label} not found at {path}")
@@ -524,6 +426,7 @@ def main() -> None:
         f"  articles:      {articles_path}\n"
         f"  transactions:  {transactions_path}\n"
         f"  trend signals: {trend_signals_path}\n"
+        f"  seasonality:   {seasonality_path}\n"
         f"  output:        {output_dir}"
     )
 
@@ -544,30 +447,21 @@ def main() -> None:
     for ft in ("color", "category", "material"):
         print(f"  {ft}: {attrs[ft].notna().sum():,} / {len(attrs):,} articles mapped")
 
-    print("Computing seasonality curves (~30 seconds)...")
-    seasonality_frame = compute_seasonality_curves(transactions, attrs)
-    print(f"  {len(seasonality_frame):,} unique (color, category, material) combinations")
-
-    seasonality_path = output_dir / "seasonality_table.csv"
-    validated_seasonality = validate_seasonality_frame(seasonality_frame)
-    validated_seasonality.to_csv(seasonality_path, index=False)
-    print(f"  Wrote seasonality_table → {seasonality_path}")
-
-    print("Building seasonality lookup (with backoff levels)...")
-    seasonality_table = build_seasonality_table(validated_seasonality)
-
-    print("Deriving peak months from curves...")
-    peak_months = derive_peak_months(validated_seasonality)
+    print("Computing peak purchase months (~30 seconds)...")
+    peak_months = compute_peak_months(transactions, attrs)
+    print(f"  {len(peak_months):,} unique (color, category, material) combinations")
 
     print("Loading trend signals for current feature scores...")
     trend_frame = load_trend_signals_frame(trend_signals_path)
     lookup = build_trend_lookup(trend_frame)
 
+    print("Loading seasonality curves...")
+    seasonality_table = load_seasonality_table(seasonality_path)
+    print(f"  rows: {len(seasonality_table.frame):,}")
+
     print("Building training rows (12 reference months × each combination)...")
     rows = build_training_rows(
-        peak_months=peak_months,
-        lookup=lookup,
-        seasonality_table=seasonality_table,
+        peak_months=peak_months, lookup=lookup, seasonality_table=seasonality_table
     )
     print(f"  {len(rows):,} total training examples")
 

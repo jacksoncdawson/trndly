@@ -32,7 +32,9 @@ def main() -> None:
         md(
             r"""# Feature processing — univariate + fingerprint training tables
 
-Build **calendar-strict** training rows from the processed monthly cubes on disk (e.g. written or renamed after `1_aggregate_historical.ipynb`):
+Run **`1_aggregate_historical.ipynb`** first; optionally **`1b_scrape_aggregate_live.ipynb`** next to refresh **`trend_signals.csv`** or merge **`live_monthly_*.parquet`** into cubes before this notebook.
+
+Build **calendar-strict** training rows from the processed monthly cubes on disk:
 
 | Part | Input | Output |
 |------|--------|--------|
