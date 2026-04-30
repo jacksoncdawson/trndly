@@ -1,7 +1,7 @@
 """
 Combine per-retailer trend signal files into a single trend_signals.csv.
 
-Each retail scraper (hollister_scraper.py, pacsun_scraper.py, ...) writes its
+Each retail scraper (hollister_scraper.py, gap_scraper.py, ...) writes its
 own output file named `trend_signals_<retailer>.csv` in the synthetic_data
 directory. This script reads every such file, merges the per-(feature_type,
 feature_value) scores across retailers, and writes the canonical
@@ -9,39 +9,47 @@ feature_value) scores across retailers, and writes the canonical
 
 MERGE STRATEGY
 ---------------
-For each (feature_type, feature_value) pair:
-  1. Collect every retailer's `current` score for that pair.
-  2. Drop any score equal to DEFAULT_MISSING_SCORE — those represent
-     "retailer didn't see this value" and just dilute real signal.
-  3. If nothing real is left, fall back to DEFAULT_MISSING_SCORE.
-  4. Otherwise take a (optionally weighted) mean of the surviving scores.
+Each per-retailer CSV stores scores as proportions: score = count / total_items
+for that site. To recover the partner's intended "proportion of that fingerprint
+relative to ALL items scraped this month", the combine step uses a
+size-weighted average where each retailer's weight = total_items it scraped.
 
-WHY AVERAGE (NOT MAX)?
-----------------------
-A value that only one retailer cares about shouldn't dominate the combined
-score — we want something broadly popular to rise. But we also don't want
-a retailer that simply didn't stock the value to push the score toward zero,
-so we treat "missing" as "no information" instead of "score = 0".
+For each (feature_type, feature_value) pair:
+  1. Collect every retailer's `current` score and its weight (total_items).
+  2. Drop any score equal to DEFAULT_MISSING_SCORE — those represent
+     "retailer didn't see this value" and shouldn't dilute real signal.
+  3. If nothing real is left, fall back to DEFAULT_MISSING_SCORE.
+  4. Otherwise take a size-weighted mean:
+       combined = sum(score_i * total_items_i) / sum(total_items_i)
+     which is mathematically equivalent to:
+       combined = sum(raw_count_i) / sum(total_items_i across all retailers)
+
+WEIGHT AUTO-DETECTION
+---------------------
+Each scraper writes a sidecar `trend_signals_<retailer>_meta.json` containing
+`{"total_items": N}`. This script reads those automatically and uses them as
+weights. You can override with explicit --weight flags if needed.
 
 Usage:
-  # Combine every trend_signals_*.csv that exists in the default directory:
+  # Combine every trend_signals_*.csv (weights auto-detected from _meta.json):
   python combine_trend_signals.py
 
   # Explicit input files, custom output:
-  python combine_trend_signals.py \
-      --input trend_signals_hollister.csv \
-      --input trend_signals_pacsun.csv \
+  python combine_trend_signals.py \\
+      --input trend_signals_hollister.csv \\
+      --input trend_signals_gap.csv \\
       --output-path trend_signals.csv
 
-  # Weight retailers differently (same order as --input):
-  python combine_trend_signals.py \
-      --input trend_signals_hollister.csv --weight 1.0 \
-      --input trend_signals_pacsun.csv    --weight 2.0
+  # Override weights manually (same order as --input):
+  python combine_trend_signals.py \\
+      --input trend_signals_hollister.csv --weight 800 \\
+      --input trend_signals_gap.csv       --weight 500
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from pathlib import Path
@@ -100,6 +108,29 @@ def load_retailer_signals(path: Path) -> pd.DataFrame:
     return validated
 
 
+def load_retailer_total_items(csv_path: Path) -> float:
+    """
+    Read total_items from the sidecar _meta.json file written by each scraper.
+
+    Each scraper saves trend_signals_<retailer>_meta.json alongside its CSV
+    with {"total_items": N}. This is used as the size weight so that the
+    combine step is equivalent to pooling raw counts across all retailers and
+    dividing by the grand total.
+
+    Falls back to 1.0 (equal weight) if the sidecar is missing or unreadable.
+    """
+    meta_path = csv_path.with_name(csv_path.stem + "_meta.json")
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            total = float(meta.get("total_items", 0))
+            if total > 0:
+                return total
+        except Exception:
+            pass
+    return 1.0
+
+
 # --------------------------------------------------------------------------- #
 # Merging                                                                       #
 # --------------------------------------------------------------------------- #
@@ -111,9 +142,22 @@ def combine_signals(
     """
     Combine per-retailer frames into one canonical trend_signals frame.
 
-    `weights[i]` corresponds to `per_retailer[i]`. When omitted, every
-    retailer gets weight 1.0 (plain mean across retailers that actually
-    saw the value).
+    `weights[i]` is the total number of items retailer i scraped. The
+    combined score for each (feature_type, feature_value) is:
+
+        combined = sum(raw_count_i) / grand_total
+
+    where raw_count_i = score_i * total_items_i  (recovering the count
+    from the per-site proportion) and grand_total = sum(total_items_i).
+
+    This is equivalent to: pool all raw counts across every retailer, then
+    divide by the total number of items scraped across all sites this run.
+
+    A retailer that didn't see a value contributes 0 to the numerator but
+    its item count still goes into the denominator — correctly reducing the
+    combined proportion if most of the market isn't carrying that value.
+
+    When weights are omitted every retailer gets weight 1.0 (equal size).
     """
     if not per_retailer:
         raise ValueError("combine_signals: no input frames provided.")
@@ -126,48 +170,43 @@ def combine_signals(
             f"{len(weights)} weights (they must match 1:1)."
         )
 
-    # Tag every row with the retailer's weight so we can groupby later.
-    tagged = []
-    for frame, weight in zip(per_retailer, weights):
-        tmp = frame.copy()
-        tmp["_weight"] = float(weight)
-        tagged.append(tmp)
-    stacked = pd.concat(tagged, ignore_index=True)
+    grand_total = sum(weights)
 
-    # Drop default-score rows. A retailer that wrote DEFAULT_MISSING_SCORE
-    # didn't see this value at all and shouldn't drag the combined score
-    # toward zero. We use math.isclose to be safe against CSV rounding.
     def _is_real(score: float) -> bool:
+        """True when the score is a real observation, not a missing-value fill."""
         return not math.isclose(
             float(score), DEFAULT_MISSING_SCORE,
             rel_tol=0.0, abs_tol=1e-9,
         )
-    real = stacked[stacked["current"].apply(_is_real)].copy()
 
-    # Weighted mean per (feature_type, feature_value) across retailers
-    # that did see the value. Pandas lets us do this as:
-    #     sum(current * weight) / sum(weight)
-    if not real.empty:
-        real["_num"] = real["current"].astype(float) * real["_weight"]
-        grouped = real.groupby(["feature_type", "feature_value"], as_index=False).agg(
-            _num=("_num", "sum"),
-            _den=("_weight", "sum"),
+    # Recover raw counts from each retailer's proportions.
+    # DEFAULT_MISSING_SCORE rows contribute 0 to the numerator
+    # (that retailer simply didn't carry the value).
+    tagged = []
+    for frame, total_items in zip(per_retailer, weights):
+        tmp = frame.copy()
+        tmp["_raw_count"] = tmp["current"].apply(
+            lambda s: float(s) * float(total_items) if _is_real(s) else 0.0
         )
-        grouped["current"] = (grouped["_num"] / grouped["_den"]).round(6)
-        combined_real = grouped[["feature_type", "feature_value", "current"]]
-    else:
-        combined_real = pd.DataFrame(columns=TREND_SIGNAL_COLUMNS)
+        tagged.append(tmp)
 
-    # Any (feature_type, feature_value) that only ever appeared as a
-    # DEFAULT_MISSING_SCORE still needs a row so downstream consumers
-    # see the full key space. Re-introduce those with the default score.
-    all_keys = stacked[["feature_type", "feature_value"]].drop_duplicates()
-    merged = all_keys.merge(
-        combined_real, on=["feature_type", "feature_value"], how="left"
-    )
-    merged["current"] = merged["current"].fillna(DEFAULT_MISSING_SCORE).round(6)
+    stacked = pd.concat(tagged, ignore_index=True)
 
-    return merged[TREND_SIGNAL_COLUMNS].sort_values(
+    # Sum raw counts across retailers, then divide by grand total.
+    grouped = stacked.groupby(
+        ["feature_type", "feature_value"], as_index=False
+    ).agg(_total_raw=("_raw_count", "sum"))
+    grouped["current"] = (grouped["_total_raw"] / grand_total).round(6)
+    combined = grouped[["feature_type", "feature_value", "current"]]
+
+    # Any value whose combined score rounds to DEFAULT_MISSING_SCORE or
+    # below gets clamped to DEFAULT_MISSING_SCORE so downstream consumers
+    # always see a consistent floor.
+    combined["current"] = combined["current"].apply(
+        lambda s: DEFAULT_MISSING_SCORE if s <= DEFAULT_MISSING_SCORE else s
+    ).round(6)
+
+    return combined[TREND_SIGNAL_COLUMNS].sort_values(
         ["feature_type", "feature_value"]
     ).reset_index(drop=True)
 
@@ -236,29 +275,38 @@ def main() -> None:
         )
         sys.exit(1)
 
-    print("Combining trend signal files:")
-    for path in input_paths:
-        print(f"  - {path}")
-    print(f"Output → {output_path}\n")
+    # Determine weights: explicit --weight flags override auto-detection.
+    use_manual_weights = bool(args.weight)
 
+    print("Combining trend signal files:")
     per_retailer: list[pd.DataFrame] = []
+    auto_weights: list[float] = []
+    loaded_paths: list[Path] = []
+
     for path in input_paths:
         if not path.exists():
             print(f"  WARNING: missing file, skipping: {path}")
             continue
         frame = load_retailer_signals(path)
         real_values = (frame["current"] != DEFAULT_MISSING_SCORE).sum()
+        total_items = load_retailer_total_items(path)
+        weight_src = "manual" if use_manual_weights else f"meta ({int(total_items)} items)"
         print(
             f"  loaded {len(frame):>3} rows "
-            f"({real_values} non-default) from {path.name}"
+            f"({real_values} non-default)  weight={weight_src}  ← {path.name}"
         )
         per_retailer.append(frame.drop(columns=["source"]))
+        auto_weights.append(total_items)
+        loaded_paths.append(path)
+
+    print(f"\nOutput → {output_path}\n")
 
     if not per_retailer:
         print("ERROR: no valid retailer files loaded.")
         sys.exit(1)
 
-    combined = combine_signals(per_retailer, weights=args.weight)
+    weights_to_use = args.weight if use_manual_weights else auto_weights
+    combined = combine_signals(per_retailer, weights=weights_to_use)
     validated = validate_trend_signals_frame(combined)
     validated.to_csv(output_path, index=False)
 

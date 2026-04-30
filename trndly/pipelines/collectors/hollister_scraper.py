@@ -46,6 +46,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -984,6 +985,10 @@ def main() -> None:
     validated = validate_trend_signals_frame(frame)
     validated.to_csv(output_path, index=False)
     print(f"\nWrote {len(validated)} rows → {output_path}")
+
+    meta_path = output_path.with_name(output_path.stem + "_meta.json")
+    meta_path.write_text(json.dumps({"total_items": len(titles)}, indent=2))
+    print(f"Wrote metadata   → {meta_path}")
 
 
 if __name__ == "__main__":
