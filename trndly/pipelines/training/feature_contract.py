@@ -255,16 +255,16 @@ def compute_feature_scores(item: Mapping[str, object],
 def item_to_feature_row(item: Mapping[str, object],
                         lookup: TrendLookup) -> dict[str, float]:
     """
-        Thin wrapper over `compute_feature_scores`. Exists so that if we ever want
-        to add extra engineered features later, callers already go through this
-        "item -> feature row" function.
+    Thin wrapper over `compute_feature_scores`. Exists so that if we ever want
+    to add extra engineered features later, callers already go through this
+    "item -> feature row" function.
 
-        Args:
-            item: A dictionary-like object with keys `color`, `category`, `material`.
-            lookup: A TrendLookup dictionary.
+    Args:
+        item: A dictionary-like object with keys `color`, `category`, `material`.
+        lookup: A TrendLookup dictionary.
 
-        Returns:
-            A dictionary with keys `color_current`, `category_current`, `material_current`, `avg_current`.
+    Returns:
+        A dictionary with keys `color_current`, `category_current`, `material_current`, `avg_current`.
     """
     return compute_feature_scores(item=item, lookup=lookup)
 
