@@ -1,25 +1,54 @@
 """
-Feature contract for the trndly timing model.
+Training + inference contract for the listing timeframe classifier.
 
-This module is the single source of truth for how raw trend data and raw
-item data get turned into the numeric feature vector the model consumes, 
-and for the label space the model predicts over. 
+Consumes rows shaped like ``trend_signals.csv`` (feature_type × feature_value × time-window scores),
+joins optional historical seasonality curves from ``seasonality_table.csv``, and emits the fixed-width
+numeric vector expected by ``RandomForestClassifier`` models logged via MLflow.
 
-Every other piece of the training and serving pipeline (data prep, training,
-inference, scoring APIs) imports from here so the shape of the data stays
-consistent end to end.
+This module also exposes helpers reused by ``hmn_seasonal_processor.py`` (flat ``build_trend_lookup``)
+and ``scheduleServer.py`` (nested ``load_trend_lookup`` + ``build_feature_frame``).
 """
 
-# imports 
 from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Iterable, Mapping
+
+import numpy as np
 import pandas as pd
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-# The five time windows the model can predict
-# labels the model chooses between when answering "when will this item peak?".
-TIMEFRAMES: list[str] = [
+TIMEFRAMES: tuple[str, ...] = ("current", "next_week", "next_month", "three_months", "six_months")
+
+FEATURE_VECTOR_COLUMNS: list[str] = [
+    "color_current",
+    "category_current",
+    "material_current",
+    "avg_current",
+    "season_plus_0",
+    "season_plus_1",
+    "season_plus_2",
+    "season_plus_3",
+    "season_plus_6",
+    "months_until_peak",
+    "months_since_peak",
+    "sin_month",
+    "cos_month",
+]
+
+TARGET_COLUMN_DEFAULT: str = "best_timeframe"
+
+DEFAULT_MISSING_SCORE: float = 0.0
+
+TREND_SIGNAL_COLUMNS: list[str] = [
+    "feature_type",
+    "feature_value",
     "current",
     "next_week",
     "next_month",
@@ -27,312 +56,222 @@ TIMEFRAMES: list[str] = [
     "six_months",
 ]
 
-# The three attributes of an item the model cares about (inputs)
-FEATURE_TYPES: list[str] = ["color", "category", "material"]
+# Keys for ``feature_type`` in ``trend_signals*.csv`` rows (retail scrapers iterate these buckets).
+FEATURE_TYPES: tuple[str, ...] = ("color", "category", "material")
 
-# The fields a user-supplied item is expected to have (item name and three feature types)
-USER_ITEM_FIELDS: list[str] = ["item_name", *FEATURE_TYPES]
-
-# The name of the column in the training CSV that holds the correct answer (label)
-TARGET_COLUMN_DEFAULT = "best_timeframe"
-
-# The two identifier columns in the trend-signals CSV. Every row of that CSV.
-TREND_SIGNAL_ID_COLUMNS = ["feature_type", "feature_value"]
-
-# The full set of required columns in the trend-signals CSV: the two IDs
-# above plus a `current` column holding today's trend score.
-TREND_SIGNAL_COLUMNS: list[str] = [*TREND_SIGNAL_ID_COLUMNS, "current"]
-
-# Fallback score used whenever a feature value is missing from the trend table
-DEFAULT_MISSING_SCORE = 0.05
-
-# The model takes one current trend score per feature type plus their average.
-# Inputs are only what is known right now — the model predicts future timing.
-FEATURE_VECTOR_COLUMNS: list[str] = [
-    "color_current",
-    "category_current",
-    "material_current",
-    "avg_current",
-]
-
-# {feature_type: {feature_value: current_score}}
-# A type alias describing the shape of our in-memory trend lookup table.
-# Example:
-#   {
-#     "color":    {"red": 0.82, "blue": 0.31, ...},
-#     "category": {"dress": 0.67, "jacket": 0.44, ...},
-#     "material": {"denim": 0.51, "silk": 0.22, ...},
-#   }
-TrendLookup = dict[str, dict[str, float]]
+TrendLookup = dict[str, dict[str, dict[str, float]]]
+FlatTrendLookup = dict[str, dict[str, float]]
 
 
-def normalize_token(value: object) -> str:
-    """
-        Takes any value (string, number, None, etc.), turns it into a string,
-        trims surrounding whitespace, and lowercases it. 
+@dataclass
+class SeasonalityTable:
+    """12-month curves keyed by normalized ``(color, category, material)`` tuples."""
 
-        Args:
-            value: Any value (string, number, None, etc.)
+    frame: pd.DataFrame
 
-        Returns:
-            A normalized string.
-    """
+    def curve(self, color: str, category: str, material: str) -> np.ndarray:
+        c = normalize_token(color)
+        cat = normalize_token(category)
+        m = normalize_token(material)
+        row = self.frame[
+            (self.frame["color"] == c)
+            & (self.frame["category"] == cat)
+            & (self.frame["material"] == m)
+        ]
+        if row.empty:
+            return np.full(12, DEFAULT_MISSING_SCORE, dtype=float)
+        cols = [f"month_{i}" for i in range(1, 13)]
+        return row.iloc[0][cols].to_numpy(dtype=float)
+
+    def peak_month(self, color: str, category: str, material: str) -> int:
+        series = self.curve(color, category, material)
+        return int(np.argmax(series) + 1)
+
+
+def normalize_token(value: Any) -> str:
+    """Trim + lowercase arbitrary user/system tokens."""
+    if value is None:
+        return "none"
     return str(value).strip().lower()
 
 
-
 def validate_trend_signals_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """
-        Takes a raw pandas DataFrame loaded from the trend-signals CSV and returns
-        a cleaned-up version we can safely use. Raises `ValueError` if the data is
-        unusable (empty, missing columns, nothing left after filtering).
-
-        Args:
-            frame: A pandas DataFrame loaded from the trend-signals CSV.
-
-        Returns:
-            A cleaned-up pandas DataFrame.
-    """
-    # check if the frame is empty - rasie ValueError 
+    required = {"feature_type", "feature_value", "current"}
+    missing_cols = required - set(frame.columns)
     if frame.empty:
-        raise ValueError("Trend signals dataset is empty.")
+        raise ValueError("trend_signals frame is empty")
+    if missing_cols:
+        raise ValueError(f"trend_signals frame missing columns: {sorted(missing_cols)}")
 
-    # Check that frame has required cols 
-    missing_columns = [column for column in TREND_SIGNAL_COLUMNS if column not in frame.columns]
-    if missing_columns:
-        raise ValueError(
-            "Trend signals dataset is missing required columns: "
-            f"{missing_columns}. Required: {TREND_SIGNAL_COLUMNS}."
-        )
+    cleaned = frame.copy()
+    for col in TIMEFRAMES:
+        if col not in cleaned.columns:
+            cleaned[col] = cleaned["current"]
 
-    # Keep only the columns we care about
-    validated = frame[TREND_SIGNAL_COLUMNS].copy()
-
-    # Normalize the two identifier columns
-    validated["feature_type"] = validated["feature_type"].map(normalize_token)
-    validated["feature_value"] = validated["feature_value"].map(normalize_token)
-
-    # Drop any rows whose `feature_type` isn't one of the supported feature types
-    validated = validated[validated["feature_type"].isin(FEATURE_TYPES)].copy()
-    if validated.empty:
-        # Everything got filtered out — now empty - value error 
-        raise ValueError(
-            f"No rows left after filtering to supported feature types: {FEATURE_TYPES}."
-        )
-
-    # Clean up the numeric `current` column - turns the column into floats
-    # replaces anything unparseable with NaN (0.05) and clips to [0, 1]
-    validated["current"] = (
-        pd.to_numeric(validated["current"], errors="coerce")
-        .fillna(DEFAULT_MISSING_SCORE)
-        .clip(lower=0.0, upper=1.0)
-    )
-
-    # keep last occurrence of same (feature_type, feature_value) pair
-    validated = validated.drop_duplicates(
-        subset=["feature_type", "feature_value"],
-        keep="last",
-    )
-    return validated
+    cleaned = cleaned[TREND_SIGNAL_COLUMNS].copy()
+    score_cols = [c for c in TIMEFRAMES]
+    cleaned[score_cols] = cleaned[score_cols].astype(float).clip(0.0, 1.0)
+    cleaned["feature_type"] = cleaned["feature_type"].astype(str).str.strip().str.lower()
+    cleaned["feature_value"] = cleaned["feature_value"].astype(str).map(normalize_token)
+    return cleaned
 
 
-def load_trend_signals_frame(csv_path: str | Path) -> pd.DataFrame:
-    """
-        Reads a trend-signals CSV from disk and returns a validated DataFrame.
-        Accepts either a plain string path or a `Path` object.
-
-        Args:
-            csv_path: A string path or `Path` object to the trend-signals CSV.
-
-        Returns:
-            A validated pandas DataFrame.
-    """
-    path = Path(csv_path).expanduser().resolve()
-    # Load the CSV into a DataFrame (pandas infers types per column).
-    frame = pd.read_csv(path)
-    return validate_trend_signals_frame(frame)
+def load_trend_signals_frame(path: str | Path) -> pd.DataFrame:
+    raw = pd.read_csv(path)
+    return validate_trend_signals_frame(raw)
 
 
+def build_trend_lookup(trend_frame: pd.DataFrame) -> FlatTrendLookup:
+    """Flatten ``current`` scores for ``item_to_feature_row`` inside ``hmn_seasonal_processor``."""
 
-def build_trend_lookup(frame: pd.DataFrame) -> TrendLookup:
-    """
-        Turns a validated DataFrame into the nested-dict `TrendLookup` structure
-        defined above. This is the form the rest of the code uses to look up
-        trend scores by (feature_type, feature_value).
-
-        Args:
-            frame: A validated pandas DataFrame.
-
-        Returns:
-            A nested-dict `TrendLookup` structure.
-    """
-    # validate the frame again
-    validated = validate_trend_signals_frame(frame)
-
-    # Start with one empty inner dict per supported feature type
-    lookup: TrendLookup = {feature_type: {} for feature_type in FEATURE_TYPES}
-
-    for row in validated.itertuples(index=False):
-        # `getattr(row, "x")` pulls the value of column `x` off the tuple.
-        feature_type = getattr(row, "feature_type")
-        feature_value = getattr(row, "feature_value")
-        # Store the score keyed by (feature_type, feature_value)
-        lookup[feature_type][feature_value] = float(getattr(row, "current"))
-
+    df = validate_trend_signals_frame(trend_frame)
+    lookup: FlatTrendLookup = {}
+    for _, row in df.iterrows():
+        ft = str(row["feature_type"])
+        fv = str(row["feature_value"])
+        lookup.setdefault(ft, {})[fv] = float(row["current"])
     return lookup
 
 
-def load_trend_lookup(csv_path: str | Path) -> TrendLookup:
-    """
-        Convenience wrapper: read a CSV from disk and return a ready-to-use lookup
-        table in one call. Combines `load_trend_signals_frame` + `build_trend_lookup`.
+def load_trend_lookup(path: str | Path) -> TrendLookup:
+    """Nested lookup used by FastAPI ``/options`` + inference utilities."""
 
-    Args:
-        csv_path: A string path or `Path` object to the trend-signals CSV.
-
-    Returns:
-        A ready-to-use lookup table.
-    """
-    return build_trend_lookup(load_trend_signals_frame(csv_path))
-
-
-def _lookup_current_score(feature_type: str,
-                          feature_value: object,
-                          lookup: TrendLookup) -> float:
-    """
-    Private helper. Given a feature type ("color"), a feature value ("red"),
-    and a lookup table, returns the current trend score. Falls back to
-    `DEFAULT_MISSING_SCORE` if either the type or the value isn't in the table.
-
-    Args:
-        feature_type: A string representing the feature type.
-        feature_value: A string representing the feature value.
-        lookup: A TrendLookup dictionary.
-
-    Returns:
-        A float representing the current trend score.
-    """
-    # Normalize both inputs
-    normalized_type = normalize_token(feature_type)
-    normalized_value = normalize_token(feature_value)
-
-    feature_bucket = lookup.get(normalized_type, {})
-    # return the score, or the default if value isn't on record.
-    return float(feature_bucket.get(normalized_value, DEFAULT_MISSING_SCORE))
+    df = load_trend_signals_frame(path)
+    nested: TrendLookup = {}
+    for _, row in df.iterrows():
+        ft = str(row["feature_type"])
+        fv = str(row["feature_value"])
+        bucket = nested.setdefault(ft, {}).setdefault(fv, {})
+        for tf in TIMEFRAMES:
+            bucket[tf] = float(row[tf])
+    return nested
 
 
+def load_seasonality_table(path: str | Path) -> SeasonalityTable:
+    tbl = pd.read_csv(path)
+    for col in ("color", "category", "material"):
+        tbl[col] = tbl[col].astype(str).map(normalize_token)
+    return SeasonalityTable(frame=tbl)
 
-def compute_feature_scores(item: Mapping[str, object],
-                           lookup: TrendLookup) -> dict[str, float]:
-    """
-        Returns the current trend score for each feature type and their average.
-        Keys: color_current, category_current, material_current, avg_current.
 
-        Args:
-            item: A dictionary-like object with keys `color`, `category`, `material`.
-            lookup: A TrendLookup dictionary.
+def prepare_training_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    for col in FEATURE_VECTOR_COLUMNS:
+        if col not in out.columns:
+            out[col] = DEFAULT_MISSING_SCORE
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(DEFAULT_MISSING_SCORE)
+    return out
 
-        Returns:
-            A dictionary with keys `color_current`, `category_current`, `material_current`, `avg_current`.
-    """
-    scores: dict[str, float] = {}
-    total = 0.0
-    # Walk through the three feature types in the fixed order
-    for feature_type in FEATURE_TYPES:
-        score = _lookup_current_score(
-            feature_type=feature_type,
-            feature_value=item.get(feature_type, ""),
-            lookup=lookup,
+
+def _nested_score(lookup: Mapping[str, Any], feature_type: str, token: str, timeframe: str) -> float:
+    tok = normalize_token(token)
+    node = lookup.get(feature_type, {}).get(tok)
+    if node is None:
+        return DEFAULT_MISSING_SCORE
+    if isinstance(node, Mapping):
+        return float(node.get(timeframe, DEFAULT_MISSING_SCORE))
+    if timeframe == "current":
+        return float(node)
+    return DEFAULT_MISSING_SCORE
+
+
+def months_since_peak(*, peak_month: int, reference_month: int) -> int:
+    return (reference_month - peak_month) % 12
+
+
+def months_until_peak(*, peak_month: int, reference_month: int) -> int:
+    return (peak_month - reference_month) % 12
+
+
+def item_to_feature_row(
+    *,
+    item: Mapping[str, Any],
+    lookup: Mapping[str, Any],
+    reference_month: int,
+    seasonality_table: SeasonalityTable,
+    peak_month: int | None = None,
+) -> dict[str, float]:
+    """Emit one dictionary aligned with ``FEATURE_VECTOR_COLUMNS``."""
+
+    color = normalize_token(item.get("color"))
+    category = normalize_token(item.get("category"))
+    material = normalize_token(item.get("material"))
+
+    color_current = _nested_score(lookup, "color", color, "current")
+    category_current = _nested_score(lookup, "category", category, "current")
+    material_current = _nested_score(lookup, "material", material, "current")
+    avg_current = float(np.mean([color_current, category_current, material_current]))
+
+    curve = seasonality_table.curve(color, category, material)
+    peak = int(peak_month or seasonality_table.peak_month(color, category, material))
+
+    ref = int(reference_month)
+    mu_peak = months_until_peak(peak_month=peak, reference_month=ref)
+    ms_peak = months_since_peak(peak_month=peak, reference_month=ref)
+
+    def month_value(offset: int) -> float:
+        idx = (ref - 1 + offset) % 12
+        return float(curve[idx])
+
+    theta = 2.0 * math.pi * ref / 12.0
+    sin_month = float(math.sin(theta))
+    cos_month = float(math.cos(theta))
+
+    return {
+        "color_current": color_current,
+        "category_current": category_current,
+        "material_current": material_current,
+        "avg_current": avg_current,
+        "season_plus_0": month_value(0),
+        "season_plus_1": month_value(1),
+        "season_plus_2": month_value(2),
+        "season_plus_3": month_value(3),
+        "season_plus_6": month_value(6),
+        "months_until_peak": float(mu_peak),
+        "months_since_peak": float(ms_peak),
+        "sin_month": sin_month,
+        "cos_month": cos_month,
+    }
+
+
+def build_feature_frame(
+    items: Iterable[Mapping[str, Any]],
+    lookup: Mapping[str, Any],
+    *,
+    reference_month: int | None = None,
+    seasonality_table: SeasonalityTable | None = None,
+) -> pd.DataFrame:
+    """Vectorize ``item_to_feature_row`` for sklearn/pyfunc inference."""
+
+    ref = reference_month or datetime.now().month
+    if seasonality_table is None:
+        raise ValueError("seasonality_table is required for build_feature_frame")
+
+    rows: list[dict[str, float]] = []
+    for raw in items:
+        rows.append(
+            item_to_feature_row(
+                item=raw,
+                lookup=lookup,
+                reference_month=ref,
+                seasonality_table=seasonality_table,
+            )
         )
-        # Store the individual score under e.g. "color_current", rounded 
-        scores[f"{feature_type}_current"] = round(score, 6)
-        total += score
-    # The fourth feature: the arithmetic mean of the three scores above.
-    scores["avg_current"] = round(total / len(FEATURE_TYPES), 6)
-    return scores
-
-
-def item_to_feature_row(item: Mapping[str, object],
-                        lookup: TrendLookup) -> dict[str, float]:
-    """
-    Thin wrapper over `compute_feature_scores`. Exists so that if we ever want
-    to add extra engineered features later, callers already go through this
-    "item -> feature row" function.
-
-    Args:
-        item: A dictionary-like object with keys `color`, `category`, `material`.
-        lookup: A TrendLookup dictionary.
-
-    Returns:
-        A dictionary with keys `color_current`, `category_current`, `material_current`, `avg_current`.
-    """
-    return compute_feature_scores(item=item, lookup=lookup)
-
-
-
-def build_feature_frame(items: Sequence[Mapping[str, object]],
-                        lookup: TrendLookup) -> pd.DataFrame:
-    """
-        Turns a list of items into a DataFrame ready to feed the model. Each row
-        is one item's feature vector; columns are exactly `FEATURE_VECTOR_COLUMNS`.
-
-        Args:
-            items: A list of dictionary-like objects with keys `color`, `category`, `material`.
-            lookup: A TrendLookup dictionary.
-        """
-    # compute the feature row dict for each item.
-    rows = [item_to_feature_row(item=item, lookup=lookup) for item in items]
-    if not rows:
-        return pd.DataFrame(columns=FEATURE_VECTOR_COLUMNS)
-    # Build the DataFrame from the list of dicts
     frame = pd.DataFrame(rows)
-    # ensure correct format
-    return frame.reindex(columns=FEATURE_VECTOR_COLUMNS, fill_value=DEFAULT_MISSING_SCORE)
+    return frame[FEATURE_VECTOR_COLUMNS]
 
 
-def prepare_training_frame(frame: pd.DataFrame,
-                           target_column: str = TARGET_COLUMN_DEFAULT) -> pd.DataFrame:
-    """
-        Validates and cleans a training DataFrame (features + label column) before
-        it's handed off to the model-training code. `target_column` defaults to
-        "best_timeframe" but callers can override it if their CSV uses a different
-        label column name.
+def compute_feature_scores(*, item: Mapping[str, Any], lookup: TrendLookup) -> dict[str, float]:
+    """Human-readable breakdown for the demo UI."""
 
-        Args:
-            frame: A pandas DataFrame containing the training data.
-            target_column: The name of the label column in the training data.
-
-        Returns:
-            A cleaned pandas DataFrame ready for model training.
-    """
-    # The training CSV must contain the four feature columns AND the label col
-    required_columns = [*FEATURE_VECTOR_COLUMNS, target_column]
-    missing_columns = [column for column in required_columns if column not in frame.columns]
-    if missing_columns:
-        raise ValueError(
-            "Training dataset is missing required columns: "
-            f"{missing_columns}. Required feature columns are {FEATURE_VECTOR_COLUMNS}."
-        )
-
-    # Keep only the columns we need
-    prepared = frame[required_columns].copy()
-    # Clean each feature column
-    for feature_name in FEATURE_VECTOR_COLUMNS:
-        prepared[feature_name] = (
-            pd.to_numeric(prepared[feature_name], errors="coerce")
-            .fillna(DEFAULT_MISSING_SCORE)
-            .clip(lower=0.0, upper=1.0)
-        )
-
-    # Normalize the label column
-    prepared[target_column] = prepared[target_column].map(normalize_token)
-    # Drop any row whose label isn't one of the five supported timeframes.
-    prepared = prepared[prepared[target_column].isin(TIMEFRAMES)].copy()
-    if prepared.empty:
-        # Every row got filtered out — error 
-        raise ValueError(
-            "No valid training rows after filtering labels to supported timeframes: "
-            f"{TIMEFRAMES}."
-        )
-    # Return the cleaned, label-filtered frame ready for model training.
-    return prepared
+    scores: dict[str, float] = {}
+    for ft in ("color", "category", "material"):
+        tok = normalize_token(item.get(ft))
+        node = lookup.get(ft, {}).get(tok, {})
+        for tf in TIMEFRAMES:
+            scores[f"{ft}_{tf}"] = float(node.get(tf, DEFAULT_MISSING_SCORE))
+        scores[f"{ft}_current"] = float(node.get("current", DEFAULT_MISSING_SCORE))
+    scores["avg_current"] = float(
+        np.mean([scores["color_current"], scores["category_current"], scores["material_current"]])
+    )
+    return scores

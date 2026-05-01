@@ -1,0 +1,16 @@
+creation_timestamp: 1777569473855
+current_stage: None
+deployment_job_state: null
+description: null
+last_updated_timestamp: 1777569473855
+model_id: m-4ef3dff2158f477ba940c243868eb997
+name: trndly_univariate
+run_id: 23dc31bff170418a892c0d78cb82c556
+run_link: null
+source: models:/m-4ef3dff2158f477ba940c243868eb997
+status: READY
+status_message: null
+storage_location: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/models/m-4ef3dff2158f477ba940c243868eb997/artifacts
+user_id: null
+version: 2
+workspace: default

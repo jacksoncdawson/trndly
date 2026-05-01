@@ -5,12 +5,16 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 import mlflow
+import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from mlflow.tracking import MlflowClient
 from pydantic import BaseModel, Field, field_validator
 
@@ -22,13 +26,27 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 # Local imports
+from pipelines.serving.text_forecast import (
+    ForecastDeps,
+    forecast_from_text,
+    load_forecast_pair,
+)
 from pipelines.training.feature_contract import (
     TIMEFRAMES,
-    TrendLookup,
+    SeasonalityTable,
     build_feature_frame,
     compute_feature_scores,
+    load_seasonality_table,
     load_trend_lookup,
     normalize_token,
+)
+from pipelines.training.paths import (
+    FRONTEND_DIR,
+    LOOKUP_CSV,
+    MONTHLY_FINGERPRINT_PARQUET,
+    MONTHLY_UNIVARIATE_PARQUET,
+    SEASONALITY_TABLE_CSV as DEFAULT_SEASONALITY_TABLE_PATH,
+    TREND_SIGNALS_CSV as DEFAULT_TREND_SIGNALS_PATH,
 )
 
 # ENV VARIABLES
@@ -37,16 +55,22 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
 MLFLOW_MODEL_URI = os.getenv("MLFLOW_MODEL_URI")
-DEFAULT_TREND_SIGNALS_PATH = (
-    PROJECT_ROOT / "pipelines" / "training" / "synthetic_data" / "trend_signals.csv"
+MLFLOW_FORECAST_MODEL_URI = os.getenv(
+    "MLFLOW_FORECAST_MODEL_URI", "models:/trndly_fingerprint@candidate"
 )
-_configured_trend_signals_path = Path(
-    os.getenv("TREND_SIGNALS_PATH", str(DEFAULT_TREND_SIGNALS_PATH))
-).expanduser()
-TREND_SIGNALS_PATH = (
-    _configured_trend_signals_path
-    if _configured_trend_signals_path.is_absolute()
-    else (SERVICE_DIR / _configured_trend_signals_path).resolve()
+MLFLOW_UNIVARIATE_FORECAST_MODEL_URI = os.getenv(
+    "MLFLOW_UNIVARIATE_FORECAST_MODEL_URI", "models:/trndly_univariate@candidate"
+)
+
+
+def _resolve_configured_path(env_var: str, default: Path) -> Path:
+    configured = Path(os.getenv(env_var, str(default))).expanduser()
+    return configured if configured.is_absolute() else (SERVICE_DIR / configured).resolve()
+
+
+TREND_SIGNALS_PATH = _resolve_configured_path("TREND_SIGNALS_PATH", DEFAULT_TREND_SIGNALS_PATH)
+SEASONALITY_TABLE_PATH = _resolve_configured_path(
+    "SEASONALITY_TABLE_PATH", DEFAULT_SEASONALITY_TABLE_PATH
 )
 
 
@@ -80,8 +104,23 @@ class TrendState:
         return self.lookup is not None
 
 
+@dataclass
+class SeasonalityState:
+    table: Optional[SeasonalityTable] = None
+    source_path: Optional[str] = None
+    error: Optional[str] = None
+
+    @property
+    def loaded(self) -> bool:
+        return self.table is not None
+
+
 MODEL_STATE = ModelState()
 TREND_STATE = TrendState(source_path=str(TREND_SIGNALS_PATH))
+SEASONALITY_STATE = SeasonalityState(source_path=str(SEASONALITY_TABLE_PATH))
+
+FORECAST_DEPS: ForecastDeps | None = None
+FORECAST_LOAD_ERROR: str | None = None
 
 
 # --- FASTAPI APP ---
@@ -89,7 +128,9 @@ TREND_STATE = TrendState(source_path=str(TREND_SIGNALS_PATH))
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     reload_trend_data()
+    reload_seasonality_table()
     reload_model()
+    reload_forecast_bundle()
     yield
 
 
@@ -108,14 +149,21 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     trend_data_loaded: bool
-    tracking_uri: str
-    configured_model_uri: str
+    seasonality_table_loaded: bool
+    forecast_catalog_loaded: bool = False
+    forecast_catalog_error: Optional[str] = None
+    forecast_model_uri: Optional[str] = None
+    forecast_univariate_uri: Optional[str] = None
+    tracking_uri: Optional[str]
+    configured_model_uri: Optional[str]
     configured_trend_data_path: str
+    configured_seasonality_table_path: str
     active_model_uri: Optional[str]
     model_version: Optional[str]
     run_id: Optional[str]
     error: Optional[str]
     trend_error: Optional[str]
+    seasonality_error: Optional[str]
 
 
 class PredictRequest(BaseModel):
@@ -123,6 +171,9 @@ class PredictRequest(BaseModel):
     color: str = Field(min_length=1, max_length=40)
     category: str = Field(min_length=1, max_length=40)
     material: str = Field(min_length=1, max_length=40)
+    # Optional "as-of" month (1-12). If omitted, the server uses the current
+    # calendar month — i.e. "what's the best listing timeframe if I list today?".
+    reference_month: Optional[int] = Field(default=None, ge=1, le=12)
 
     @field_validator("item_name", "color", "category", "material")
     @classmethod
@@ -136,22 +187,52 @@ class PredictRequest(BaseModel):
 class PredictResponse(BaseModel):
     item_name: str
     best_timeframe: str
+    reference_month: int
     feature_scores: dict[str, float]
     model_loaded: bool
     model_uri: Optional[str]
     run_id: Optional[str]
 
 
+class ForecastTextRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=280)
+    reference_month: Optional[int] = Field(default=None, ge=1, le=12)
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, value: str) -> str:
+        return value.strip()
+
+
+class ForecastTextResponse(BaseModel):
+    query: str
+    resolved_dimensions: dict[str, int]
+    anchor_month: str
+    reference_month_of_year_used: int
+    mode: str
+    fingerprint_matches: int
+    fingerprint_keys_sample: list[list[int]]
+    forecast: dict[str, float]
+    horizons: list[str]
+    fallback_dimension: Optional[str] = None
+    fallback_level_id: Optional[int] = None
+
+
 class ReloadModelResponse(BaseModel):
     loaded: bool
     trend_data_loaded: bool
-    configured_model_uri: str
+    seasonality_table_loaded: bool
+    forecast_catalog_loaded: bool = False
+    forecast_catalog_error: Optional[str] = None
+    configured_model_uri: Optional[str]
     configured_trend_data_path: str
+    configured_seasonality_table_path: str
     active_model_uri: Optional[str]
     model_version: Optional[str]
     run_id: Optional[str]
     error: Optional[str]
     trend_error: Optional[str]
+    seasonality_error: Optional[str]
 
 
 def _parse_registry_alias_uri(model_uri: str) -> tuple[Optional[str], Optional[str]]:
@@ -237,9 +318,85 @@ def reload_trend_data() -> TrendState:
         return TREND_STATE
 
 
-def _predict_timeframe(payload: PredictRequest) -> tuple[str, dict[str, float]]:
+def reload_seasonality_table() -> SeasonalityState:
+    global SEASONALITY_STATE
+
+    try:
+        table = load_seasonality_table(SEASONALITY_TABLE_PATH)
+        SEASONALITY_STATE = SeasonalityState(
+            table=table,
+            source_path=str(SEASONALITY_TABLE_PATH),
+        )
+        logger.info("Loaded seasonality table from %s", SEASONALITY_TABLE_PATH)
+        return SEASONALITY_STATE
+    except Exception as exc:
+        logger.exception(
+            "Failed to load seasonality table from %s", SEASONALITY_TABLE_PATH
+        )
+        SEASONALITY_STATE = SeasonalityState(
+            source_path=str(SEASONALITY_TABLE_PATH),
+            error=str(exc),
+        )
+        return SEASONALITY_STATE
+
+
+def reload_forecast_bundle() -> None:
+    """Load parquet cubes + forecast models (MLflow registry or processed ``*.joblib``)."""
+
+    global FORECAST_DEPS, FORECAST_LOAD_ERROR
+
+    FORECAST_DEPS = None
+    FORECAST_LOAD_ERROR = None
+
+    try:
+        if not MONTHLY_FINGERPRINT_PARQUET.exists():
+            FORECAST_LOAD_ERROR = f"missing fingerprint cube at {MONTHLY_FINGERPRINT_PARQUET}"
+            return
+        if not LOOKUP_CSV.exists():
+            FORECAST_LOAD_ERROR = f"missing lookup table at {LOOKUP_CSV}"
+            return
+        cube_uni = None
+        if MONTHLY_UNIVARIATE_PARQUET.exists():
+            try:
+                cube_uni = pd.read_parquet(MONTHLY_UNIVARIATE_PARQUET)
+                cube_uni["month"] = pd.to_datetime(cube_uni["month"]).dt.as_unit("ns")
+            except Exception:
+                logger.exception("Optional univariate cube load skipped.")
+
+        cube_fp = pd.read_parquet(MONTHLY_FINGERPRINT_PARQUET)
+        cube_fp["month"] = pd.to_datetime(cube_fp["month"]).dt.as_unit("ns")
+        lookup = pd.read_csv(LOOKUP_CSV)
+
+        fp_model, uni_model, model_src = load_forecast_pair(
+            tracking_uri=MLFLOW_TRACKING_URI,
+            fingerprint_uri=MLFLOW_FORECAST_MODEL_URI,
+            univariate_uri=MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
+            load_univariate=cube_uni is not None,
+        )
+
+        FORECAST_DEPS = ForecastDeps(
+            fingerprint_model=fp_model,
+            univariate_model=uni_model,
+            cube_fp=cube_fp,
+            cube_uni=cube_uni,
+            lookup=lookup,
+        )
+        logger.info(
+            "Forecast bundle ready (models=%s, fp_uri=%s, uni_uri=%s).",
+            model_src,
+            MLFLOW_FORECAST_MODEL_URI,
+            MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
+        )
+    except Exception as exc:
+        FORECAST_LOAD_ERROR = str(exc)
+        logger.exception("reload_forecast_bundle failed")
+
+
+def _predict_timeframe(payload: PredictRequest) -> tuple[str, int, dict[str, float]]:
     if TREND_STATE.lookup is None:
         raise RuntimeError("Trend signals are not loaded.")
+    if SEASONALITY_STATE.table is None:
+        raise RuntimeError("Seasonality table is not loaded.")
 
     item = {
         "item_name": payload.item_name.strip(),
@@ -248,7 +405,16 @@ def _predict_timeframe(payload: PredictRequest) -> tuple[str, dict[str, float]]:
         "material": normalize_token(payload.material),
     }
 
-    inference_frame = build_feature_frame([item], TREND_STATE.lookup)
+    # If the caller doesn't supply reference_month, default to "today" so the
+    # answer means "best timeframe if the user lists right now".
+    reference_month = payload.reference_month or datetime.now().month
+
+    inference_frame = build_feature_frame(
+        [item],
+        TREND_STATE.lookup,
+        reference_month=reference_month,
+        seasonality_table=SEASONALITY_STATE.table,
+    )
     predictions = MODEL_STATE.model.predict(inference_frame)
     model_prediction = str(predictions[0])
 
@@ -263,28 +429,64 @@ def _predict_timeframe(payload: PredictRequest) -> tuple[str, dict[str, float]]:
 
     feature_scores = compute_feature_scores(item=item, lookup=TREND_STATE.lookup)
     rounded_scores = {key: round(float(val), 6) for key, val in feature_scores.items()}
-    return best_timeframe, rounded_scores
+    return best_timeframe, reference_month, rounded_scores
 
-@app.get("/", response_model=RootResponse)
-def root() -> RootResponse:
-    return RootResponse(message="Welcome to the MLflow-backed timeframe recommendation server.")
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/ui/")
+
+
+class OptionsResponse(BaseModel):
+    colors: list[str]
+    categories: list[str]
+    materials: list[str]
+    timeframes: list[str]
+
+
+@app.get("/options", response_model=OptionsResponse)
+def options() -> OptionsResponse:
+    """
+    Return the vocabularies the UI should use for dropdowns. Colors, categories,
+    and materials come from whatever is in trend_signals.csv (so the UI stays in
+    sync with the model's real feature space automatically).
+    """
+    if TREND_STATE.lookup is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Trend signals are not loaded.",
+        )
+    lookup = TREND_STATE.lookup
+    return OptionsResponse(
+        colors=sorted(lookup.get("color", {}).keys()),
+        categories=sorted(lookup.get("category", {}).keys()),
+        materials=sorted(lookup.get("material", {}).keys()),
+        timeframes=list(TIMEFRAMES),
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    current_status = "healthy" if MODEL_STATE.loaded and TREND_STATE.loaded else "degraded"
+    all_loaded = MODEL_STATE.loaded and TREND_STATE.loaded and SEASONALITY_STATE.loaded
+    current_status = "healthy" if all_loaded else "degraded"
     return HealthResponse(
         status=current_status,
         model_loaded=MODEL_STATE.loaded,
         trend_data_loaded=TREND_STATE.loaded,
+        seasonality_table_loaded=SEASONALITY_STATE.loaded,
+        forecast_catalog_loaded=FORECAST_DEPS is not None,
+        forecast_catalog_error=FORECAST_LOAD_ERROR,
+        forecast_model_uri=MLFLOW_FORECAST_MODEL_URI,
+        forecast_univariate_uri=MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
         tracking_uri=MLFLOW_TRACKING_URI,
         configured_model_uri=MLFLOW_MODEL_URI,
         configured_trend_data_path=str(TREND_SIGNALS_PATH),
+        configured_seasonality_table_path=str(SEASONALITY_TABLE_PATH),
         active_model_uri=MODEL_STATE.model_uri,
         model_version=MODEL_STATE.model_version,
         run_id=MODEL_STATE.run_id,
         error=MODEL_STATE.error,
         trend_error=TREND_STATE.error,
+        seasonality_error=SEASONALITY_STATE.error,
     )
 
 
@@ -304,12 +506,56 @@ def predict(payload: PredictRequest) -> PredictResponse:
             detail=detail,
         )
 
-    best_timeframe, feature_scores = _predict_timeframe(payload)
+    if not SEASONALITY_STATE.loaded:
+        detail = SEASONALITY_STATE.error or "Seasonality table is not loaded."
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail,
+        )
+
+    best_timeframe, reference_month, feature_scores = _predict_timeframe(payload)
     return PredictResponse(
         item_name=payload.item_name,
         best_timeframe=best_timeframe,
+        reference_month=reference_month,
         feature_scores=feature_scores,
         model_loaded=MODEL_STATE.loaded,
         model_uri=MODEL_STATE.model_uri,
         run_id=MODEL_STATE.run_id,
     )
+
+
+@app.post("/forecast-text", response_model=ForecastTextResponse)
+def forecast_text(payload: ForecastTextRequest) -> ForecastTextResponse:
+    """Natural-language catalog-share forecast (pairs with notebooks ``5_*``)."""
+
+    if FORECAST_DEPS is None:
+        detail = FORECAST_LOAD_ERROR or "Forecast bundle is not loaded."
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+
+    raw = forecast_from_text(
+        payload.query,
+        FORECAST_DEPS,
+        reference_month_of_year=payload.reference_month,
+    )
+    if raw.get("mode") == "unresolved":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=raw.get("error", "Unable to forecast from query."),
+        )
+
+    raw.pop("error", None)
+    return ForecastTextResponse(**raw)
+
+
+# --------------------------------------------------------------------------- #
+# Static UI                                                                     #
+# --------------------------------------------------------------------------- #
+# A minimal demo page (vanilla HTML/CSS/JS, no build step) lives in
+# trndly/frontend/ (a sibling of backend/, path sourced from paths.py).
+# Mounted at /ui so everything stays same-origin with /predict and /options —
+# no CORS setup required.
+if FRONTEND_DIR.exists():
+    app.mount("/ui", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="ui")
+else:
+    logger.warning("Frontend directory not found at %s; /ui will 404.", FRONTEND_DIR)

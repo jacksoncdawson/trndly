@@ -64,12 +64,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from pipelines.training.feature_contract import (  # noqa: E402
-    DEFAULT_MISSING_SCORE,
     FEATURE_VECTOR_COLUMNS,
     TARGET_COLUMN_DEFAULT,
     TIMEFRAMES,
+    SeasonalityTable,
     build_trend_lookup,
     item_to_feature_row,
+    load_seasonality_table,
     load_trend_signals_frame,
     normalize_token,
 )
@@ -219,10 +220,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory to write train.csv, val.csv, test.csv.",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for train/val/test shuffle.",
+        "--seasonality-table-path",
+        default=str(
+            Path(__file__).resolve().parents[1] / "training" / "data" / "seasonality_table.csv"
+        ),
+        help="Path to seasonality_table.csv for seasonal curve features.",
     )
     return parser.parse_args()
 
@@ -330,6 +332,7 @@ def timeframe_from_months(months: int) -> str:
 def build_training_rows(
     peak_months: pd.DataFrame,
     lookup: dict[str, dict[str, float]],
+    seasonality_table: SeasonalityTable,
 ) -> list[dict[str, Any]]:
     """
     For each (color, category, material) combination × 12 reference months,
@@ -345,9 +348,15 @@ def build_training_rows(
         peak_month = int(peak_row["peak_month"])
 
         item = {"color": color, "category": category, "material": material}
-        feature_row = item_to_feature_row(item=item, lookup=lookup)
 
         for ref_month in range(1, 13):
+            feature_row = item_to_feature_row(
+                item=item,
+                lookup=lookup,
+                reference_month=ref_month,
+                seasonality_table=seasonality_table,
+                peak_month=int(peak_month),
+            )
             months = months_until_peak(peak_month=peak_month, reference_month=ref_month)
             label = timeframe_from_months(months)
             item_name = f"{material.title()} {category.title()} #{item_index:05d}"
@@ -357,6 +366,7 @@ def build_training_rows(
                     "color": color,
                     "category": category,
                     "material": material,
+                    "reference_month": ref_month,
                     **feature_row,
                     TARGET_COLUMN_DEFAULT: label,
                 }
@@ -397,6 +407,7 @@ def main() -> None:
     articles_path = Path(args.articles_path).expanduser().resolve()
     transactions_path = Path(args.transactions_path).expanduser().resolve()
     trend_signals_path = Path(args.trend_signals_path).expanduser().resolve()
+    seasonality_path = Path(args.seasonality_table_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -404,6 +415,7 @@ def main() -> None:
         (articles_path, "articles.csv"),
         (transactions_path, "transactions_train.csv"),
         (trend_signals_path, "trend_signals.csv"),
+        (seasonality_path, "seasonality_table.csv"),
     ]:
         if not path.exists():
             print(f"ERROR: {label} not found at {path}")
@@ -414,6 +426,7 @@ def main() -> None:
         f"  articles:      {articles_path}\n"
         f"  transactions:  {transactions_path}\n"
         f"  trend signals: {trend_signals_path}\n"
+        f"  seasonality:   {seasonality_path}\n"
         f"  output:        {output_dir}"
     )
 
@@ -442,8 +455,14 @@ def main() -> None:
     trend_frame = load_trend_signals_frame(trend_signals_path)
     lookup = build_trend_lookup(trend_frame)
 
+    print("Loading seasonality curves...")
+    seasonality_table = load_seasonality_table(seasonality_path)
+    print(f"  rows: {len(seasonality_table.frame):,}")
+
     print("Building training rows (12 reference months × each combination)...")
-    rows = build_training_rows(peak_months=peak_months, lookup=lookup)
+    rows = build_training_rows(
+        peak_months=peak_months, lookup=lookup, seasonality_table=seasonality_table
+    )
     print(f"  {len(rows):,} total training examples")
 
     label_dist = pd.Series([r[TARGET_COLUMN_DEFAULT] for r in rows]).value_counts()

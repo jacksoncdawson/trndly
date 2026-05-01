@@ -1,0 +1,16 @@
+creation_timestamp: 1777569088524
+current_stage: None
+deployment_job_state: null
+description: null
+last_updated_timestamp: 1777569088524
+model_id: m-e35afa0aedbb4569b88f490413723f9c
+name: trndly_fingerprint
+run_id: 1d880ff9f5ea4e269a9466a21321fb39
+run_link: null
+source: models:/m-e35afa0aedbb4569b88f490413723f9c
+status: READY
+status_message: null
+storage_location: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/models/m-e35afa0aedbb4569b88f490413723f9c/artifacts
+user_id: null
+version: 1
+workspace: default

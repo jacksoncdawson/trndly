@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485/5fbdaea1b1c746c0b6584ea57c58690d/artifacts
+end_time: 1777571804914
+entry_point_name: ''
+experiment_id: '948901543241128485'
+lifecycle_stage: active
+run_id: 5fbdaea1b1c746c0b6584ea57c58690d
+run_name: sweep:fingerprint
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1777571736783
+status: 3
+tags: []
+user_id: vivianjohnson
