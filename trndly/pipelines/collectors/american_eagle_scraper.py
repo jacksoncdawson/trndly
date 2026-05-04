@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from pipelines.collectors.scrape_color_utils import (  # noqa: E402
+    dedupe_swatch_labels_preserve_order,
+)
+from pipelines.collectors.scrape_url_utils import (  # noqa: E402
+    dedupe_product_urls_preserve_order,
+)
 from pipelines.training.feature_contract import (  # noqa: E402
     DEFAULT_MISSING_SCORE,
     FEATURE_TYPES,
@@ -153,6 +160,8 @@ PRODUCT_GRID_WAIT_SELECTORS = [
 # For COLOR: checked against swatch aria-labels first, then product title.
 # AE uses brand color names like "Twilight", "Stormy", "Cognac" — these are
 # listed up-front so they match before generic fallbacks.
+# Canonical strings align with trndly/EDA/data/lookup.csv color_master (incl.
+# yellow, orange, metal) for color_master_id + trend_signals.
 COLOR_KEYWORDS: list[tuple[str, str]] = [
     # AE brand-specific color names (checked before generics)
     ("twilight", "blue"),
@@ -188,6 +197,33 @@ COLOR_KEYWORDS: list[tuple[str, str]] = [
     ("oatmeal", "beige"),
     ("cognac", "brown"),
     ("slate", "gray"),
+    ("orange flare", "orange"),
+    ("burnt orange", "orange"),
+    ("dark orange", "orange"),
+    ("orange", "orange"),
+    ("tangerine", "orange"),
+    ("mandarin", "orange"),
+    ("citrus", "orange"),
+    ("pumpkin", "orange"),
+    ("spice", "brown"),
+    ("magenta", "pink"),
+    ("fuchsia", "pink"),
+    ("salmon", "pink"),
+    ("watermelon", "pink"),
+    ("yellow", "yellow"),
+    ("lemon", "yellow"),
+    ("canary", "yellow"),
+    ("buttercup", "yellow"),
+    ("gold", "yellow"),
+    ("bronze", "brown"),
+    ("silver", "metal"),
+    ("metallic", "metal"),
+    ("chrome", "metal"),
+    ("turquoise", "blue"),
+    ("aqua", "blue"),
+    ("mint", "green"),
+    ("seafoam", "green"),
+    ("chartreuse", "green"),
     # Shade-qualified generics (color_spectrum from lookup: Dark, Dusty Light, Light, Medium, Bright)
     ("dusty light blue", "blue"),
     ("medium dusty blue", "blue"),
@@ -288,6 +324,8 @@ CATEGORY_KEYWORDS: list[tuple[str, str]] = [
     ("chino", "pants"),
     ("legging", "pants"),
     ("jogger", "pants"),
+    ("jort", "shorts"),
+    ("trekker short", "shorts"),
     ("sweatpant", "pants"),
     ("dungarees", "pants"),
     ("overalls", "pants"),
@@ -370,6 +408,7 @@ MATERIAL_KEYWORDS: list[tuple[str, str]] = [
     # Denim
     ("denim", "denim"),
     ("jean", "denim"),
+    ("jort", "denim"),
     # Linen
     ("linen-blend", "linen"),
     ("linen", "linen"),
@@ -437,6 +476,203 @@ CATEGORY_TO_MATERIAL_DEFAULT: dict[str, str] = {
     "skirt": "cotton",
 }
 
+GRAPHICAL_APPEARANCE_KEYWORDS: list[tuple[str, str]] = [
+    ("polka dot", "Dot"),
+    ("striped", "Stripe"),
+    ("stripe", "Stripe"),
+    ("plaid", "Check"),
+    ("gingham", "Check"),
+    ("tartan", "Check"),
+    ("check", "Check"),
+    ("floral", "All over pattern"),
+    ("animal print", "All over pattern"),
+    ("all over", "All over pattern"),
+    ("graphic tee", "Front print"),
+    ("graphic", "Front print"),
+    ("placement print", "Placement print"),
+    ("print", "Placement print"),
+    ("embroidered", "Embroidery"),
+    ("embroidery", "Embroidery"),
+    ("lace", "Lace"),
+    ("denim", "Denim"),
+    ("heather", "Melange"),
+    ("melange", "Melange"),
+    ("glitter", "Glittering/Metallic"),
+    ("metallic", "Glittering/Metallic"),
+    ("sequin", "Sequin"),
+    ("mesh", "Mesh"),
+    ("jacquard", "Jacquard"),
+    ("chambray", "Chambray"),
+    ("argyle", "Argyle"),
+    ("dot", "Dot"),
+]
+GRAPHICAL_APPEARANCE_DEFAULT = "Solid"
+
+PRODUCT_TYPE_KEYWORDS: list[tuple[str, str]] = [
+    ("polo", "Polo shirt"),
+    ("hoodie", "Hoodie"),
+    ("sweatshirt", "Hoodie"),
+    ("cardigan", "Cardigan"),
+    ("sweater", "Sweater"),
+    ("pullover", "Sweater"),
+    ("blazer", "Blazer"),
+    ("puffer", "Jacket"),
+    ("windbreaker", "Jacket"),
+    ("jacket", "Jacket"),
+    ("parka", "Coat"),
+    ("anorak", "Coat"),
+    ("coat", "Coat"),
+    ("jeans", "Trousers"),
+    ("jean", "Trousers"),
+    ("trouser", "Trousers"),
+    ("chino", "Trousers"),
+    ("jogger", "Trousers"),
+    ("sweatpant", "Trousers"),
+    ("jort", "Shorts"),
+    ("legging", "Leggings/Tights"),
+    ("dungarees", "Dungarees"),
+    ("overalls", "Dungarees"),
+    ("trekker short", "Shorts"),
+    ("pant", "Trousers"),
+    ("shorts", "Shorts"),
+    ("sarong", "Sarong"),
+    ("skirt", "Skirt"),
+    ("playsuit", "Jumpsuit/Playsuit"),
+    ("romper", "Jumpsuit/Playsuit"),
+    ("jumpsuit", "Jumpsuit/Playsuit"),
+    ("bodysuit", "Bodysuit"),
+    ("body suit", "Bodysuit"),
+    ("dress", "Dress"),
+    ("t-shirt", "T-shirt"),
+    ("tee", "T-shirt"),
+    ("cami", "Vest top"),
+    ("tank", "Vest top"),
+    ("vest", "Vest top"),
+    ("blouse", "Blouse"),
+    ("crop", "Top"),
+    ("shirt", "Shirt"),
+    ("top", "Top"),
+    ("sneaker", "Sneakers"),
+    ("boot", "Boots"),
+    ("sandal", "Sandals"),
+    ("pump", "Pumps"),
+    ("loafer", "Flat shoe"),
+    ("mule", "Flat shoe"),
+    ("ballerina", "Ballerinas"),
+    ("slipper", "Slippers"),
+    ("wedge", "Wedge"),
+    ("heel", "Heels"),
+    ("shoe", "Other shoe"),
+    ("sunglasses", "Sunglasses"),
+    ("glasses", "Eyeglasses"),
+    ("watch", "Watch"),
+    ("wallet", "Wallet"),
+    ("bracelet", "Bracelet"),
+    ("necklace", "Necklace"),
+    ("earring", "Earring"),
+    ("ring", "Ring"),
+    ("gloves", "Gloves"),
+    ("bag", "Bag"),
+    ("belt", "Belt"),
+    ("beanie", "Beanie"),
+    ("hat", "Hat/beanie"),
+    ("scarf", "Scarf"),
+    ("sock", "Socks"),
+]
+
+COLOR_MASTER_TO_ID: dict[str, int] = {
+    "black": 1,
+    "blue": 2,
+    "navy": 2,
+    "white": 3,
+    "beige": 4,
+    "green": 5,
+    "gray": 6,
+    "grey": 6,
+    "red": 7,
+    "pink": 8,
+    "brown": 9,
+    "yellow": 10,
+    "orange": 11,
+    "metal": 12,
+    "purple": 13,
+}
+
+GENDER_TO_ID: dict[str, int] = {"women": 1, "unisex": 2, "men": 3}
+
+GRAPHICAL_APPEARANCE_TO_ID: dict[str, int] = {
+    # Aligned with trndly/EDA/data/lookup.csv (graphical_appearance)
+    "Unknown": 0,
+    "Solid": 1,
+    "All over pattern": 2,
+    "Denim": 3,
+    "Melange": 4,
+    "Stripe": 5,
+    "Lace": 6,
+    "Check": 7,
+    "Placement print": 8,
+    "Embroidery": 9,
+    "Dot": 10,
+    "Front print": 11,
+    "Colour blocking": 12,
+    "Glittering/Metallic": 13,
+    "Contrast": 14,
+    "Jacquard": 15,
+    "Treatment": 16,
+    "Metallic": 17,
+    "Mixed solid/pattern": 18,
+    "Sequin": 19,
+    "Mesh": 20,
+    "Neps": 21,
+    "Chambray": 22,
+    "Slub": 23,
+    "Transparent": 24,
+    "Argyle": 25,
+    "Hologram": 26,
+}
+
+MATERIAL_TO_ID: dict[str, int] = {
+    "cotton": 1, "knit": 6, "denim": 3, "linen": 12, "silk": 26,
+    "wool": 9, "polyester": 15, "leather": 18,
+}
+
+PRODUCT_TYPE_TO_ID: dict[str, int] = {
+    "Trousers": 1, "Dress": 2, "Sweater": 3, "T-shirt": 4, "Top": 5,
+    "Blouse": 6, "Vest top": 7, "Shorts": 11, "Skirt": 13, "Shirt": 14,
+    "Leggings/Tights": 15, "Jacket": 16, "Socks": 17, "Blazer": 18,
+    "Hoodie": 19, "Cardigan": 20, "Bag": 22, "Jumpsuit/Playsuit": 23,
+    "Belt": 24, "Earring": 26, "Boots": 27, "Scarf": 29, "Necklace": 30,
+    "Coat": 31, "Sandals": 32, "Bodysuit": 33, "Sunglasses": 34,
+    "Sneakers": 35, "Polo shirt": 39, "Hat/beanie": 41, "Flat shoe": 44,
+    "Ballerinas": 46, "Sarong": 47, "Wedge": 49, "Ring": 51, "Pumps": 53,
+    "Dungarees": 54, "Gloves": 55, "Heels": 68, "Watch": 70, "Wallet": 73,
+    "Beanie": 74, "Eyeglasses": 95, "Bracelet": 63, "Flip flop": 59,
+    "Slippers": 60, "Other shoe": 58,
+}
+
+PRODUCT_TYPE_TO_GROUP_ID: dict[str, int] = {
+    "T-shirt": 1, "Top": 1, "Blouse": 1, "Vest top": 1, "Shirt": 1,
+    "Sweater": 1, "Hoodie": 1, "Cardigan": 1, "Polo shirt": 1,
+    "Jacket": 1, "Coat": 1, "Blazer": 1,
+    "Trousers": 2, "Shorts": 2, "Skirt": 2, "Leggings/Tights": 2,
+    "Dungarees": 2, "Sarong": 2,
+    "Dress": 3, "Jumpsuit/Playsuit": 3, "Bodysuit": 3,
+    "Bag": 6, "Belt": 6, "Scarf": 6, "Hat/beanie": 6, "Beanie": 6,
+    "Gloves": 6, "Sunglasses": 6, "Eyeglasses": 6, "Watch": 6,
+    "Wallet": 6, "Bracelet": 6, "Necklace": 6, "Earring": 6, "Ring": 6,
+    "Boots": 7, "Sneakers": 7, "Sandals": 7, "Flat shoe": 7,
+    "Ballerinas": 7, "Slippers": 7, "Flip flop": 7, "Wedge": 7,
+    "Heels": 7, "Pumps": 7, "Other shoe": 7,
+    "Socks": 8,
+}
+
+COLOR_SPECTRUM_KEYWORDS: list[tuple[str, int]] = [
+    ("medium dusty", 4), ("dusty", 2), ("heather", 2), ("muted", 2),
+    ("washed", 2), ("faded", 2), ("light", 3), ("pale", 3), ("soft", 3),
+    ("pastel", 3), ("cream", 3), ("bright", 6), ("vivid", 6), ("neon", 6),
+    ("electric", 6), ("dark", 1), ("deep", 1), ("rich", 1), ("medium", 5), ("mid", 5),
+]
+
 
 # --------------------------------------------------------------------------- #
 # Attribute extraction                                                          #
@@ -462,9 +698,48 @@ def extract_material(text: str, inferred_category: str | None = None) -> str | N
     result = _first_match(text, MATERIAL_KEYWORDS)
     if result:
         return result
+    if inferred_category == "pants":
+        lowered = text.lower()
+        if any(
+            hint in lowered
+            for hint in (
+                "jean",
+                "denim",
+                "jort",
+                "5-pocket",
+                "five pocket",
+                "selvedge",
+                "selvage",
+            )
+        ):
+            return "denim"
+        return None
     if inferred_category:
         return CATEGORY_TO_MATERIAL_DEFAULT.get(inferred_category)
     return None
+
+
+def extract_graphical_appearance(text: str) -> str:
+    result = _first_match(text, GRAPHICAL_APPEARANCE_KEYWORDS)
+    return result if result else GRAPHICAL_APPEARANCE_DEFAULT
+
+
+def extract_product_type(text: str) -> str | None:
+    return _first_match(text, PRODUCT_TYPE_KEYWORDS)
+
+
+def extract_color_spectrum_id(color_label: str) -> int:
+    lowered = color_label.lower()
+    for keyword, spectrum_id in COLOR_SPECTRUM_KEYWORDS:
+        if keyword in lowered:
+            return spectrum_id
+    return 0
+
+
+def extract_product_group_id(product_type: str | None) -> int:
+    if not product_type:
+        return 0
+    return PRODUCT_TYPE_TO_GROUP_ID.get(product_type, 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -530,7 +805,11 @@ def _extract_swatch_colors(page: "Page") -> list[str]:
                     or el.get_attribute("data-color-name")
                     or ""
                 ).strip()
-                if label and label not in seen:
+                if (
+                    label
+                    and _ae_looks_like_retail_color_label(label)
+                    and label not in seen
+                ):
                     seen.add(label)
                     all_labels.append(label)
         except Exception:
@@ -539,16 +818,65 @@ def _extract_swatch_colors(page: "Page") -> list[str]:
     return all_labels
 
 
+# Selectors for product card links on AE listing pages
+PRODUCT_CARD_LINK_SELECTORS = [
+    "a[href*='/p/']",
+    "[class*='product-card'] a[href]",
+    "[class*='ProductCard'] a[href]",
+    "[class*='product-tile'] a[href]",
+    "article a[href]",
+    "li[class*='product'] a[href]",
+]
+
+
 # --------------------------------------------------------------------------- #
 # API / page-data color extraction                                              #
 # --------------------------------------------------------------------------- #
 
+def _ae_looks_like_retail_color_label(s: str) -> bool:
+    """
+    Reject footer/nav, pricing tiers, and promos that share JSON keys like
+    colorName-adjacent fields or generic 'label' text on ae.com.
+    """
+    t = (s or "").strip()
+    if not t or len(t) > 72:
+        return False
+    low = t.lower()
+    if "$" in t or re.search(r"\b\d{1,2}%?\s*off\b", low):
+        return False
+    if "real rewards" in low or "gift card" in low or "credit card" in low:
+        return False
+    if "level 1" in low or "level 2" in low or "level 3" in low:
+        return False
+    if low in (
+        "bras", "swim", "shoes", "shop", "sale", "men", "women", "kids", "aerie",
+        "third party shoes", "jeans", "clearance",
+    ):
+        return False
+    if "third party" in low:
+        return False
+    return True
+
+
+def _dedupe_ae_colors_preserve_order(labels: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for lab in labels:
+        if not _ae_looks_like_retail_color_label(lab):
+            continue
+        k = lab.strip().lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(lab.strip())
+    return out
+
+
 # Field names (lowercased) whose string values are likely color names.
+# Avoid generic keys like "label" / "displayName" — they match nav and pricing.
 _COLOR_FIELD_NAMES: frozenset[str] = frozenset([
     "colorname", "color_name", "colordisplayname", "color_display_name",
     "swatchname", "swatch_name", "swatchlabel", "swatch_label",
     "colorlabel", "color_label", "colortitle", "color_title",
-    "displayname", "display_name", "label",
 ])
 
 # Parent-key names that contain arrays of color/swatch objects.
@@ -556,6 +884,35 @@ _COLOR_ARRAY_FIELD_NAMES: frozenset[str] = frozenset([
     "colors", "colour", "colours", "swatches", "coloroptions",
     "color_options", "colorfacets", "color_facets", "colorways",
 ])
+
+# Keys on objects *inside* color/swatch arrays (ae.com often uses "name", not "colorName").
+_SWATCH_OBJECT_LABEL_KEYS: tuple[str, ...] = (
+    "colorname",
+    "color_name",
+    "colordisplayname",
+    "color_display_name",
+    "swatchname",
+    "swatch_name",
+    "swatchlabel",
+    "swatch_label",
+    "merchantcolorname",
+    "displayname",
+    "title",
+    "name",
+    "label",
+)
+
+
+def _ae_color_label_from_swatch_dict(d: dict) -> str | None:
+    """Pick a retail color string from a single swatch / color-variant object."""
+    dl = {str(k).lower(): v for k, v in d.items()}
+    for sk in _SWATCH_OBJECT_LABEL_KEYS:
+        v = dl.get(sk)
+        if isinstance(v, str):
+            s = v.strip()
+            if s and _ae_looks_like_retail_color_label(s):
+                return s
+    return None
 
 
 def _walk_json_for_colors(data: object, found: list[str], depth: int = 0) -> None:
@@ -572,12 +929,19 @@ def _walk_json_for_colors(data: object, found: list[str], depth: int = 0) -> Non
         for key, value in data.items():
             key_lower = key.lower()
             if key_lower in _COLOR_FIELD_NAMES and isinstance(value, str) and value.strip():
-                found.append(value.strip())
+                v = value.strip()
+                if _ae_looks_like_retail_color_label(v):
+                    found.append(v)
             elif key_lower in _COLOR_ARRAY_FIELD_NAMES and isinstance(value, list):
                 for item in value:
                     if isinstance(item, str) and item.strip():
-                        found.append(item.strip())
+                        v = item.strip()
+                        if _ae_looks_like_retail_color_label(v):
+                            found.append(v)
                     elif isinstance(item, dict):
+                        lbl = _ae_color_label_from_swatch_dict(item)
+                        if lbl:
+                            found.append(lbl)
                         _walk_json_for_colors(item, found, depth + 1)
             elif isinstance(value, (dict, list)):
                 _walk_json_for_colors(value, found, depth + 1)
@@ -615,10 +979,13 @@ def _extract_colors_from_next_data(page: "Page") -> list[str]:
 def scrape_american_eagle(
     sleep_between_pages: float = 3.0,
     headless: bool = True,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[dict]]:
     """
     Scrape all American Eagle pages.
-    Returns (product_titles, color_labels).
+    Returns (product_titles, color_label_occurrences, raw_items).
+
+    ``color_label_occurrences`` is a flat list (same label may repeat once per
+    page / response) for ``count_attribute_frequencies`` — not globally deduped.
 
     Colors come from three sources tried in priority order:
       1. Network response interception — AE's Next.js app fires XHR/fetch
@@ -627,6 +994,7 @@ def scrape_american_eagle(
          in the HTML often contains the first page of products with colors.
       3. DOM swatch elements — kept as a last-resort fallback in case the
          above two find nothing on a given page.
+    raw_items is a list of dicts with 'title' and 'gender' for each product.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -638,6 +1006,8 @@ def scrape_american_eagle(
     all_titles: list[str] = []
     all_swatch_colors: list[str] = []
     api_colors: list[str] = []
+    aggregated_page_colors: list[str] = []
+    raw_items: list[dict] = []
 
     def _handle_response(response: object) -> None:
         """Intercept AE XHR/fetch responses and walk JSON for color names."""
@@ -693,6 +1063,7 @@ def scrape_american_eagle(
             url = page_info["url"]
             label = page_info["label"]
             print(f"  [{label}] → {url}")
+            api_colors.clear()
 
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
@@ -711,7 +1082,7 @@ def scrape_american_eagle(
                 _scroll_to_bottom(page)
 
                 titles = _extract_product_names(page)
-                swatches = _extract_swatch_colors(page)
+                swatches = dedupe_swatch_labels_preserve_order(_extract_swatch_colors(page))
 
                 print(
                     f"    {len(titles)} product titles, "
@@ -722,6 +1093,13 @@ def scrape_american_eagle(
                 all_titles.extend(titles)
                 all_swatch_colors.extend(swatches)
 
+                gender = "women" if label.startswith("women") else "men" if label.startswith("men") else "unisex"
+                merged = _dedupe_ae_colors_preserve_order(api_colors)
+                page_colors = dedupe_swatch_labels_preserve_order(merged if merged else swatches)
+                aggregated_page_colors.extend(page_colors)
+                for t in titles:
+                    raw_items.append({"title": t, "gender": gender, "page_swatches": page_colors})
+
             except Exception as exc:
                 print(f"    ERROR: {exc}")
 
@@ -729,14 +1107,196 @@ def scrape_american_eagle(
 
         browser.close()
 
-    # Priority: API/next-data colors → DOM swatches
-    final_colors = api_colors if api_colors else all_swatch_colors
-    if api_colors:
-        print(f"  Using {len(api_colors)} API/page-data color names")
-    else:
-        print(f"  API interception yielded nothing — falling back to {len(all_swatch_colors)} DOM swatch labels")
+    # Keep repeats across pages for trend counting (do not globally dedupe here).
+    color_occurrences = (
+        aggregated_page_colors if aggregated_page_colors else list(all_swatch_colors)
+    )
+    unique_labels = _dedupe_ae_colors_preserve_order(color_occurrences)
+    print(
+        f"  Listing color labels for trends: {len(color_occurrences)} occurrences, "
+        f"{len(unique_labels)} unique raw strings"
+    )
 
-    return all_titles, final_colors
+    return all_titles, color_occurrences, raw_items
+
+
+def _extract_product_urls(page: "Page", base_url: str = "https://www.ae.com") -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for selector in PRODUCT_CARD_LINK_SELECTORS:
+        try:
+            elements = page.query_selector_all(selector)
+            for el in elements:
+                href = el.get_attribute("href") or ""
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    href = base_url + href
+                if href not in seen and "ae.com" in href:
+                    seen.add(href)
+                    urls.append(href)
+            if urls:
+                return urls
+        except Exception:
+            continue
+    return urls
+
+
+def scrape_american_eagle_detailed(
+    sleep_between_pages: float = 3.0,
+    sleep_between_products: float = 2.0,
+    headless: bool = True,
+    max_products_per_page: int = 50,
+) -> list[dict]:
+    """
+    Two-step scraper: listing page → product URLs → visit each product page.
+
+    Visiting an AE product page triggers the same API/next-data responses we
+    intercept in scrape_american_eagle(), but scoped to one product — giving
+    accurate colors per item. Returns one dict per product-color variant.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("ERROR: playwright not installed.")
+        sys.exit(1)
+
+    raw_items: list[dict] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1440, "height": 900},
+            locale="en-US",
+        )
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            "window.chrome = {runtime: {}};"
+        )
+        page = context.new_page()
+
+        for page_info in AMERICAN_EAGLE_PAGES:
+            url   = page_info["url"]
+            label = page_info["label"]
+            gender = "women" if label.startswith("women") else "men" if label.startswith("men") else "unisex"
+            print(f"\n  [{label}] → {url}")
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _wait_for_products(page, timeout_ms=15_000)
+                time.sleep(1.5)
+                _scroll_to_bottom(page)
+                raw_urls = _extract_product_urls(page)
+                product_urls = dedupe_product_urls_preserve_order(raw_urls)
+                print(
+                    f"    Found {len(product_urls)} distinct product URLs "
+                    f"from {len(raw_urls)} listing links (cap {max_products_per_page})"
+                )
+                product_urls = product_urls[:max_products_per_page]
+            except Exception as exc:
+                print(f"    ERROR loading listing page: {exc}")
+                continue
+
+            for i, prod_url in enumerate(product_urls, 1):
+                product_colors: list[str] = []
+
+                def _handle_product_response(response: object) -> None:
+                    try:
+                        r_url: str = response.url  # type: ignore[attr-defined]
+                        if "ae.com" not in r_url:
+                            return
+                        ct: str = response.headers.get("content-type", "")  # type: ignore[attr-defined]
+                        if "json" not in ct:
+                            return
+                        if response.status != 200:  # type: ignore[attr-defined]
+                            return
+                        data = response.json()  # type: ignore[attr-defined]
+                        _walk_json_for_colors(data, product_colors)
+                    except Exception:
+                        pass
+
+                page.on("response", _handle_product_response)
+                try:
+                    page.goto(prod_url, wait_until="domcontentloaded", timeout=30_000)
+                    time.sleep(1.5)
+
+                    # Also try __NEXT_DATA__ from the PDP
+                    next_data_colors = _extract_colors_from_next_data(page)
+                    all_page_colors = _dedupe_ae_colors_preserve_order(
+                        product_colors + next_data_colors
+                    )
+
+                    # Title
+                    title = ""
+                    for sel in ["h1[class*='product-name']", "h1[class*='ProductName']",
+                                "[data-auto-id='product-title']", "h1"]:
+                        try:
+                            el = page.query_selector(sel)
+                            if el:
+                                title = el.inner_text().strip()
+                                if title:
+                                    break
+                        except Exception:
+                            continue
+
+                    colors = all_page_colors if all_page_colors else _extract_swatch_colors(page)
+                    colors = dedupe_swatch_labels_preserve_order(colors)
+                    category     = extract_category(title)
+                    material     = extract_material(title, inferred_category=category)
+                    product_type = extract_product_type(title)
+                    base_graphical = extract_graphical_appearance(title)
+
+                    if colors:
+                        for color_label in colors:
+                            color    = extract_color(color_label) or extract_color(title)
+                            graphical = extract_graphical_appearance(color_label)
+                            if graphical == GRAPHICAL_APPEARANCE_DEFAULT:
+                                graphical = base_graphical
+                            raw_items.append({
+                                "title": title, "gender": gender,
+                                "color_raw": color_label, "color": color or "unknown",
+                                "product_type_raw": product_type or "unknown",
+                                "material_raw": material or "unknown",
+                                "graphical_appearance_raw": graphical,
+                            })
+                    else:
+                        color = extract_color(title)
+                        raw_items.append({
+                            "title": title, "gender": gender,
+                            "color_raw": color or "unknown", "color": color or "unknown",
+                            "product_type_raw": product_type or "unknown",
+                            "material_raw": material or "unknown",
+                            "graphical_appearance_raw": base_graphical,
+                        })
+                except Exception as exc:
+                    print(f"      ERROR on {prod_url}: {exc}")
+                finally:
+                    page.remove_listener("response", _handle_product_response)
+
+                if i % 10 == 0:
+                    print(f"    ... {i}/{len(product_urls)} products scraped, {len(raw_items)} rows so far")
+                time.sleep(sleep_between_products)
+
+            time.sleep(sleep_between_pages)
+
+        browser.close()
+
+    print(f"\nDetailed scrape complete: {len(raw_items)} total item-color rows")
+    return raw_items
 
 
 # --------------------------------------------------------------------------- #
@@ -821,6 +1381,67 @@ def build_trend_signals_frame(
     return pd.DataFrame(rows)
 
 
+def build_raw_items_frame(
+    raw_items: list[dict],
+    scraped_date: str,
+    retailer: str = "american_eagle",
+) -> pd.DataFrame:
+    """Build a one-row-per-item-color DataFrame with lookup-table IDs.
+
+    Each product is expanded to one row per unique swatch/API color seen on
+    its page, matching the H&M one-row-per-article-color schema.
+    """
+    rows = []
+    for item in raw_items:
+        title        = item["title"]
+        gender       = item["gender"]
+        product_type = (
+            item["product_type_raw"]
+            if item.get("product_type_raw") and item["product_type_raw"] != "unknown"
+            else extract_product_type(title)
+        )
+        material = (
+            item["material_raw"]
+            if item.get("material_raw") and item["material_raw"] != "unknown"
+            else extract_material(title, inferred_category=extract_category(title))
+        )
+
+        if item.get("color"):
+            color_labels = [item.get("color_raw") or item["color"]]
+        elif item.get("page_swatches"):
+            color_labels = dedupe_swatch_labels_preserve_order(item["page_swatches"])
+        else:
+            title_color = extract_color(title)
+            color_labels = [title_color] if title_color else ["unknown"]
+
+        for color_raw_lbl in color_labels:
+            if "graphical_appearance_raw" in item:
+                graphical = item["graphical_appearance_raw"]
+            else:
+                graphical = extract_graphical_appearance(f"{title} {color_raw_lbl}".strip())
+            color = item.get("color") if item.get("color") else (
+                extract_color(color_raw_lbl) if color_raw_lbl != "unknown" else None
+            )
+            rows.append({
+                "scraped_at":               scraped_date,
+                "retailer":                 retailer,
+                "title":                    title,
+                "gender":                   gender,
+                "color_raw":                color_raw_lbl,
+                "product_type_raw":         product_type or "unknown",
+                "material_raw":             material or "unknown",
+                "graphical_appearance_raw": graphical,
+                "color_master_id":          COLOR_MASTER_TO_ID.get(color or "", 0),
+                "color_spectrum_id":        extract_color_spectrum_id(color_raw_lbl),
+                "gender_id":                GENDER_TO_ID.get(gender, 2),
+                "product_type_id":          PRODUCT_TYPE_TO_ID.get(product_type or "", 0),
+                "product_group_id":         extract_product_group_id(product_type),
+                "material_id":              MATERIAL_TO_ID.get(material or "", 0),
+                "graphical_appearance_id":  GRAPHICAL_APPEARANCE_TO_ID.get(graphical, 1),
+            })
+    return pd.DataFrame(rows)
+
+
 def blend_with_existing(
     scraped: pd.DataFrame,
     existing_path: Path,
@@ -848,21 +1469,27 @@ def blend_with_existing(
 # --------------------------------------------------------------------------- #
 
 KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
-    "color":    ["black", "white", "blue", "red", "green", "beige", "pink", "gray", "navy", "brown", "purple"],
+    "color":    [
+        "black", "white", "blue", "red", "green", "beige", "pink", "gray", "navy", "brown", "purple",
+        "yellow", "orange", "metal",
+    ],
     "category": ["pants", "shorts", "skirt", "dress", "tops", "outerwear", "shoes", "accessories"],
     "material": ["cotton", "denim", "linen", "silk", "wool", "polyester", "leather", "knit"],
 }
 
 
 def parse_args() -> argparse.Namespace:
-    default_output = (
-        Path(__file__).resolve().parents[1]
-        / "training" / "synthetic_data" / "trend_signals_american_eagle.csv"
-    )
+    _synth = Path(__file__).resolve().parents[1] / "training" / "synthetic_data"
+    default_output = _synth / "trend_signals_american_eagle.csv"
+    default_items  = _synth / "items_american_eagle.csv"
     parser = argparse.ArgumentParser(
-        description="Scrape American Eagle new arrivals and write trend_signals_american_eagle.csv."
+        description="Scrape American Eagle new arrivals and write trend_signals_american_eagle.csv + items_american_eagle.csv."
     )
     parser.add_argument("--output-path", default=str(default_output))
+    parser.add_argument(
+        "--items-path", default=str(default_items),
+        help="Where to write the raw items CSV (one row per product title).",
+    )
     parser.add_argument(
         "--existing-path", default=None,
         help="Existing trend_signals.csv to blend with scraped scores.",
@@ -879,36 +1506,80 @@ def parse_args() -> argparse.Namespace:
         "--headless", type=lambda v: v.lower() != "false", default=True,
         help="Run headless browser. Pass 'false' for a visible window (default: true).",
     )
+    parser.add_argument(
+        "--detailed", action="store_true", default=False,
+        help="Visit each product detail page for accurate per-item colors and material.",
+    )
+    parser.add_argument(
+        "--max-products", type=int, default=50,
+        help="Max products to visit per listing page in --detailed mode (default: 50).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
+    import datetime
+
     args = parse_args()
     output_path = Path(args.output_path).expanduser().resolve()
+    items_path  = Path(args.items_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    items_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(
         f"American Eagle retail scraper\n"
         f"  pages: {len(AMERICAN_EAGLE_PAGES)}  headless: {args.headless}\n"
         f"  color source: swatch alt/aria-label + title keyword supplement\n"
-        f"  output: {output_path}"
+        f"  detailed mode: {args.detailed}"
+        + (f"  (max {args.max_products} products/page)" if args.detailed else "") + "\n"
+        f"  output: {output_path}\n"
+        f"  items:  {items_path}"
     )
 
-    titles, swatch_colors = scrape_american_eagle(
+    titles, swatch_colors, raw_items = scrape_american_eagle(
         sleep_between_pages=args.sleep,
         headless=args.headless,
     )
 
-    print(f"\nTotal collected: {len(titles)} product titles, {len(swatch_colors)} swatch colors")
+    if args.detailed:
+        print("\nRunning detailed per-product scrape for items CSV...")
+        raw_items = scrape_american_eagle_detailed(
+            sleep_between_pages=args.sleep,
+            sleep_between_products=2.0,
+            headless=args.headless,
+            max_products_per_page=args.max_products,
+        )
 
-    if not titles and not swatch_colors:
+    swatch_colors_for_trends = list(swatch_colors)
+    if args.detailed and raw_items:
+        for item in raw_items:
+            cr = item.get("color_raw")
+            if not isinstance(cr, str):
+                continue
+            s = cr.strip()
+            if not s or s.lower() == "unknown":
+                continue
+            if _ae_looks_like_retail_color_label(s):
+                swatch_colors_for_trends.append(s)
+
+    print(
+        f"\nTotal collected: {len(titles)} product titles, "
+        f"{len(swatch_colors)} listing color occurrences"
+        + (
+            f", {len(swatch_colors_for_trends) - len(swatch_colors)} added from detailed PDPs"
+            if args.detailed and len(swatch_colors_for_trends) > len(swatch_colors)
+            else ""
+        )
+    )
+
+    if not titles and not swatch_colors_for_trends:
         print(
             "\nWARNING: Nothing was scraped. American Eagle's anti-bot measures\n"
             "may be blocking headless Chrome. Try running with --headless false\n"
             "to open a visible browser window, which is harder to detect."
         )
 
-    counts = count_attribute_frequencies(titles, swatch_colors)
+    counts = count_attribute_frequencies(titles, swatch_colors_for_trends)
     scores = normalize_counts(counts, total_items=len(titles))
 
     print(f"\nTotal items used as proportion denominator: {len(titles)}")
@@ -938,6 +1609,11 @@ def main() -> None:
     meta_path = output_path.with_name(output_path.stem + "_meta.json")
     meta_path.write_text(json.dumps({"total_items": len(titles)}, indent=2))
     print(f"Wrote metadata   → {meta_path}")
+
+    scraped_date = datetime.date.today().isoformat()
+    items_frame = build_raw_items_frame(raw_items, scraped_date=scraped_date, retailer="american_eagle")
+    items_frame.to_csv(items_path, index=False)
+    print(f"Wrote {len(items_frame)} raw item rows → {items_path}")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from pipelines.collectors.scrape_color_utils import (  # noqa: E402
+    dedupe_swatch_labels_preserve_order,
+)
+from pipelines.collectors.scrape_url_utils import (  # noqa: E402
+    dedupe_product_urls_preserve_order,
+)
 from pipelines.training.feature_contract import (  # noqa: E402
     DEFAULT_MISSING_SCORE,
     FEATURE_TYPES,
@@ -208,6 +214,13 @@ COLOR_KEYWORDS: list[tuple[str, str]] = [
     ("butter", "beige"),
     ("golden", "beige"),
     ("terracotta", "red"),
+    ("orange", "orange"),
+    ("tangerine", "orange"),
+    ("yellow", "yellow"),
+    ("lemon", "yellow"),
+    ("gold", "yellow"),
+    ("silver", "metal"),
+    ("metallic", "metal"),
     ("rust", "red"),
     ("brick", "red"),
     # Standard generics
@@ -233,6 +246,8 @@ COLOR_KEYWORDS: list[tuple[str, str]] = [
     ("light wash", "blue"),
     ("dark wash", "blue"),
     ("indigo", "blue"),
+    ("turquoise", "blue"),
+    ("aqua", "blue"),
     ("teal", "blue"),
     ("sky blue", "blue"),
     ("cobalt", "blue"),
@@ -285,6 +300,7 @@ CATEGORY_KEYWORDS: list[tuple[str, str]] = [
     ("chino", "pants"),
     ("legging", "pants"),
     ("jogger", "pants"),
+    ("jort", "shorts"),
     ("sweatpant", "pants"),
     ("dungarees", "pants"),
     ("overalls", "pants"),
@@ -422,9 +438,9 @@ MATERIAL_KEYWORDS: list[tuple[str, str]] = [
     ("cotton", "cotton"),
 ]
 
-# When no material keyword is in the title, infer from category
+# When no material keyword is in the title, infer from category (pants: see
+# extract_material — do not default all trousers to denim).
 CATEGORY_TO_MATERIAL_DEFAULT: dict[str, str] = {
-    "pants": "denim",
     "shorts": "cotton",
     "dress": "cotton",
     "tops": "cotton",
@@ -433,6 +449,224 @@ CATEGORY_TO_MATERIAL_DEFAULT: dict[str, str] = {
     "accessories": "cotton",
     "skirt": "cotton",
 }
+
+# For GRAPHICAL APPEARANCE: checked against product title.
+GRAPHICAL_APPEARANCE_KEYWORDS: list[tuple[str, str]] = [
+    ("polka dot", "Dot"),
+    ("striped", "Stripe"),
+    ("stripe", "Stripe"),
+    ("plaid", "Check"),
+    ("gingham", "Check"),
+    ("tartan", "Check"),
+    ("check", "Check"),
+    ("floral", "All over pattern"),
+    ("animal print", "All over pattern"),
+    ("all over", "All over pattern"),
+    ("graphic tee", "Front print"),
+    ("graphic", "Front print"),
+    ("placement print", "Placement print"),
+    ("print", "Placement print"),
+    ("embroidered", "Embroidery"),
+    ("embroidery", "Embroidery"),
+    ("lace", "Lace"),
+    ("denim", "Denim"),
+    ("heather", "Melange"),
+    ("melange", "Melange"),
+    ("glitter", "Glittering/Metallic"),
+    ("metallic", "Glittering/Metallic"),
+    ("sequin", "Sequin"),
+    ("mesh", "Mesh"),
+    ("jacquard", "Jacquard"),
+    ("chambray", "Chambray"),
+    ("argyle", "Argyle"),
+    ("dot", "Dot"),
+]
+GRAPHICAL_APPEARANCE_DEFAULT = "Solid"
+
+# For PRODUCT TYPE: maps title keywords to lookup.csv product_type names.
+PRODUCT_TYPE_KEYWORDS: list[tuple[str, str]] = [
+    ("polo", "Polo shirt"),
+    ("hoodie", "Hoodie"),
+    ("sweatshirt", "Hoodie"),
+    ("cardigan", "Cardigan"),
+    ("sweater", "Sweater"),
+    ("pullover", "Sweater"),
+    ("blazer", "Blazer"),
+    ("puffer", "Jacket"),
+    ("windbreaker", "Jacket"),
+    ("jacket", "Jacket"),
+    ("parka", "Coat"),
+    ("anorak", "Coat"),
+    ("coat", "Coat"),
+    ("jeans", "Trousers"),
+    ("jean", "Trousers"),
+    ("trouser", "Trousers"),
+    ("chino", "Trousers"),
+    ("jogger", "Trousers"),
+    ("sweatpant", "Trousers"),
+    ("jort", "Shorts"),
+    ("legging", "Leggings/Tights"),
+    ("dungarees", "Dungarees"),
+    ("overalls", "Dungarees"),
+    ("pant", "Trousers"),
+    ("shorts", "Shorts"),
+    ("sarong", "Sarong"),
+    ("skirt", "Skirt"),
+    ("playsuit", "Jumpsuit/Playsuit"),
+    ("romper", "Jumpsuit/Playsuit"),
+    ("jumpsuit", "Jumpsuit/Playsuit"),
+    ("bodysuit", "Bodysuit"),
+    ("body suit", "Bodysuit"),
+    ("dress", "Dress"),
+    ("t-shirt", "T-shirt"),
+    ("tee", "T-shirt"),
+    ("cami", "Vest top"),
+    ("tank", "Vest top"),
+    ("vest", "Vest top"),
+    ("blouse", "Blouse"),
+    ("crop", "Top"),
+    ("shirt", "Shirt"),
+    ("top", "Top"),
+    ("sneaker", "Sneakers"),
+    ("boot", "Boots"),
+    ("sandal", "Sandals"),
+    ("pump", "Pumps"),
+    ("loafer", "Flat shoe"),
+    ("mule", "Flat shoe"),
+    ("ballerina", "Ballerinas"),
+    ("slipper", "Slippers"),
+    ("wedge", "Wedge"),
+    ("heel", "Heels"),
+    ("shoe", "Other shoe"),
+    ("sunglasses", "Sunglasses"),
+    ("glasses", "Eyeglasses"),
+    ("watch", "Watch"),
+    ("wallet", "Wallet"),
+    ("bracelet", "Bracelet"),
+    ("necklace", "Necklace"),
+    ("earring", "Earring"),
+    ("ring", "Ring"),
+    ("gloves", "Gloves"),
+    ("bag", "Bag"),
+    ("belt", "Belt"),
+    ("beanie", "Beanie"),
+    ("hat", "Hat/beanie"),
+    ("scarf", "Scarf"),
+    ("sock", "Socks"),
+]
+
+# --------------------------------------------------------------------------- #
+# Lookup table ID mappings (from trndly/EDA/data/lookup.csv)                  #
+# --------------------------------------------------------------------------- #
+
+COLOR_MASTER_TO_ID: dict[str, int] = {
+    "black": 1,
+    "blue": 2,
+    "navy": 2,
+    "white": 3,
+    "beige": 4,
+    "green": 5,
+    "gray": 6,
+    "grey": 6,
+    "red": 7,
+    "pink": 8,
+    "brown": 9,
+    "yellow": 10,
+    "orange": 11,
+    "metal": 12,
+    "purple": 13,
+}
+
+GENDER_TO_ID: dict[str, int] = {"women": 1, "unisex": 2, "men": 3}
+
+GRAPHICAL_APPEARANCE_TO_ID: dict[str, int] = {
+    # Aligned with trndly/EDA/data/lookup.csv (graphical_appearance)
+    "Unknown": 0,
+    "Solid": 1,
+    "All over pattern": 2,
+    "Denim": 3,
+    "Melange": 4,
+    "Stripe": 5,
+    "Lace": 6,
+    "Check": 7,
+    "Placement print": 8,
+    "Embroidery": 9,
+    "Dot": 10,
+    "Front print": 11,
+    "Colour blocking": 12,
+    "Glittering/Metallic": 13,
+    "Contrast": 14,
+    "Jacquard": 15,
+    "Treatment": 16,
+    "Metallic": 17,
+    "Mixed solid/pattern": 18,
+    "Sequin": 19,
+    "Mesh": 20,
+    "Neps": 21,
+    "Chambray": 22,
+    "Slub": 23,
+    "Transparent": 24,
+    "Argyle": 25,
+    "Hologram": 26,
+}
+
+MATERIAL_TO_ID: dict[str, int] = {
+    "cotton": 1, "knit": 6, "denim": 3, "linen": 12, "silk": 26,
+    "wool": 9, "polyester": 15, "leather": 18,
+}
+
+PRODUCT_TYPE_TO_ID: dict[str, int] = {
+    "Trousers": 1, "Dress": 2, "Sweater": 3, "T-shirt": 4, "Top": 5,
+    "Blouse": 6, "Vest top": 7, "Shorts": 11, "Skirt": 13, "Shirt": 14,
+    "Leggings/Tights": 15, "Jacket": 16, "Socks": 17, "Blazer": 18,
+    "Hoodie": 19, "Cardigan": 20, "Bag": 22, "Jumpsuit/Playsuit": 23,
+    "Belt": 24, "Earring": 26, "Boots": 27, "Scarf": 29, "Necklace": 30,
+    "Coat": 31, "Sandals": 32, "Bodysuit": 33, "Sunglasses": 34,
+    "Sneakers": 35, "Polo shirt": 39, "Hat/beanie": 41, "Flat shoe": 44,
+    "Ballerinas": 46, "Sarong": 47, "Wedge": 49, "Ring": 51, "Pumps": 53,
+    "Dungarees": 54, "Gloves": 55, "Heels": 68, "Watch": 70, "Wallet": 73,
+    "Beanie": 74, "Eyeglasses": 95, "Bracelet": 63, "Flip flop": 59,
+    "Slippers": 60, "Other shoe": 58,
+}
+
+PRODUCT_TYPE_TO_GROUP_ID: dict[str, int] = {
+    "T-shirt": 1, "Top": 1, "Blouse": 1, "Vest top": 1, "Shirt": 1,
+    "Sweater": 1, "Hoodie": 1, "Cardigan": 1, "Polo shirt": 1,
+    "Jacket": 1, "Coat": 1, "Blazer": 1,
+    "Trousers": 2, "Shorts": 2, "Skirt": 2, "Leggings/Tights": 2,
+    "Dungarees": 2, "Sarong": 2,
+    "Dress": 3, "Jumpsuit/Playsuit": 3, "Bodysuit": 3,
+    "Bag": 6, "Belt": 6, "Scarf": 6, "Hat/beanie": 6, "Beanie": 6,
+    "Gloves": 6, "Sunglasses": 6, "Eyeglasses": 6, "Watch": 6,
+    "Wallet": 6, "Bracelet": 6, "Necklace": 6, "Earring": 6, "Ring": 6,
+    "Boots": 7, "Sneakers": 7, "Sandals": 7, "Flat shoe": 7,
+    "Ballerinas": 7, "Slippers": 7, "Flip flop": 7, "Wedge": 7,
+    "Heels": 7, "Pumps": 7, "Other shoe": 7,
+    "Socks": 8,
+}
+
+COLOR_SPECTRUM_KEYWORDS: list[tuple[str, int]] = [
+    ("medium dusty", 4),
+    ("dusty", 2),
+    ("heather", 2),
+    ("muted", 2),
+    ("washed", 2),
+    ("faded", 2),
+    ("light", 3),
+    ("pale", 3),
+    ("soft", 3),
+    ("pastel", 3),
+    ("cream", 3),
+    ("bright", 6),
+    ("vivid", 6),
+    ("neon", 6),
+    ("electric", 6),
+    ("dark", 1),
+    ("deep", 1),
+    ("rich", 1),
+    ("medium", 5),
+    ("mid", 5),
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -459,9 +693,71 @@ def extract_material(text: str, inferred_category: str | None = None) -> str | N
     result = _first_match(text, MATERIAL_KEYWORDS)
     if result:
         return result
+    if inferred_category == "pants":
+        lowered = text.lower()
+        if any(
+            hint in lowered
+            for hint in (
+                "jean",
+                "denim",
+                "jort",
+                "5-pocket",
+                "five pocket",
+                "selvedge",
+                "selvage",
+            )
+        ):
+            return "denim"
+        return None
     if inferred_category:
         return CATEGORY_TO_MATERIAL_DEFAULT.get(inferred_category)
     return None
+
+
+def extract_graphical_appearance(text: str) -> str:
+    result = _first_match(text, GRAPHICAL_APPEARANCE_KEYWORDS)
+    return result if result else GRAPHICAL_APPEARANCE_DEFAULT
+
+
+def extract_product_type(text: str) -> str | None:
+    return _first_match(text, PRODUCT_TYPE_KEYWORDS)
+
+
+def extract_color_spectrum_id(color_label: str) -> int:
+    lowered = color_label.lower()
+    for keyword, spectrum_id in COLOR_SPECTRUM_KEYWORDS:
+        if keyword in lowered:
+            return spectrum_id
+    return 0
+
+
+def extract_product_group_id(product_type: str | None) -> int:
+    if not product_type:
+        return 0
+    return PRODUCT_TYPE_TO_GROUP_ID.get(product_type, 0)
+
+
+# Selectors for product card links on Hollister listing pages
+PRODUCT_CARD_LINK_SELECTORS = [
+    "[data-testid='product-card'] a[href]",
+    "[class*='ProductCard'] a[href]",
+    "[class*='product-card'] a[href]",
+    "[class*='ProductTile'] a[href]",
+    "article a[href]",
+    "li[class*='product'] a[href]",
+]
+
+# Selectors for description/details text on Hollister product detail pages
+PRODUCT_DETAIL_TEXT_SELECTORS = [
+    "[class*='product-description'] *",
+    "[class*='ProductDescription'] *",
+    "[class*='product-details'] *",
+    "[class*='ProductDetails'] *",
+    "[data-testid*='description'] *",
+    "[data-testid*='details'] *",
+    "[class*='accordion__content'] *",
+    "[class*='accordion-content'] *",
+]
 
 
 # --------------------------------------------------------------------------- #
@@ -660,7 +956,7 @@ def scrape_hollister(
     headless: bool = True,
     debug: bool = False,
     debug_dir: Path | None = None,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[dict]]:
     """
     Scrape all Hollister pages.
 
@@ -668,7 +964,9 @@ def scrape_hollister(
     swatch colors we dump the first product tile's HTML so you can inspect
     Hollister's current swatch markup and add new selectors.
 
-    Returns (product_titles, swatch_color_labels).
+    Returns (product_titles, swatch_color_labels, raw_items).
+    raw_items is a list of dicts with 'title' and 'gender' for each product,
+    used to build items_hollister.csv.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -679,6 +977,7 @@ def scrape_hollister(
 
     all_titles: list[str] = []
     all_swatch_colors: list[str] = []
+    raw_items: list[dict] = []
     debug_dumped = False
     if debug:
         debug_dir = (debug_dir or Path(__file__).resolve().parent / ".hollister_debug")
@@ -743,7 +1042,7 @@ def scrape_hollister(
                 _scroll_to_bottom(page)
 
                 titles = _extract_product_names(page)
-                swatches = _extract_swatch_colors(page)
+                swatches = dedupe_swatch_labels_preserve_order(_extract_swatch_colors(page))
 
                 # Fallback: schema.org/Product JSON-LD often contains color
                 # data even when the DOM swatch markup misses.
@@ -761,6 +1060,12 @@ def scrape_hollister(
                 all_titles.extend(titles)
                 all_swatch_colors.extend(swatches)
 
+                # Build raw items — attach page swatches so build_raw_items_frame
+                # can expand to one row per color (matching H&M schema).
+                gender = "women" if label.startswith("women") else "men" if label.startswith("men") else "unisex"
+                for t in titles:
+                    raw_items.append({"title": t, "gender": gender, "page_swatches": swatches})
+
                 # Debug dump: capture first product tile when we got titles
                 # but no swatches, so the user can see the actual markup.
                 if debug and not debug_dumped and titles and not swatches:
@@ -777,7 +1082,236 @@ def scrape_hollister(
 
         browser.close()
 
-    return all_titles, all_swatch_colors
+    return all_titles, all_swatch_colors, raw_items
+
+
+def _extract_product_urls(page: "Page", base_url: str = "https://www.hollisterco.com") -> list[str]:
+    """
+    Collect individual product detail page URLs from a Hollister listing page.
+    Hollister product pages always contain '/p/' in the path
+    (e.g. /shop/us/p/hollister-kappa-polo-12345678.html).
+    Category/subcategory links are filtered out.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+
+    # Try every selector but only keep URLs that look like product detail pages
+    all_links: list[str] = []
+    for selector in PRODUCT_CARD_LINK_SELECTORS + ["a[href*='/p/']"]:
+        try:
+            elements = page.query_selector_all(selector)
+            for el in elements:
+                href = el.get_attribute("href") or ""
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    href = base_url + href
+                if "hollisterco.com" in href and href not in seen:
+                    seen.add(href)
+                    all_links.append(href)
+        except Exception:
+            continue
+
+    # Prefer URLs with /p/ (confirmed product detail pages)
+    product_urls = [u for u in all_links if "/p/" in u]
+    return product_urls if product_urls else all_links
+
+
+def _title_from_url(url: str) -> str:
+    """
+    Derive a readable product name from a Hollister product URL as a last-resort
+    fallback.  e.g. '.../p/hollister-kappa-polo-12345678.html'
+              → 'Hollister Kappa Polo'
+    Returns empty string if the URL is not a product detail page.
+    """
+    import re
+    try:
+        if "/p/" not in url:
+            return ""
+        slug = url.split("/p/")[-1].split(".html")[0].split("?")[0]
+        # Strip trailing numeric product ID (e.g. -12345678)
+        slug = re.sub(r"-\d{6,}$", "", slug)
+        return slug.replace("-", " ").title()
+    except Exception:
+        return ""
+
+
+def _scrape_product_detail(page: "Page", url: str) -> dict | None:
+    """Visit one Hollister product detail page; return title, colors, detail_text."""
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        _wait_out_akamai_challenge(page, max_wait_secs=15.0)
+        time.sleep(1.0)
+
+        # Try specific PDP title selectors first — Hollister collection pages
+        # often put the collection name (e.g. "Hollister x Kappa") in an h1,
+        # so we prefer more specific selectors and avoid bare h1.
+        title = ""
+        for sel in [
+            "[data-testid='product-title']",
+            "[data-testid='product-name']",
+            "[class*='product-title']:not(h1)",
+            "[class*='ProductTitle']:not(h1)",
+            "[class*='pdp-title']",
+            "[class*='PDPTitle']",
+            "[itemprop='name']",
+            "h2[class*='product']",
+            "h2[class*='Product']",
+            # Only fall back to bare h1 if nothing else matched
+            "h1[class*='product']",
+            "h1[class*='Product']",
+        ]:
+            try:
+                el = page.query_selector(sel)
+                if el:
+                    candidate = el.inner_text().strip()
+                    # Reject suspiciously short strings or pure brand/collection
+                    # labels like "Hollister x Kappa" (no product-type word)
+                    if candidate and len(candidate) > 5:
+                        title = candidate
+                        break
+            except Exception:
+                continue
+
+        # URL-based fallback — always more specific than a collection heading
+        if not title:
+            title = _title_from_url(url)
+
+        colors = _extract_swatch_colors(page)
+
+        detail_text = ""
+        for sel in PRODUCT_DETAIL_TEXT_SELECTORS:
+            try:
+                elements = page.query_selector_all(sel)
+                texts = [el.inner_text().strip() for el in elements if el.inner_text().strip()]
+                if texts:
+                    detail_text = " ".join(texts)
+                    break
+            except Exception:
+                continue
+
+        return {"title": title, "colors": colors, "detail_text": detail_text}
+    except Exception as exc:
+        print(f"      ERROR on {url}: {exc}")
+        return None
+
+
+def scrape_hollister_detailed(
+    sleep_between_pages: float = 3.0,
+    sleep_between_products: float = 2.5,
+    headless: bool = True,
+    max_products_per_page: int = 50,
+) -> list[dict]:
+    """
+    Two-step scraper: listing page → product URLs → visit each product page.
+    Returns a list of raw item dicts with accurate per-product color, material,
+    and graphical appearance — one dict per product-color variant.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("ERROR: playwright not installed.")
+        sys.exit(1)
+
+    raw_items: list[dict] = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1440, "height": 900},
+            locale="en-US",
+        )
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            "window.chrome = {runtime: {}};"
+        )
+        page = context.new_page()
+
+        for page_info in HOLLISTER_PAGES:
+            url   = page_info["url"]
+            label = page_info["label"]
+            gender = "women" if label.startswith("women") else "men" if label.startswith("men") else "unisex"
+            print(f"\n  [{label}] → {url}")
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                _wait_out_akamai_challenge(page, max_wait_secs=20.0)
+                _wait_for_products(page, timeout_ms=15_000)
+                time.sleep(1.5)
+                _scroll_to_bottom(page)
+                raw_urls = _extract_product_urls(page)
+                product_urls = dedupe_product_urls_preserve_order(raw_urls)
+                print(
+                    f"    Found {len(product_urls)} distinct product URLs "
+                    f"from {len(raw_urls)} listing links (cap {max_products_per_page})"
+                )
+                product_urls = product_urls[:max_products_per_page]
+            except Exception as exc:
+                print(f"    ERROR loading listing page: {exc}")
+                continue
+
+            for i, prod_url in enumerate(product_urls, 1):
+                detail = _scrape_product_detail(page, prod_url)
+                if not detail:
+                    continue
+
+                title       = detail["title"]
+                colors      = detail["colors"]
+                detail_text = detail["detail_text"]
+                combined    = f"{title} {detail_text}"
+                category    = extract_category(title)
+                material    = extract_material(combined, inferred_category=category)
+                product_type = extract_product_type(title)
+                base_graphical = extract_graphical_appearance(combined)
+
+                colors = dedupe_swatch_labels_preserve_order(colors)
+                if colors:
+                    for color_label in colors:
+                        color    = extract_color(color_label) or extract_color(title)
+                        graphical = extract_graphical_appearance(color_label)
+                        if graphical == GRAPHICAL_APPEARANCE_DEFAULT:
+                            graphical = base_graphical
+                        raw_items.append({
+                            "title": title, "gender": gender,
+                            "color_raw": color_label, "color": color or "unknown",
+                            "product_type_raw": product_type or "unknown",
+                            "material_raw": material or "unknown",
+                            "graphical_appearance_raw": graphical,
+                        })
+                else:
+                    color = extract_color(title)
+                    raw_items.append({
+                        "title": title, "gender": gender,
+                        "color_raw": color or "unknown", "color": color or "unknown",
+                        "product_type_raw": product_type or "unknown",
+                        "material_raw": material or "unknown",
+                        "graphical_appearance_raw": base_graphical,
+                    })
+
+                if i % 10 == 0:
+                    print(f"    ... {i}/{len(product_urls)} products scraped, {len(raw_items)} rows so far")
+                time.sleep(sleep_between_products)
+
+            time.sleep(sleep_between_pages)
+
+        browser.close()
+
+    print(f"\nDetailed scrape complete: {len(raw_items)} total item-color rows")
+    return raw_items
 
 
 # --------------------------------------------------------------------------- #
@@ -860,6 +1394,60 @@ def build_trend_signals_frame(
     return pd.DataFrame(rows)
 
 
+def build_raw_items_frame(
+    raw_items: list[dict],
+    scraped_date: str,
+    retailer: str = "hollister",
+) -> pd.DataFrame:
+    """Build a one-row-per-item-color DataFrame with lookup-table IDs.
+
+    Each product is expanded to one row per unique swatch color seen on its page,
+    matching the H&M one-row-per-article-color schema.
+    """
+    rows = []
+    for item in raw_items:
+        title        = item["title"]
+        gender       = item["gender"]
+        product_type = extract_product_type(title)
+        material     = extract_material(title, inferred_category=extract_category(title))
+
+        if item.get("color"):
+            color_labels = [item.get("color_raw") or item["color"]]
+        elif item.get("page_swatches"):
+            color_labels = dedupe_swatch_labels_preserve_order(item["page_swatches"])
+        else:
+            title_color = extract_color(title)
+            color_labels = [title_color] if title_color else ["unknown"]
+
+        for color_raw_lbl in color_labels:
+            if "graphical_appearance_raw" in item:
+                graphical = item["graphical_appearance_raw"]
+            else:
+                # Pattern words often live on the swatch ("Navy Check") not the title.
+                graphical = extract_graphical_appearance(f"{title} {color_raw_lbl}".strip())
+            color = item.get("color") if item.get("color") else (
+                extract_color(color_raw_lbl) if color_raw_lbl != "unknown" else None
+            )
+            rows.append({
+                "scraped_at":               scraped_date,
+                "retailer":                 retailer,
+                "title":                    title,
+                "gender":                   gender,
+                "color_raw":                color_raw_lbl,
+                "product_type_raw":         product_type or "unknown",
+                "material_raw":             material or "unknown",
+                "graphical_appearance_raw": graphical,
+                "color_master_id":          COLOR_MASTER_TO_ID.get(color or "", 0),
+                "color_spectrum_id":        extract_color_spectrum_id(color_raw_lbl),
+                "gender_id":                GENDER_TO_ID.get(gender, 2),
+                "product_type_id":          PRODUCT_TYPE_TO_ID.get(product_type or "", 0),
+                "product_group_id":         extract_product_group_id(product_type),
+                "material_id":              MATERIAL_TO_ID.get(material or "", 0),
+                "graphical_appearance_id":  GRAPHICAL_APPEARANCE_TO_ID.get(graphical, 1),
+            })
+    return pd.DataFrame(rows)
+
+
 def blend_with_existing(
     scraped: pd.DataFrame,
     existing_path: Path,
@@ -887,24 +1475,27 @@ def blend_with_existing(
 # --------------------------------------------------------------------------- #
 
 KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
-    "color":    ["black", "white", "blue", "red", "green", "beige", "pink", "gray", "navy", "brown", "purple"],
+    "color":    [
+        "black", "white", "blue", "red", "green", "beige", "pink", "gray", "navy", "brown", "purple",
+        "yellow", "orange", "metal",
+    ],
     "category": ["pants", "shorts", "skirt", "dress", "tops", "outerwear", "shoes", "accessories"],
     "material": ["cotton", "denim", "linen", "silk", "wool", "polyester", "leather", "knit"],
 }
 
 
 def parse_args() -> argparse.Namespace:
-    # Each scraper writes to its own per-retailer file so multiple retailers
-    # can be run independently, updated on their own schedule, and then
-    # combined later by combine_trend_signals.py.
-    default_output = (
-        Path(__file__).resolve().parents[1]
-        / "training" / "synthetic_data" / "trend_signals_hollister.csv"
-    )
+    _synth = Path(__file__).resolve().parents[1] / "training" / "synthetic_data"
+    default_output = _synth / "trend_signals_hollister.csv"
+    default_items  = _synth / "items_hollister.csv"
     parser = argparse.ArgumentParser(
-        description="Scrape Hollister new arrivals and write trend_signals_hollister.csv."
+        description="Scrape Hollister new arrivals and write trend_signals_hollister.csv + items_hollister.csv."
     )
     parser.add_argument("--output-path", default=str(default_output))
+    parser.add_argument(
+        "--items-path", default=str(default_items),
+        help="Where to write the raw items CSV (one row per product title).",
+    )
     parser.add_argument(
         "--existing-path", default=None,
         help="Existing trend_signals.csv to blend with scraped scores.",
@@ -930,25 +1521,49 @@ def parse_args() -> argparse.Namespace:
             "can be added to COLOR_SWATCH_SELECTORS."
         ),
     )
+    parser.add_argument(
+        "--detailed", action="store_true", default=False,
+        help="Visit each product detail page for accurate per-item colors and material.",
+    )
+    parser.add_argument(
+        "--max-products", type=int, default=50,
+        help="Max products to visit per listing page in --detailed mode (default: 50).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
+    import datetime
+
     args = parse_args()
     output_path = Path(args.output_path).expanduser().resolve()
+    items_path  = Path(args.items_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    items_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(
         f"Hollister retail scraper\n"
         f"  pages: {len(HOLLISTER_PAGES)}  headless: {args.headless}\n"
-        f"  output: {output_path}"
+        f"  detailed mode: {args.detailed}"
+        + (f"  (max {args.max_products} products/page)" if args.detailed else "") + "\n"
+        f"  output: {output_path}\n"
+        f"  items:  {items_path}"
     )
 
-    titles, swatch_colors = scrape_hollister(
+    titles, swatch_colors, raw_items = scrape_hollister(
         sleep_between_pages=args.sleep,
         headless=args.headless,
         debug=args.debug,
     )
+
+    if args.detailed:
+        print("\nRunning detailed per-product scrape for items CSV...")
+        raw_items = scrape_hollister_detailed(
+            sleep_between_pages=args.sleep,
+            sleep_between_products=2.5,
+            headless=args.headless,
+            max_products_per_page=args.max_products,
+        )
 
     print(f"\nTotal collected: {len(titles)} product titles, {len(swatch_colors)} swatch colors")
 
@@ -989,6 +1604,11 @@ def main() -> None:
     meta_path = output_path.with_name(output_path.stem + "_meta.json")
     meta_path.write_text(json.dumps({"total_items": len(titles)}, indent=2))
     print(f"Wrote metadata   → {meta_path}")
+
+    scraped_date = datetime.date.today().isoformat()
+    items_frame = build_raw_items_frame(raw_items, scraped_date=scraped_date, retailer="hollister")
+    items_frame.to_csv(items_path, index=False)
+    print(f"Wrote {len(items_frame)} raw item rows → {items_path}")
 
 
 if __name__ == "__main__":
