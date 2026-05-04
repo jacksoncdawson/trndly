@@ -8,6 +8,13 @@ Current scope in this repo:
 - model training + MLflow registration,
 - FastAPI serving with model loaded from MLflow Model Registry alias URI.
 
+## Demo recording
+
+Product preview:
+
+![Product preview recording](./trndly_demo.gif)
+
+
 ## Project structure
 
 - `backend/services/scheduleServer.py` - FastAPI service (`/`, `/health`, `/predict`)
@@ -169,3 +176,4 @@ Expected response format:
   "run_id": "string"
 }
 ```
+
