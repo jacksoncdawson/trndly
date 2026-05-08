@@ -36,8 +36,8 @@ Sweep `RandomForestRegressor` hyperparameters for the **univariate** and **finge
 
 | Part | Training table | Registered model | Sweep size |
 |------|----------------|------------------|------------|
-| **A — Univariate** | `univariate_training.parquet` | `trndly_univariate` | 12 configs |
-| **B — Fingerprint** | `fingerprint_training.parquet` | `trndly_fingerprint` | 12 configs |
+| **A — Univariate** | `training_univariate.parquet` | `trndly_univariate` | 12 configs |
+| **B — Fingerprint** | `training_fingerprint.parquet` | `trndly_fingerprint` | 12 configs |
 
 Each part:
 
@@ -59,9 +59,9 @@ The existing `champion` alias used by serving is **never** auto-overwritten — 
 
 ## Inputs
 
-- [`trndly/data/processed/univariate_training.parquet`](../data/processed/univariate_training.parquet)
-- [`trndly/data/processed/fingerprint_training.parquet`](../data/processed/fingerprint_training.parquet)
-- [`trndly/data/processed/feature_training_run.json`](../data/processed/feature_training_run.json) — feature/target column contract from `2_*`.
+- [`trndly/data/processed/training_univariate.parquet`](../data/processed/training_univariate.parquet)
+- [`trndly/data/processed/training_fingerprint.parquet`](../data/processed/training_fingerprint.parquet)
+- [`trndly/data/processed/training_run.json`](../data/processed/training_run.json) — feature/target column contract from `2_*`.
 
 ## Outputs
 
@@ -122,9 +122,9 @@ pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
 
 DATA_DIR = "../data/processed"
-IN_UNIVARIATE = f"{DATA_DIR}/univariate_training.parquet"
-IN_FINGERPRINT = f"{DATA_DIR}/fingerprint_training.parquet"
-IN_CONTRACT = f"{DATA_DIR}/feature_training_run.json"
+IN_UNIVARIATE = f"{DATA_DIR}/training_univariate.parquet"
+IN_FINGERPRINT = f"{DATA_DIR}/training_fingerprint.parquet"
+IN_CONTRACT = f"{DATA_DIR}/training_run.json"
 OUT_MANIFEST = f"{DATA_DIR}/hparam_search_run.json"
 
 # MLflow defaults match scripts/run_mlflow_experiment.sh + scheduleServer.py.

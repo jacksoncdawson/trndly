@@ -30,35 +30,34 @@ def main() -> None:
 
     cells.append(
         md(
-            r"""# `1b_scrape_aggregate_live` — scrapers + live cubes (step **~2.5** in the pipeline)
+            r"""# `1b_scrape_aggregate_live` — scrapers + live cubes + merge (step **~2.5** in the pipeline)
 
 In the notebook folder this sorts **right after** [`1_aggregate_historical.ipynb`](1_aggregate_historical.ipynb) and **before** [`2_feature_processing.ipynb`](2_feature_processing.ipynb).
 
 ### Canonical run order
 
-1. **`1_aggregate_historical.ipynb`** — `monthly_*.parquet`, `lookup.csv`
-2. **`1b_scrape_aggregate_live.ipynb`** *(this notebook; optional)* — refresh retailer **`items_*.csv`** → **`build_live_cube.py`** → merge **`live_monthly_*.parquet`** into processed cubes
-3. **`2_feature_processing.ipynb`** — training parquets from cubes
+1. **`1_aggregate_historical.ipynb`** — writes immutable `historical_*.parquet` + `lookup.csv`
+2. **`1b_scrape_aggregate_live.ipynb`** *(this notebook)* — refresh retailer **`items_*.csv`** → **`build_live_cube.py`** → emits **`live_<role>_<YYYY-MM>.parquet`** per snapshot month → merges historical + every live month into **`merged_*.parquet`**
+3. **`2_feature_processing.ipynb`** — reads merged cubes, builds `training_*.parquet`
 4. **`3_train_models.ipynb`** → **`4_hyperparameter_search.ipynb`** → **`5_forecast_from_text.ipynb`**
 
-If you skip scrapers and live parquet merges, go **`1 → 2 → 3 …`** as usual.
+## Pipeline shape
 
-## What exists today
-
-| Step | Output | Used by |
+| Stage | Output | Used by |
 |------|--------|---------|
 | Retail scrapers (`pipelines/collectors/*_scraper.py`) | `pipelines/training/synthetic_data/items_<retailer>.csv` | `build_live_cube.py` |
-| **`build_live_cube.py`** | **`data/processed/live_monthly_fingerprint.parquet` + `live_monthly_univariate.parquet`** | merge cells below → `monthly_*.parquet` |
-| Cubes from notebook **1** | `data/processed/monthly_*.parquet` | notebooks **2–5**, **`/forecast-text`**, **`scheduleServer`** |
+| **`build_live_cube.py`** | **`data/processed/live_<role>_<YYYY-MM>.parquet`** (one per snapshot month) | merge cells below |
+| Notebook **1** outputs | `data/processed/historical_*.parquet` (immutable) | merge cells below |
+| Merge cells (this notebook) | **`data/processed/merged_*.parquet`** (always rebuilt) | notebooks **2–5**, `/forecast-text`, `scheduleServer` |
 
-The live cube schema mirrors notebook 1's exactly (`source='live'` is the only differing value), so `pd.concat([historical, live])` with dedup-on-(month, fingerprint, source) is the merge.
+The live cube schema mirrors notebook 1's exactly (`source='live'` is the only differing value), so `pd.concat([historical, live])` with dedup on `(month, fingerprint, source) keep='last'` is the merge. No `.bak` files: `historical_*` is immutable, `merged_*` is always rebuilt — losing it just means re-running this notebook.
 
 ## Typical workflow here
 
 1. Toggle **`RUN_*`** (network / Playwright).
-2. **Build live cubes** → **`data/processed/live_monthly_*.parquet`**
+2. **Build live cubes** → `live_<role>_<YYYY-MM>.parquet` (one per scraped month)
 3. **Change detection** snapshot under **`data/processed/live_refresh_state.json`**
-4. Optional **merge** cells → patch **`monthly_*.parquet`**
+4. **Merge** cells (always run) → `merged_*.parquet`
 5. Open **`2_feature_processing.ipynb`** next.
 
 ## Contents
@@ -68,8 +67,8 @@ The live cube schema mirrors notebook 1's exactly (`source='live'` is the only d
 3. Run scrapers
 4. Build live cubes
 5. Change detection
-6. Merge optional live fingerprint parquet
-7. Merge optional live univariate parquet
+6. Merge fingerprint cubes (always rebuild)
+7. Merge univariate cubes (always rebuild)
 
 """
         )
@@ -80,7 +79,6 @@ The live cube schema mirrors notebook 1's exactly (`source='live'` is the only d
         code(
             r"""import hashlib
 import json
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -99,12 +97,16 @@ if (_root / "pipelines").is_dir() and str(_root) not in sys.path:
 
 from pipelines.serving.text_forecast import FINGERPRINT_COLS
 from pipelines.training.paths import (
-    LIVE_FINGERPRINT_PARQUET,
-    LIVE_UNIVARIATE_PARQUET,
-    MONTHLY_FINGERPRINT_PARQUET,
-    MONTHLY_UNIVARIATE_PARQUET,
+    HISTORICAL_FINGERPRINT_PARQUET,
+    HISTORICAL_UNIVARIATE_PARQUET,
+    LIVE_FINGERPRINT_GLOB,
+    LIVE_UNIVARIATE_GLOB,
+    MERGED_FINGERPRINT_PARQUET,
+    MERGED_UNIVARIATE_PARQUET,
     PROCESSED_DATA_DIR,
     PROJECT_ROOT,
+    discover_live_fingerprint_parquets,
+    discover_live_univariate_parquets,
 )
 
 COLLECTORS_DIR = PROJECT_ROOT / "pipelines" / "collectors"
@@ -113,8 +115,10 @@ STATE_PATH = PROCESSED_DATA_DIR / "live_refresh_state.json"
 
 print("PROJECT_ROOT:", PROJECT_ROOT)
 print("SYNTH_DATA_DIR:", SYNTH_DATA_DIR)
-print("LIVE_FINGERPRINT_PARQUET:", LIVE_FINGERPRINT_PARQUET)
-print("LIVE_UNIVARIATE_PARQUET:", LIVE_UNIVARIATE_PARQUET)
+print("HISTORICAL_FINGERPRINT_PARQUET:", HISTORICAL_FINGERPRINT_PARQUET)
+print("HISTORICAL_UNIVARIATE_PARQUET:", HISTORICAL_UNIVARIATE_PARQUET)
+print("MERGED_FINGERPRINT_PARQUET:", MERGED_FINGERPRINT_PARQUET)
+print("LIVE_FINGERPRINT_GLOB:", LIVE_FINGERPRINT_GLOB)
 """
         )
     )
@@ -128,7 +132,7 @@ RUN_HOLLISTER = False
 RUN_AMERICAN_EAGLE = False
 RUN_UNIQLO = False
 
-# After scrapers: rebuild live_monthly_fingerprint.parquet + live_monthly_univariate.parquet
+# After scrapers: rebuild live_fingerprint_<YYYY-MM>.parquet + live_univariate_<YYYY-MM>.parquet
 # under data/processed/, which scheduleServer + notebook 1b's merge cells consume.
 RUN_BUILD_LIVE_CUBE = True
 
@@ -176,7 +180,7 @@ print("Scraper stage done.")
         )
     )
 
-    cells.append(md("## 4. Build live cubes → `live_monthly_fingerprint.parquet` + `live_monthly_univariate.parquet`\n\nWrites the live counterparts of notebook 1's historical cubes under **`data/processed/`**. The merge cells below stitch them into the canonical cubes that **`scheduleServer`** / **`hmn_seasonal_processor`** consume.\n"))
+    cells.append(md("## 4. Build live cubes → `live_fingerprint_<YYYY-MM>.parquet` + `live_univariate_<YYYY-MM>.parquet`\n\nWrites the live counterparts of notebook 1's historical cubes under **`data/processed/`**. The merge cells below stitch them into the canonical cubes that **`scheduleServer`** / **`hmn_seasonal_processor`** consume.\n"))
     cells.append(
         code(
             r"""if RUN_BUILD_LIVE_CUBE:
@@ -195,8 +199,12 @@ print("Scraper stage done.")
     rc = subprocess.call(cmd, cwd=str(PROJECT_ROOT))
     if rc != 0:
         raise RuntimeError(f"build_live_cube exited with code {rc}")
-    print("Wrote", LIVE_FINGERPRINT_PARQUET)
-    print("Wrote", LIVE_UNIVARIATE_PARQUET)
+    fp_files = discover_live_fingerprint_parquets()
+    uv_files = discover_live_univariate_parquets()
+    for p in fp_files:
+        print("Wrote", p)
+    for p in uv_files:
+        print("Wrote", p)
 else:
     print("Skipped live cube build (RUN_BUILD_LIVE_CUBE=False)")
 """
@@ -220,10 +228,20 @@ def sha256_file(path: Path) -> str | None:
 
 
 retailer_csvs = sorted(SYNTH_DATA_DIR.glob("items_*.csv"))
+live_fp_files = discover_live_fingerprint_parquets()
+live_uv_files = discover_live_univariate_parquets()
 snapshot = {
     "updated_at": datetime.now(timezone.utc).isoformat(),
-    "live_fingerprint_sha256": sha256_file(LIVE_FINGERPRINT_PARQUET),
-    "live_univariate_sha256":  sha256_file(LIVE_UNIVARIATE_PARQUET),
+    "merged_fingerprint_sha256": sha256_file(MERGED_FINGERPRINT_PARQUET),
+    "merged_univariate_sha256":  sha256_file(MERGED_UNIVARIATE_PARQUET),
+    "live_fingerprint_files": [
+        {"path": str(p.relative_to(PROJECT_ROOT)), "sha256": sha256_file(p)}
+        for p in live_fp_files
+    ],
+    "live_univariate_files": [
+        {"path": str(p.relative_to(PROJECT_ROOT)), "sha256": sha256_file(p)}
+        for p in live_uv_files
+    ],
     "retailer_files": {
         str(p.relative_to(PROJECT_ROOT)): {
             "mtime_ns": p.stat().st_mtime_ns,
@@ -239,12 +257,12 @@ if STATE_PATH.exists():
     prev = json.loads(STATE_PATH.read_text())
 
 changed = (
-    snapshot["live_fingerprint_sha256"] != prev.get("live_fingerprint_sha256")
-    or snapshot["live_univariate_sha256"] != prev.get("live_univariate_sha256")
+    snapshot["merged_fingerprint_sha256"] != prev.get("merged_fingerprint_sha256")
+    or snapshot["merged_univariate_sha256"] != prev.get("merged_univariate_sha256")
 )
 STATE_PATH.write_text(json.dumps(snapshot, indent=2))
 print("State written:", STATE_PATH)
-print("Live cubes changed vs last notebook run:", changed)
+print("Merged cubes changed vs last notebook run:", changed)
 if not changed and prev:
     print("(SHA256 matched previous snapshot.)")
 
@@ -253,62 +271,66 @@ snapshot
         )
     )
 
-    cells.append(md("## 6. Merge optional live fingerprint parquet\n\nExpect **`live_monthly_fingerprint.parquet`** next to other processed artifacts, **`source='live'`**, same columns as **`monthly_fingerprint.parquet`**. Backup is **`monthly_fingerprint.parquet.bak.<timestamp>`**.\n"))
+    cells.append(md("## 6. Merge fingerprint cubes (always rebuild)\n\nReads **`historical_fingerprint.parquet`** (immutable, from notebook 1) and globs every **`live_fingerprint_<YYYY-MM>.parquet`** in `data/processed/`. Concats with dedup on `(month, *FINGERPRINT_COLS, source) keep='last'` and writes **`merged_fingerprint.parquet`**. Always rebuilds — no `.bak` needed because `historical_*` is never overwritten.\n"))
     cells.append(
         code(
-            r"""MERGE_LIVE_FINGERPRINT = LIVE_FINGERPRINT_PARQUET.exists()
-
-if not MERGE_LIVE_FINGERPRINT:
-    print("No file at", LIVE_FINGERPRINT_PARQUET, "— skipping fingerprint merge.")
-elif not MONTHLY_FINGERPRINT_PARQUET.exists():
-    print("Missing base cube", MONTHLY_FINGERPRINT_PARQUET, "— run notebook 1 first.")
+            r"""if not HISTORICAL_FINGERPRINT_PARQUET.exists():
+    print("Missing", HISTORICAL_FINGERPRINT_PARQUET, "— run notebook 1 first.")
 else:
-    hist = pd.read_parquet(MONTHLY_FINGERPRINT_PARQUET)
-    live = pd.read_parquet(LIVE_FINGERPRINT_PARQUET)
+    hist = pd.read_parquet(HISTORICAL_FINGERPRINT_PARQUET)
     hist["month"] = pd.to_datetime(hist["month"]).dt.as_unit("ns")
-    live["month"] = pd.to_datetime(live["month"]).dt.as_unit("ns")
+
+    live_files = discover_live_fingerprint_parquets()
+    if live_files:
+        live_frames = []
+        for p in live_files:
+            f = pd.read_parquet(p)
+            f["month"] = pd.to_datetime(f["month"]).dt.as_unit("ns")
+            live_frames.append(f)
+            print(f"  loaded {len(f):>5} rows from {p.name}")
+        live = pd.concat(live_frames, ignore_index=True)
+    else:
+        print("No live_fingerprint_*.parquet found — merged cube will be historical-only.")
+        live = pd.DataFrame(columns=hist.columns)
 
     dup_cols = ["month", *FINGERPRINT_COLS, "source"]
     merged = pd.concat([hist, live], ignore_index=True)
     merged = merged.drop_duplicates(subset=dup_cols, keep="last")
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    bak = MONTHLY_FINGERPRINT_PARQUET.with_suffix(f".parquet.bak.{ts}")
-    shutil.copy2(MONTHLY_FINGERPRINT_PARQUET, bak)
-    print("Backup:", bak)
-
-    merged.to_parquet(MONTHLY_FINGERPRINT_PARQUET, index=False)
-    print("Wrote", MONTHLY_FINGERPRINT_PARQUET, "| rows:", len(merged))
+    merged.to_parquet(MERGED_FINGERPRINT_PARQUET, index=False)
+    print("Wrote", MERGED_FINGERPRINT_PARQUET, "| rows:", len(merged))
 """
         )
     )
 
-    cells.append(md("## 7. Merge optional live univariate parquet\n\nSame pattern for **`live_monthly_univariate.parquet`** (long-format cube).\n"))
+    cells.append(md("## 7. Merge univariate cubes (always rebuild)\n\nSame pattern for the long-format cube: read **`historical_univariate.parquet`** + glob every **`live_univariate_<YYYY-MM>.parquet`**, concat with dedup on `(month, dimension, level_id, source) keep='last'`, write **`merged_univariate.parquet`**.\n"))
     cells.append(
         code(
-            r"""MERGE_LIVE_UNIVARIATE = LIVE_UNIVARIATE_PARQUET.exists()
-
-if not MERGE_LIVE_UNIVARIATE:
-    print("No file at", LIVE_UNIVARIATE_PARQUET, "— skipping univariate merge.")
-elif not MONTHLY_UNIVARIATE_PARQUET.exists():
-    print("Missing base cube", MONTHLY_UNIVARIATE_PARQUET, "— run notebook 1 first.")
+            r"""if not HISTORICAL_UNIVARIATE_PARQUET.exists():
+    print("Missing", HISTORICAL_UNIVARIATE_PARQUET, "— run notebook 1 first.")
 else:
-    hist = pd.read_parquet(MONTHLY_UNIVARIATE_PARQUET)
-    live = pd.read_parquet(LIVE_UNIVARIATE_PARQUET)
+    hist = pd.read_parquet(HISTORICAL_UNIVARIATE_PARQUET)
     hist["month"] = pd.to_datetime(hist["month"]).dt.as_unit("ns")
-    live["month"] = pd.to_datetime(live["month"]).dt.as_unit("ns")
+
+    live_files = discover_live_univariate_parquets()
+    if live_files:
+        live_frames = []
+        for p in live_files:
+            f = pd.read_parquet(p)
+            f["month"] = pd.to_datetime(f["month"]).dt.as_unit("ns")
+            live_frames.append(f)
+            print(f"  loaded {len(f):>5} rows from {p.name}")
+        live = pd.concat(live_frames, ignore_index=True)
+    else:
+        print("No live_univariate_*.parquet found — merged cube will be historical-only.")
+        live = pd.DataFrame(columns=hist.columns)
 
     dup_cols = ["month", "dimension", "level_id", "source"]
     merged = pd.concat([hist, live], ignore_index=True)
     merged = merged.drop_duplicates(subset=dup_cols, keep="last")
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    bak = MONTHLY_UNIVARIATE_PARQUET.with_suffix(f".parquet.bak.{ts}")
-    shutil.copy2(MONTHLY_UNIVARIATE_PARQUET, bak)
-    print("Backup:", bak)
-
-    merged.to_parquet(MONTHLY_UNIVARIATE_PARQUET, index=False)
-    print("Wrote", MONTHLY_UNIVARIATE_PARQUET, "| rows:", len(merged))
+    merged.to_parquet(MERGED_UNIVARIATE_PARQUET, index=False)
+    print("Wrote", MERGED_UNIVARIATE_PARQUET, "| rows:", len(merged))
 """
         )
     )
@@ -317,7 +339,7 @@ else:
         md(
             r"""### Next steps
 
-- **Listing timeframe model:** rerun **`python pipelines/collectors/hmn_seasonal_processor.py`** after **`live_monthly_univariate.parquet`** changes.
+- **Listing timeframe model:** rerun **`python pipelines/collectors/hmn_seasonal_processor.py`** after **`merged_univariate.parquet`** changes.
 - **Forecast-from-text:** after cube merges here, run **`2_feature_processing.ipynb`** then **`3_*` / `4_*`**.
 
 """

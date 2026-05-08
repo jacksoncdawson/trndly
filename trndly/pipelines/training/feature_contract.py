@@ -1,10 +1,11 @@
 """
 Training + inference contract for the listing timeframe classifier.
 
-Consumes the live univariate cube (``data/processed/live_monthly_univariate.parquet``,
-or the merged ``monthly_univariate.parquet``), joins optional historical seasonality
-curves from ``seasonality_table.csv``, and emits the fixed-width numeric vector
-expected by ``RandomForestClassifier`` models logged via MLflow.
+Consumes the merged univariate cube (``data/processed/merged_univariate.parquet``,
+the always-rebuilt historical+live concat from notebook 1b), joins optional
+historical seasonality curves from ``seasonality_table.csv``, and emits the
+fixed-width numeric vector expected by ``RandomForestClassifier`` models
+logged via MLflow.
 
 Public lookup helper: ``load_trend_lookup_from_univariate``. Returns a nested
 ``{feature_type: {feature_value: {timeframe: score}}}`` dict where only
@@ -99,8 +100,8 @@ def normalize_token(value: Any) -> str:
 # Live cube schema validators
 # ---------------------------------------------------------------------------
 
-# Schema contracts mirror notebook 1's monthly_fingerprint.parquet and
-# monthly_univariate.parquet exactly so a pd.concat([historical, live])
+# Schema contracts mirror notebook 1's historical_fingerprint.parquet and
+# historical_univariate.parquet exactly so a pd.concat([historical, live])
 # preserves dtypes. See build_live_cube.py for the producer.
 
 LIVE_FINGERPRINT_COLUMNS: list[str] = [
@@ -200,16 +201,16 @@ def load_trend_lookup_from_univariate(
     lookup_csv_path: str | Path | None = None,
 ) -> TrendLookup:
     """Build a nested ``{feature_type: {feature_value: {timeframe: score}}}``
-    lookup from ``monthly_univariate.parquet`` (or the merged historical+live
-    cube). Reads the merged historical+live cube by default.
+    lookup from a univariate cube parquet (typically
+    ``data/processed/merged_univariate.parquet`` — the always-rebuilt
+    historical+live merge produced by notebook 1b).
 
     Filters by ``source`` (default ``'live'``) and the latest available
     month within that source. Decodes ``level_id`` → name via
-    ``lookup.csv`` and lowercases — matching the old trend_signals.csv
-    feature_value convention.
+    ``lookup.csv`` and lowercases.
 
     Only ``current`` carries a real score; future timeframes fall back to
-    DEFAULT_MISSING_SCORE — matches the contract the old loader produced.
+    DEFAULT_MISSING_SCORE — until per-fingerprint forecasting lands.
     """
     parquet_path = Path(parquet_path)
     if lookup_csv_path is None:

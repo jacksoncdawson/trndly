@@ -620,7 +620,7 @@ def parse_args() -> argparse.Namespace:
         description="Scrape Uniqlo via the internal listing API. Writes "
                     "items_uniqlo.csv (one row per product-color variant). "
                     "build_live_cube.py aggregates items_*.csv into "
-                    "live_monthly_fingerprint.parquet + live_monthly_univariate.parquet."
+                    "live_fingerprint_<YYYY-MM>.parquet + live_univariate_<YYYY-MM>.parquet."
     )
     parser.add_argument(
         "--items-path", default=str(default_items),

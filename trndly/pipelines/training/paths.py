@@ -25,19 +25,35 @@ DIRECTORY LAYOUT
         items_<retailer>.csv                   ← per-retailer scrape output
   data/processed/                              ← PROCESSED_DATA_DIR
     lookup.csv                                 ← LOOKUP_CSV
-    monthly_fingerprint.parquet                ← MONTHLY_FINGERPRINT_PARQUET (historical+live merged)
-    monthly_univariate.parquet                 ← MONTHLY_UNIVARIATE_PARQUET (historical+live merged)
-    live_monthly_fingerprint.parquet           ← LIVE_FINGERPRINT_PARQUET (live-only, pre-merge)
-    live_monthly_univariate.parquet            ← LIVE_UNIVARIATE_PARQUET (live-only, pre-merge)
+    historical_fingerprint.parquet             ← HISTORICAL_FINGERPRINT_PARQUET (notebook 1, immutable)
+    historical_fingerprint.meta.json           ← HISTORICAL_FINGERPRINT_META_JSON
+    historical_univariate.parquet              ← HISTORICAL_UNIVARIATE_PARQUET (notebook 1, immutable)
+    live_fingerprint_<YYYY-MM>.parquet         ← matches LIVE_FINGERPRINT_GLOB (per-snapshot-month)
+    live_univariate_<YYYY-MM>.parquet          ← matches LIVE_UNIVARIATE_GLOB
+    merged_fingerprint.parquet                 ← MERGED_FINGERPRINT_PARQUET (notebook 1b, always rebuilt)
+    merged_univariate.parquet                  ← MERGED_UNIVARIATE_PARQUET (notebook 1b)
+    training_fingerprint.parquet               ← TRAINING_FINGERPRINT_PARQUET (notebook 2)
+    training_univariate.parquet                ← TRAINING_UNIVARIATE_PARQUET
+    training_run.json                          ← TRAINING_RUN_JSON (notebook 2 metadata)
   backend/
   frontend/                                    ← FRONTEND_DIR
     index.html                                 ← static UI served at /ui
   tests/
+
+Cube pipeline stages (left to right):
+  notebook 1   →  historical_*           (immutable raw cube)
+  build_live_cube
+              →  live_*_<YYYY-MM>        (one parquet per snapshot month)
+  notebook 1b  →  merged_*               (always rebuilt: historical + glob(live_*))
+  notebook 2   →  training_*             (lags + targets + splits + weights)
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+import pandas as pd
 
 # --------------------------------------------------------------------------- #
 # Top-level anchors                                                             #
@@ -96,18 +112,62 @@ HM_TRANSACTIONS_CSV: Path = HM_KAGGLE_DIR / "transactions_train.csv"
 
 PROCESSED_DATA_DIR: Path = PROJECT_ROOT / "data" / "processed"
 LOOKUP_CSV: Path = PROCESSED_DATA_DIR / "lookup.csv"
-MONTHLY_FINGERPRINT_PARQUET: Path = PROCESSED_DATA_DIR / "monthly_fingerprint.parquet"
-MONTHLY_UNIVARIATE_PARQUET: Path = PROCESSED_DATA_DIR / "monthly_univariate.parquet"
-FEATURE_TRAINING_CONTRACT_JSON: Path = PROCESSED_DATA_DIR / "feature_training_run.json"
 
-# Live cube outputs from build_live_cube.py — same schema as the historical
-# parquets, so notebook 1b can pd.concat them into the merged universe.
-LIVE_FINGERPRINT_PARQUET: Path = PROCESSED_DATA_DIR / "live_monthly_fingerprint.parquet"
-LIVE_UNIVARIATE_PARQUET: Path = PROCESSED_DATA_DIR / "live_monthly_univariate.parquet"
+# Stage 1: notebook 1 outputs — immutable raw cube + run metadata.
+HISTORICAL_FINGERPRINT_PARQUET: Path = PROCESSED_DATA_DIR / "historical_fingerprint.parquet"
+HISTORICAL_FINGERPRINT_META_JSON: Path = PROCESSED_DATA_DIR / "historical_fingerprint.meta.json"
+HISTORICAL_UNIVARIATE_PARQUET: Path = PROCESSED_DATA_DIR / "historical_univariate.parquet"
+
+# Stage 2: build_live_cube outputs — one parquet per snapshot month.
+# build_live_cube emits live_fingerprint_<YYYY-MM>.parquet using the helpers
+# below; notebook 1b discovers them by globbing.
+LIVE_FINGERPRINT_GLOB: str = "live_fingerprint_*.parquet"
+LIVE_UNIVARIATE_GLOB: str = "live_univariate_*.parquet"
+
+# Stage 3: notebook 1b output — always rebuilt from historical + glob(live_*).
+MERGED_FINGERPRINT_PARQUET: Path = PROCESSED_DATA_DIR / "merged_fingerprint.parquet"
+MERGED_UNIVARIATE_PARQUET: Path = PROCESSED_DATA_DIR / "merged_univariate.parquet"
+
+# Stage 4: notebook 2 output — lag/target/split/weight prepped for training.
+TRAINING_FINGERPRINT_PARQUET: Path = PROCESSED_DATA_DIR / "training_fingerprint.parquet"
+TRAINING_UNIVARIATE_PARQUET: Path = PROCESSED_DATA_DIR / "training_univariate.parquet"
+TRAINING_RUN_JSON: Path = PROCESSED_DATA_DIR / "training_run.json"
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                       #
 # --------------------------------------------------------------------------- #
+
+_LIVE_DATE_RE = re.compile(r"_(\d{4}-\d{2})\.parquet$")
+
+
+def _format_month(month) -> str:
+    """Coerce ``month`` (datetime/Timestamp/'YYYY-MM-DD' string) to ``'YYYY-MM'``."""
+    return pd.Timestamp(month).strftime("%Y-%m")
+
+
+def live_fingerprint_path_for(month) -> Path:
+    """Path for the per-month live fingerprint parquet, e.g. for the
+    May 2026 snapshot: ``data/processed/live_fingerprint_2026-05.parquet``."""
+    return PROCESSED_DATA_DIR / f"live_fingerprint_{_format_month(month)}.parquet"
+
+
+def live_univariate_path_for(month) -> Path:
+    """Path for the per-month live univariate parquet, e.g. for May 2026:
+    ``data/processed/live_univariate_2026-05.parquet``."""
+    return PROCESSED_DATA_DIR / f"live_univariate_{_format_month(month)}.parquet"
+
+
+def discover_live_fingerprint_parquets() -> list[Path]:
+    """Return every ``live_fingerprint_<YYYY-MM>.parquet`` in PROCESSED_DATA_DIR,
+    sorted by month."""
+    return sorted(PROCESSED_DATA_DIR.glob(LIVE_FINGERPRINT_GLOB))
+
+
+def discover_live_univariate_parquets() -> list[Path]:
+    """Return every ``live_univariate_<YYYY-MM>.parquet`` in PROCESSED_DATA_DIR,
+    sorted by month."""
+    return sorted(PROCESSED_DATA_DIR.glob(LIVE_UNIVARIATE_GLOB))
+
 
 def ensure_data_dirs() -> None:
     """

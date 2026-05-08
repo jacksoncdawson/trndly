@@ -1,0 +1,6 @@
+<!DOCTYPE html>
+<html><body>
+<script>
+window.__INITIAL_STATE__ = '{"product":{"fabricDetails":"Body:60% Cotton, 40% Polyester. Machine wash cold."}}';
+</script>
+</body></html>

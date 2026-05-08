@@ -5,32 +5,38 @@ Each retail scraper writes a raw per-(style_id × cc_id) row file named
 `items_<retailer>.csv` in the synthetic_data directory — one row per
 "article" (style + color variant), matching H&M's article-level grain.
 This module unions all four files, derives a month from `scraped_at`,
-and writes two parquets to `data/processed/`:
+and writes per-snapshot-month parquets to `data/processed/`:
 
-  - ``live_monthly_fingerprint.parquet``: 5-D cube keyed on
+  - ``live_fingerprint_<YYYY-MM>.parquet`` — 5-D cube keyed on
     (month, product_type_id, gender_id, color_master_id,
     graphical_appearance_id, material_id) with n_articles, share_articles,
     avg_price (NaN — price is not scraped).
-  - ``live_monthly_univariate.parquet``: long format with one row per
+  - ``live_univariate_<YYYY-MM>.parquet`` — long format with one row per
     (month, dimension, level_id) for 5 dimensions: product_type, gender,
     color_master, graphical_appearance, material. Skips color_spectrum
     (mostly noise) and product_group (deterministic from product_type).
 
-Schema is byte-compatible with notebook 1's ``monthly_fingerprint.parquet``
-and ``monthly_univariate.parquet`` (`source` is the only differing value:
-`'live'` vs `'historical'`). Notebook 1b's pd.concat + dedup-on-(month,
-fingerprint, source) merge is the consumer.
+One file per snapshot month: re-running build_live_cube within the same
+month overwrites that month's file. Items spanning multiple months
+(e.g., recovered/historical scrapes) emit multiple files. Notebook 1b
+discovers them by globbing ``live_*_*.parquet`` and concats with the
+historical cube to produce the always-rebuilt ``merged_*.parquet``.
+
+Schema is byte-compatible with notebook 1's ``historical_*.parquet``
+(``source`` is the only differing value: ``'live'`` vs ``'historical'``)
+so the 1b concat preserves Categorical dtypes and IDs decode against
+the same ``lookup.csv``.
 
 SEMANTICS
 ---------
 The cube is a *snapshot*, not a running tally. Within-month re-runs
 overwrite prior `(month, fingerprint, source='live')` rows in the merged
-universe (1b's keep='last' enforces this). Items dropped from the catalog
-between runs are dropped from the cube.
+universe. Items dropped from the catalog between runs are dropped from
+the cube. Multi-month inputs emit one self-contained parquet per month.
 
 Usage
 -----
-    # Default: read all items_*.csv, write both parquets
+    # Default: read all items_*.csv, write live_*_<YYYY-MM>.parquet per month
     python build_live_cube.py
 
     # Override input set:
@@ -58,9 +64,9 @@ from pipelines.training.feature_contract import (  # noqa: E402
     validate_live_univariate_frame,
 )
 from pipelines.training.paths import (  # noqa: E402
-    LIVE_FINGERPRINT_PARQUET,
-    LIVE_UNIVARIATE_PARQUET,
     PROCESSED_DATA_DIR,
+    live_fingerprint_path_for,
+    live_univariate_path_for,
 )
 
 DEFAULT_SIGNALS_DIR = (
@@ -107,8 +113,8 @@ def discover_items_files(signals_dir: Path) -> list[Path]:
 
 def load_items(paths: list[Path]) -> pd.DataFrame:
     """Read every items_<retailer>.csv and union them. Adds a `month` column
-    derived from scraped_at (month-start) and a Categorical `source` set
-    constant 'live'.
+    derived from scraped_at (month-start). Source tagging happens in the
+    cube builders.
     """
     frames = []
     for path in paths:
@@ -219,6 +225,37 @@ def build_univariate_cube(items: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
+# Per-month writer                                                              #
+# --------------------------------------------------------------------------- #
+
+def write_per_month_cubes(
+    fingerprint: pd.DataFrame,
+    univariate: pd.DataFrame,
+    out_dir: Path,
+) -> list[tuple[Path, Path]]:
+    """Split each cube by `month` and write one parquet per month under
+    out_dir, named ``live_<role>_<YYYY-MM>.parquet``. Re-running for the
+    same month overwrites that month's file (snapshot semantics).
+
+    Returns a list of (fingerprint_path, univariate_path) per month written.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[tuple[Path, Path]] = []
+    for month, fp_group in fingerprint.groupby("month", observed=True, sort=True):
+        fp_path = out_dir / live_fingerprint_path_for(month).name
+        uv_path = out_dir / live_univariate_path_for(month).name
+        uv_group = univariate[univariate["month"] == month]
+        # Validate per-month before writing — invariant must hold within
+        # the slice we're persisting, not just on the union.
+        validate_live_fingerprint_frame(fp_group)
+        validate_live_univariate_frame(uv_group)
+        fp_group.to_parquet(fp_path, index=False)
+        uv_group.to_parquet(uv_path, index=False)
+        paths.append((fp_path, uv_path))
+    return paths
+
+
+# --------------------------------------------------------------------------- #
 # CLI                                                                           #
 # --------------------------------------------------------------------------- #
 
@@ -226,7 +263,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Aggregate per-retailer items_*.csv files into the live "
-            "fingerprint + univariate cubes consumed by notebook 1b."
+            "fingerprint + univariate cubes consumed by notebook 1b. "
+            "Writes one parquet per snapshot month: "
+            "live_fingerprint_<YYYY-MM>.parquet + live_univariate_<YYYY-MM>.parquet."
         )
     )
     parser.add_argument(
@@ -243,7 +282,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir", default=str(PROCESSED_DATA_DIR),
-        help=f"Where to write the live_monthly_*.parquet files (default: {PROCESSED_DATA_DIR}).",
+        help=(
+            "Where to write live_<role>_<YYYY-MM>.parquet files "
+            f"(default: {PROCESSED_DATA_DIR})."
+        ),
     )
     return parser.parse_args()
 
@@ -268,23 +310,22 @@ def main() -> None:
     for p in input_paths:
         print(f"  {p.name}")
     items = load_items(input_paths)
+    months = sorted(items["month"].unique().tolist())
     print(
-        f"\nLoaded {len(items):,} articles across {items['month'].nunique()} "
-        f"month(s); months={sorted(items['month'].unique().tolist())}"
+        f"\nLoaded {len(items):,} articles across {len(months)} month(s); "
+        f"months={[pd.Timestamp(m).strftime('%Y-%m') for m in months]}"
     )
 
     fingerprint = build_fingerprint_cube(items)
-    fingerprint = validate_live_fingerprint_frame(fingerprint)
     univariate = build_univariate_cube(items)
-    univariate = validate_live_univariate_frame(univariate)
 
-    fp_path = out_dir / LIVE_FINGERPRINT_PARQUET.name
-    uv_path = out_dir / LIVE_UNIVARIATE_PARQUET.name
-    fingerprint.to_parquet(fp_path, index=False)
-    univariate.to_parquet(uv_path, index=False)
+    written = write_per_month_cubes(fingerprint, univariate, out_dir)
+    for fp_path, uv_path in written:
+        n_fp = (fingerprint["month"] == pd.Timestamp(fp_path.stem.split("_")[-1] + "-01")).sum()
+        n_uv = (univariate["month"] == pd.Timestamp(uv_path.stem.split("_")[-1] + "-01")).sum()
+        print(f"\nWrote {n_fp:>6} fingerprint rows  → {fp_path}")
+        print(f"Wrote {n_uv:>6} univariate rows   → {uv_path}")
 
-    print(f"\nWrote {len(fingerprint):>6} fingerprint rows  → {fp_path}")
-    print(f"Wrote {len(univariate):>6} univariate rows   → {uv_path}")
     print("\nUnivariate share-sum invariant per (month, dimension):")
     sums = univariate.groupby(["month", "dimension"], observed=True)["share_articles"].sum()
     print(f"  min={sums.min():.6f}  max={sums.max():.6f}  (expected ≈ 1.0)")

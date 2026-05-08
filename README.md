@@ -17,7 +17,10 @@ Current scope in this repo:
 - `pipelines/training/train_listing_timeline.py` - classifier training + MLflow registration/alias assignment
 - `pipelines/training/data/` - generated local artifacts (train/val/test CSVs, seasonality table)
 - `pipelines/training/synthetic_data/` - per-retailer `items_<retailer>.csv` written by scrapers; consumed by `pipelines/collectors/build_live_cube.py`
-- `data/processed/live_monthly_*.parquet` - live cube outputs from `build_live_cube.py`; merged into the historical cubes by `notebooks/1b_scrape_aggregate_live.ipynb`
+- `data/processed/live_<role>_<YYYY-MM>.parquet` - one parquet per snapshot month from `build_live_cube.py`
+- `data/processed/historical_*.parquet` - notebook 1 outputs (immutable raw cube)
+- `data/processed/merged_*.parquet` - notebook 1b output (always-rebuilt concat of historical + live)
+- `data/processed/training_*.parquet` + `training_run.json` - notebook 2 outputs (lag/target prep for the RF training pipeline)
 - `scripts/run_mlflow_experiment.sh` - one-command experiment run
 - `scripts/run_api.sh` - one-command API start
 - `scripts/kill_api.sh` - stop API processes on configured port
@@ -43,7 +46,7 @@ Create `backend/services/.env` with values like:
 MLFLOW_TRACKING_URI=http://<private-mlflow-host>:5000
 MLFLOW_MODEL_URI=models:/listing_timeline_experiments@candidate
 MLFLOW_EXPERIMENT_NAME=checkpoint_fastapi
-LIVE_UNIVARIATE_PATH=../../data/processed/live_monthly_univariate.parquet
+MERGED_UNIVARIATE_PATH=../../data/processed/merged_univariate.parquet
 MLFLOW_MODEL_ARTIFACT_PATH=model
 ```
 

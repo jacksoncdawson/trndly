@@ -42,10 +42,9 @@ from pipelines.training.feature_contract import (
 )
 from pipelines.training.paths import (
     FRONTEND_DIR,
-    LIVE_UNIVARIATE_PARQUET,
     LOOKUP_CSV,
-    MONTHLY_FINGERPRINT_PARQUET,
-    MONTHLY_UNIVARIATE_PARQUET,
+    MERGED_FINGERPRINT_PARQUET,
+    MERGED_UNIVARIATE_PARQUET,
     SEASONALITY_TABLE_CSV as DEFAULT_SEASONALITY_TABLE_PATH,
 )
 
@@ -68,8 +67,8 @@ def _resolve_configured_path(env_var: str, default: Path) -> Path:
     return configured if configured.is_absolute() else (SERVICE_DIR / configured).resolve()
 
 
-LIVE_UNIVARIATE_PATH = _resolve_configured_path(
-    "LIVE_UNIVARIATE_PATH", LIVE_UNIVARIATE_PARQUET
+MERGED_UNIVARIATE_PATH = _resolve_configured_path(
+    "MERGED_UNIVARIATE_PATH", MERGED_UNIVARIATE_PARQUET
 )
 SEASONALITY_TABLE_PATH = _resolve_configured_path(
     "SEASONALITY_TABLE_PATH", DEFAULT_SEASONALITY_TABLE_PATH
@@ -118,7 +117,7 @@ class SeasonalityState:
 
 
 MODEL_STATE = ModelState()
-TREND_STATE = TrendState(source_path=str(LIVE_UNIVARIATE_PATH))
+TREND_STATE = TrendState(source_path=str(MERGED_UNIVARIATE_PATH))
 SEASONALITY_STATE = SeasonalityState(source_path=str(SEASONALITY_TABLE_PATH))
 
 FORECAST_DEPS: ForecastDeps | None = None
@@ -305,18 +304,18 @@ def reload_trend_data() -> TrendState:
 
     try:
         lookup = load_trend_lookup_from_univariate(
-            LIVE_UNIVARIATE_PATH, source="live", latest_month=True
+            MERGED_UNIVARIATE_PATH, source="live", latest_month=True
         )
         TREND_STATE = TrendState(
             lookup=lookup,
-            source_path=str(LIVE_UNIVARIATE_PATH),
+            source_path=str(MERGED_UNIVARIATE_PATH),
         )
-        logger.info("Loaded trend signals from %s", LIVE_UNIVARIATE_PATH)
+        logger.info("Loaded trend signals from %s", MERGED_UNIVARIATE_PATH)
         return TREND_STATE
     except Exception as exc:
-        logger.exception("Failed to load trend signals from %s", LIVE_UNIVARIATE_PATH)
+        logger.exception("Failed to load trend signals from %s", MERGED_UNIVARIATE_PATH)
         TREND_STATE = TrendState(
-            source_path=str(LIVE_UNIVARIATE_PATH),
+            source_path=str(MERGED_UNIVARIATE_PATH),
             error=str(exc),
         )
         return TREND_STATE
@@ -353,21 +352,21 @@ def reload_forecast_bundle() -> None:
     FORECAST_LOAD_ERROR = None
 
     try:
-        if not MONTHLY_FINGERPRINT_PARQUET.exists():
-            FORECAST_LOAD_ERROR = f"missing fingerprint cube at {MONTHLY_FINGERPRINT_PARQUET}"
+        if not MERGED_FINGERPRINT_PARQUET.exists():
+            FORECAST_LOAD_ERROR = f"missing fingerprint cube at {MERGED_FINGERPRINT_PARQUET}"
             return
         if not LOOKUP_CSV.exists():
             FORECAST_LOAD_ERROR = f"missing lookup table at {LOOKUP_CSV}"
             return
         cube_uni = None
-        if MONTHLY_UNIVARIATE_PARQUET.exists():
+        if MERGED_UNIVARIATE_PARQUET.exists():
             try:
-                cube_uni = pd.read_parquet(MONTHLY_UNIVARIATE_PARQUET)
+                cube_uni = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
                 cube_uni["month"] = pd.to_datetime(cube_uni["month"]).dt.as_unit("ns")
             except Exception:
                 logger.exception("Optional univariate cube load skipped.")
 
-        cube_fp = pd.read_parquet(MONTHLY_FINGERPRINT_PARQUET)
+        cube_fp = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
         cube_fp["month"] = pd.to_datetime(cube_fp["month"]).dt.as_unit("ns")
         lookup = pd.read_csv(LOOKUP_CSV)
 
@@ -451,8 +450,9 @@ class OptionsResponse(BaseModel):
 def options() -> OptionsResponse:
     """
     Return the vocabularies the UI should use for dropdowns. Colors, categories,
-    and materials come from whatever is in trend_signals.csv (so the UI stays in
-    sync with the model's real feature space automatically).
+    and materials come from the live slice of merged_univariate.parquet
+    (decoded against lookup.csv) so the UI stays in sync with the model's real
+    feature space automatically.
     """
     if TREND_STATE.lookup is None:
         raise HTTPException(
@@ -483,7 +483,7 @@ def health() -> HealthResponse:
         forecast_univariate_uri=MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
         tracking_uri=MLFLOW_TRACKING_URI,
         configured_model_uri=MLFLOW_MODEL_URI,
-        configured_trend_data_path=str(LIVE_UNIVARIATE_PATH),
+        configured_trend_data_path=str(MERGED_UNIVARIATE_PATH),
         configured_seasonality_table_path=str(SEASONALITY_TABLE_PATH),
         active_model_uri=MODEL_STATE.model_uri,
         model_version=MODEL_STATE.model_version,

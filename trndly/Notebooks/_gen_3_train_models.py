@@ -38,8 +38,8 @@ Train **two scikit-learn models** from those calendar-strict tables. Both are mu
 
 | Part | Input | Output model | Output |
 |------|-------|--------------|--------|
-| **A — Univariate** | `univariate_training.parquet` | `RandomForestRegressor` | `univariate_model.joblib` |
-| **B — Fingerprint** | `fingerprint_training.parquet` | `RandomForestRegressor` | `fingerprint_model.joblib` |
+| **A — Univariate** | `training_univariate.parquet` | `RandomForestRegressor` | `univariate_model.joblib` |
+| **B — Fingerprint** | `training_fingerprint.parquet` | `RandomForestRegressor` | `fingerprint_model.joblib` |
 
 Both models are tuned to be small enough to ship in the API container (a few MB each on this dataset) and use `sample_weight = sqrt(n_articles_at_anchor)` so high-volume series dominate the loss while long-tail series still contribute signal.
 
@@ -57,9 +57,9 @@ A persistence (carry-forward) baseline `ŷ_h = share_t` is reported alongside ev
 
 ## Inputs
 
-- [`trndly/data/processed/univariate_training.parquet`](../data/processed/univariate_training.parquet) — Part A training table.
-- [`trndly/data/processed/fingerprint_training.parquet`](../data/processed/fingerprint_training.parquet) — Part B training table.
-- [`trndly/data/processed/feature_training_run.json`](../data/processed/feature_training_run.json) — feature/target column lists from `2_*` (used as the canonical contract).
+- [`trndly/data/processed/training_univariate.parquet`](../data/processed/training_univariate.parquet) — Part A training table.
+- [`trndly/data/processed/training_fingerprint.parquet`](../data/processed/training_fingerprint.parquet) — Part B training table.
+- [`trndly/data/processed/training_run.json`](../data/processed/training_run.json) — feature/target column lists from `2_*` (used as the canonical contract).
 
 ## Outputs
 
@@ -121,9 +121,9 @@ pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
 
 DATA_DIR = "../data/processed"
-IN_UNIVARIATE = f"{DATA_DIR}/univariate_training.parquet"
-IN_FINGERPRINT = f"{DATA_DIR}/fingerprint_training.parquet"
-IN_CONTRACT = f"{DATA_DIR}/feature_training_run.json"
+IN_UNIVARIATE = f"{DATA_DIR}/training_univariate.parquet"
+IN_FINGERPRINT = f"{DATA_DIR}/training_fingerprint.parquet"
+IN_CONTRACT = f"{DATA_DIR}/training_run.json"
 
 OUT_UNIVARIATE_MODEL = f"{DATA_DIR}/univariate_model.joblib"
 OUT_FINGERPRINT_MODEL = f"{DATA_DIR}/fingerprint_model.joblib"

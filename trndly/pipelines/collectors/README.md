@@ -18,17 +18,17 @@ american_eagle_..    │           │
 hollister_scraper.py ┘           ▼
                           build_live_cube.py
                                  │
-                                 ├─► data/processed/live_monthly_fingerprint.parquet
-                                 └─► data/processed/live_monthly_univariate.parquet
+                                 ├─► data/processed/live_fingerprint_<YYYY-MM>.parquet
+                                 └─► data/processed/live_univariate_<YYYY-MM>.parquet
                                                   │
                                                   ▼
                                   notebooks/1b_scrape_aggregate_live.ipynb
-                                  (pd.concat with historical cubes;
-                                   dedup on (month, fingerprint, source))
+                                  (read historical_*.parquet + glob(live_*_*.parquet);
+                                   pd.concat with dedup on (month, fingerprint, source))
                                                   │
                                                   ▼
-                                  monthly_fingerprint.parquet (merged)
-                                  monthly_univariate.parquet (merged)
+                                  data/processed/merged_fingerprint.parquet
+                                  data/processed/merged_univariate.parquet
                                                   │
                                                   ▼
                        hmn_seasonal_processor.py / scheduleServer / Notebooks 2–5
@@ -76,9 +76,14 @@ is the single source of truth; `feature_lookups._assert_lookup_csv_matches_dicts
 runs at module import and raises if the hand-written `*_TO_ID` dicts
 drift from the CSV.
 
-## Live cube schemas (data/processed/live_monthly_*.parquet)
+## Live cube schemas (data/processed/live_*_<YYYY-MM>.parquet)
 
-**`live_monthly_fingerprint.parquet`** — 11 columns, grain=`(month, 5 IDs)`:
+`build_live_cube.py` writes ONE parquet per snapshot month, named with
+the cube's `month` value formatted `YYYY-MM` (always month-start since
+`scraped_at` is truncated). Re-running within May overwrites
+`live_*_2026-05.parquet`; June produces `live_*_2026-06.parquet`.
+
+**`live_fingerprint_<YYYY-MM>.parquet`** — 11 columns, grain=`(month, 5 IDs)`:
 
 `month` (datetime64[ns]), `month_of_year` (int8), `source`
 (category[historical, live]), `product_type_id`, `gender_id`,
@@ -86,7 +91,7 @@ drift from the CSV.
 `n_articles` (int32), `share_articles` (float32, sums to 1.0 ± 1e-3 per
 month), `avg_price` (float32, NaN — price not scraped).
 
-**`live_monthly_univariate.parquet`** — 7 columns, grain=`(month, dimension, level_id)`:
+**`live_univariate_<YYYY-MM>.parquet`** — 7 columns, grain=`(month, dimension, level_id)`:
 
 `month`, `month_of_year`, `source`, `dimension` (category — uses all 7
 historical dim names so concat preserves dtype, but only 5 emitted by
@@ -94,8 +99,10 @@ live), `level_id` (int8), `n_articles` (int32), `share_articles`
 (float32, sums to 1.0 ± 1e-3 per `(month, dimension)`).
 
 Both schemas are byte-compatible with `notebooks/1_aggregate_historical.ipynb`'s
-output — `source` is the only differing value. `notebook 1b` does
-`pd.concat([historical, live]).drop_duplicates(subset=['month', *fp_cols, 'source'], keep='last')`.
+`historical_*.parquet` outputs — `source` is the only differing value.
+Notebook 1b does
+`pd.concat([historical, *live_globbed]).drop_duplicates(subset=['month', *fp_cols, 'source'], keep='last')`
+to produce `merged_*.parquet`.
 
 ## Scrapers in this folder
 
@@ -108,9 +115,9 @@ output — `source` is the only differing value. `notebook 1b` does
 
 | Helper | Role |
 |---|---|
-| [build_live_cube.py](build_live_cube.py) | Aggregate every `items_*.csv` into the live fingerprint + univariate parquets |
+| [build_live_cube.py](build_live_cube.py) | Aggregate every `items_*.csv` into per-month `live_<role>_<YYYY-MM>.parquet` files |
 | [feature_lookups.py](feature_lookups.py) | Shared keyword maps + ID dicts for `extract_color`, `extract_material`, etc. Validates against `lookup.csv` at import time. |
-| [hmn_seasonal_processor.py](hmn_seasonal_processor.py) | H&M historical → train/val/test labels (consumes `live_monthly_univariate.parquet`) |
+| [hmn_seasonal_processor.py](hmn_seasonal_processor.py) | H&M historical → train/val/test labels (consumes `merged_univariate.parquet`) |
 
 The `_deferred/` directory holds modules that are functionally complete
 but parked because no consumer reads them today. See
@@ -155,10 +162,11 @@ After all scrapers have written their `items_<retailer>.csv`:
 python build_live_cube.py
 ```
 
-Outputs: `data/processed/live_monthly_fingerprint.parquet` +
-`data/processed/live_monthly_univariate.parquet`. Run
-`notebooks/1b_scrape_aggregate_live.ipynb` to merge them into the
-historical cubes.
+Outputs: `data/processed/live_fingerprint_<YYYY-MM>.parquet` +
+`data/processed/live_univariate_<YYYY-MM>.parquet` (one parquet per
+snapshot month). Run `notebooks/1b_scrape_aggregate_live.ipynb` to
+glob those + read `historical_*.parquet` and write the always-rebuilt
+`merged_*.parquet`.
 
 ## Common CLI flags (all four scrapers)
 
@@ -171,6 +179,27 @@ historical cubes.
 | `--strict` | off | exit non-zero if completeness check fails |
 | `--enrich-pdp` | **on** | run PDP material enrichment (Phase 1.5) |
 | `--no-enrich-pdp` | — | skip PDP enrichment for faster smoke runs |
+
+## Testing
+
+Per-scraper unit tests live at [trndly/tests/scrapers/](../../tests/scrapers/).
+Mocked HTTP via [pytest-httpx](https://pypi.org/project/pytest-httpx/);
+opt-in real-network smoke tests behind `pytest -m live`. Each scraper
+test file covers pagination, `_combo_to_row`, PDP fabric extraction,
+and resume semantics.
+
+```bash
+cd trndly
+/opt/anaconda3/bin/python -m pytest                    # default: fast, no network
+/opt/anaconda3/bin/python -m pytest tests/scrapers -q  # just scraper unit tests
+/opt/anaconda3/bin/python -m pytest -m live -q         # live smoke checks against real sites
+```
+
+The live tests catch the failure modes the mocked tests can't —
+Hollister Akamai tightening, retailer schema renames, HTTP/2 default
+changes — using **structural** assertions only (no magic count
+thresholds). See [tests/README.md](../../tests/README.md) for the full
+test inventory + fixture refresh policy.
 
 ## Operational notes
 

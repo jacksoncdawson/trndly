@@ -1,6 +1,6 @@
 """Natural-language → fingerprint/univariate inference helpers.
 
-Resolve free-text queries against ``lookup.csv`` + historical ``monthly_fingerprint.parquet``,
+Resolve free-text queries against ``lookup.csv`` + ``merged_fingerprint.parquet``,
 then call MLflow-loaded sklearn/pyfunc forecast models produced by notebooks ``3_*`` / ``4_*``.
 """
 
@@ -17,10 +17,10 @@ import pandas as pd
 from pandas.tseries.offsets import DateOffset
 
 from pipelines.training.paths import (
-    FEATURE_TRAINING_CONTRACT_JSON,
     LOOKUP_CSV,
-    MONTHLY_FINGERPRINT_PARQUET,
+    MERGED_FINGERPRINT_PARQUET,
     PROCESSED_DATA_DIR,
+    TRAINING_RUN_JSON,
 )
 
 FINGERPRINT_COLS = [
@@ -62,13 +62,13 @@ def load_lookup_csv(path: str | Path | None = None) -> pd.DataFrame:
 
 
 def load_feature_contract(path: str | Path | None = None) -> dict[str, Any]:
-    p = Path(path or FEATURE_TRAINING_CONTRACT_JSON)
+    p = Path(path or TRAINING_RUN_JSON)
     with open(p) as f:
         return json.load(f)
 
 
-def load_monthly_fingerprint(path: str | Path | None = None) -> pd.DataFrame:
-    p = Path(path or MONTHLY_FINGERPRINT_PARQUET)
+def load_merged_fingerprint(path: str | Path | None = None) -> pd.DataFrame:
+    p = Path(path or MERGED_FINGERPRINT_PARQUET)
     df = pd.read_parquet(p)
     df["month"] = pd.to_datetime(df["month"]).dt.as_unit("ns")
     return df.sort_values("month")
@@ -209,7 +209,7 @@ def build_univariate_inference_row(
     dimension: str,
     level_id: int,
 ) -> pd.Series | None:
-    """Pull one calendar-strict row from ``monthly_univariate.parquet``-style long cube."""
+    """Pull one calendar-strict row from ``merged_univariate.parquet``-style long cube."""
 
     sub = cube_long[
         (cube_long["dimension"] == dimension)

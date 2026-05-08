@@ -653,7 +653,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Scrape Hollister via SSR HTML + Apollo state. Writes "
                     "items_hollister.csv. build_live_cube.py aggregates "
-                    "items_*.csv into live_monthly_*.parquet cubes."
+                    "items_*.csv into live_*_<YYYY-MM>.parquet cubes."
     )
     parser.add_argument("--items-path", default=str(default_items))
     parser.add_argument("--concurrency", type=int, default=6)

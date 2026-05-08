@@ -37,10 +37,13 @@ from pipelines.training.feature_contract import (  # noqa: E402
 )
 from pipelines.training.paths import (  # noqa: E402
     DATA_DIR,
-    LIVE_UNIVARIATE_PARQUET,
     LOOKUP_CSV,
+    MERGED_UNIVARIATE_PARQUET,
     SEASONALITY_TABLE_CSV,
     TRAIN_CSV,
+    discover_live_fingerprint_parquets,
+    discover_live_univariate_parquets,
+    live_fingerprint_path_for,
 )
 
 
@@ -49,12 +52,12 @@ from pipelines.training.paths import (  # noqa: E402
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def trend_lookup():
-    if not LIVE_UNIVARIATE_PARQUET.exists():
-        pytest.skip(f"Live univariate parquet missing at {LIVE_UNIVARIATE_PARQUET}")
+    if not MERGED_UNIVARIATE_PARQUET.exists():
+        pytest.skip(f"Merged univariate parquet missing at {MERGED_UNIVARIATE_PARQUET}")
     if not LOOKUP_CSV.exists():
         pytest.skip(f"lookup.csv missing at {LOOKUP_CSV}")
     return load_trend_lookup_from_univariate(
-        LIVE_UNIVARIATE_PARQUET, source="live", latest_month=True
+        MERGED_UNIVARIATE_PARQUET, source="live", latest_month=True
     )
 
 
@@ -457,3 +460,33 @@ def test_live_cube_concat_compatible_with_historical():
     assert str(merged["source"].dtype).startswith("category"), \
         "source dtype lost through concat"
     assert set(merged["source"].cat.categories) == {"historical", "live"}
+
+
+def test_live_cube_path_helpers_match_glob_pattern():
+    """The per-month filename helpers must produce paths that the glob
+    discoverers can find. Catches drift between the writer (build_live_cube)
+    and the reader (notebook 1b)."""
+    from pipelines.training.paths import LIVE_FINGERPRINT_GLOB, LIVE_UNIVARIATE_GLOB
+    import fnmatch
+    fp_path = live_fingerprint_path_for("2026-05-01")
+    uv_path = live_fingerprint_path_for(pd.Timestamp("2026-05-15"))
+    assert fp_path.name == "live_fingerprint_2026-05.parquet"
+    assert uv_path.name == "live_fingerprint_2026-05.parquet"  # day collapsed to month
+    assert fnmatch.fnmatch(fp_path.name, LIVE_FINGERPRINT_GLOB)
+    # Univariate glob should match the univariate filename
+    from pipelines.training.paths import live_univariate_path_for
+    uv_path2 = live_univariate_path_for("2026-05-01")
+    assert fnmatch.fnmatch(uv_path2.name, LIVE_UNIVARIATE_GLOB)
+
+
+def test_discover_live_parquets_returns_sorted():
+    """`discover_live_*_parquets()` returns whatever's in PROCESSED_DATA_DIR
+    sorted by month — exercises the path glob the way notebook 1b uses it."""
+    fp_files = discover_live_fingerprint_parquets()
+    uv_files = discover_live_univariate_parquets()
+    # Files may or may not exist depending on whether build_live_cube ran;
+    # what we care about is the function returns a list and is sorted.
+    assert isinstance(fp_files, list)
+    assert isinstance(uv_files, list)
+    assert fp_files == sorted(fp_files)
+    assert uv_files == sorted(uv_files)

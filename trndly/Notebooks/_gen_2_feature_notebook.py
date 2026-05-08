@@ -32,14 +32,16 @@ def main() -> None:
         md(
             r"""# Feature processing — univariate + fingerprint training tables
 
-Run **`1_aggregate_historical.ipynb`** first; optionally **`1b_scrape_aggregate_live.ipynb`** next to refresh **`trend_signals.csv`** or merge **`live_monthly_*.parquet`** into cubes before this notebook.
+Run **`1_aggregate_historical.ipynb`** first to produce `historical_*.parquet`, then **`1b_scrape_aggregate_live.ipynb`** to merge live snapshots into `merged_*.parquet`. This notebook reads the merged cubes and emits training-ready tables.
 
-Build **calendar-strict** training rows from the processed monthly cubes on disk:
+Build **calendar-strict** training rows from the merged monthly cubes on disk:
 
 | Part | Input | Output |
 |------|--------|--------|
-| **A — Univariate** | `processed_univariate.parquet` | `univariate_training.parquet` |
-| **B — Fingerprint** | `processed_fingerprint.parquet` | `fingerprint_training.parquet` |
+| **A — Univariate** | `merged_univariate.parquet` | `training_univariate.parquet` |
+| **B — Fingerprint** | `merged_fingerprint.parquet` | `training_fingerprint.parquet` |
+
+Run manifest: `training_run.json` (sample-weight + split contract for nb 3).
 
 **Eligibility:** for anchor month `t`, require cube rows on every calendar month in **`t-3` … `t+6`** (10 months: three lags, anchor, six horizons). No reindex / zero-fill.
 
@@ -64,11 +66,11 @@ pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
 
 DATA_DIR = "../data/processed"
-IN_UNIVARIATE = f"{DATA_DIR}/processed_univariate.parquet"
-IN_FINGERPRINT = f"{DATA_DIR}/processed_fingerprint.parquet"
-OUT_UNIVARIATE = f"{DATA_DIR}/univariate_training.parquet"
-OUT_FINGERPRINT = f"{DATA_DIR}/fingerprint_training.parquet"
-OUT_META = f"{DATA_DIR}/feature_training_run.json"
+IN_UNIVARIATE = f"{DATA_DIR}/merged_univariate.parquet"
+IN_FINGERPRINT = f"{DATA_DIR}/merged_fingerprint.parquet"
+OUT_UNIVARIATE = f"{DATA_DIR}/training_univariate.parquet"
+OUT_FINGERPRINT = f"{DATA_DIR}/training_fingerprint.parquet"
+OUT_META = f"{DATA_DIR}/training_run.json"
 
 HORIZONS = list(range(1, 7))
 # Past context: share_lag1 = t-1, share_lag2 = t-2, share_lag3 = t-3
@@ -478,7 +480,7 @@ if len(fp_counts):
 
 Train with **FEATURE_COLS** only in `X`; pass **sample_weight** separately if the estimator supports it.
 
-**Univariate — `univariate_training.parquet`**
+**Univariate — `training_univariate.parquet`**
 
 | | Columns |
 |---|---------|
@@ -486,13 +488,15 @@ Train with **FEATURE_COLS** only in `X`; pass **sample_weight** separately if th
 | **TARGET_COLS** | `{ttarg}` |
 | **Metadata** | `anchor_month`, `dimension`, `level_id`, `source`, `split_group`, `sample_weight`, `n_articles` |
 
-**Fingerprint — `fingerprint_training.parquet`**
+**Fingerprint — `training_fingerprint.parquet`**
 
 | | Columns |
 |---|---------|
 | **FEATURE_COLS** | `{ffeat}` |
 | **TARGET_COLS** | `{ftarg}` |
 | **Metadata** | `anchor_month`, five fingerprint id columns, `source`, `split_group`, `sample_weight`, `n_articles` |
+
+Run manifest: `training_run.json`.
 """
         )
     )

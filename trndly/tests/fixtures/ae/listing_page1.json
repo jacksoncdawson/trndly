@@ -1,0 +1,28 @@
+{
+  "meta": {"totalProducts": 2},
+  "included": [
+    {
+      "type": "product",
+      "id": "0123456789",
+      "attributes": {
+        "displayName": "Vintage Skinny Jeans",
+        "url": "/us/p/women/jeans/0123456789",
+        "colorSwatches": [
+          {"id": "01", "name": "Medium Vintage"},
+          {"id": "02", "name": "Dark Vintage Wash"}
+        ]
+      }
+    },
+    {
+      "type": "product",
+      "id": "0987654321",
+      "attributes": {
+        "displayName": "Soft Cotton Hoodie",
+        "url": "/us/p/women/hoodies/0987654321",
+        "colorSwatches": [
+          {"id": "11", "name": "Heather Frost"}
+        ]
+      }
+    }
+  ]
+}

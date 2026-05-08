@@ -1,0 +1,30 @@
+{
+  "totalColors": 6,
+  "pagination": {"pageNumberTotal": "3"},
+  "products": [
+    {
+      "styleId": "100001",
+      "styleName": "Vintage Classic T-Shirt",
+      "webProductType": "mens tops",
+      "styleColors": [
+        {
+          "ccId": "100001-001",
+          "ccName": "Black",
+          "ccShortDescription": "True black"
+        }
+      ]
+    },
+    {
+      "styleId": "100002",
+      "styleName": "Slim-Fit Chino Pants",
+      "webProductType": "mens pants",
+      "styleColors": [
+        {
+          "ccId": "100002-002",
+          "ccName": "Khaki",
+          "ccShortDescription": "Light khaki"
+        }
+      ]
+    }
+  ]
+}

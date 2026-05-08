@@ -21,15 +21,17 @@ HOW IT WORKS
        2 months  → "next_month"
        3–4 months → "three_months"
        5+ months → "six_months"
-5. Load the current trend_signals.csv (written by google_trends_collector.py)
-   to attach real current trend scores as input features.
+5. Load the merged univariate cube (`data/processed/merged_univariate.parquet`,
+   filtered to source='live', latest month) to attach real current trend
+   scores as input features.
 6. Shuffle and write as train/val/test CSVs into the synthetic_data directory,
    replacing the fully synthetic splits.
 
 PIPELINE ORDER
 --------------
-Run google_trends_collector.py first (to produce a real trend_signals.csv),
-then run this script to produce real-labeled train/val/test splits.
+Run the retail scrapers + `build_live_cube.py` + notebook 1b first to
+produce `merged_univariate.parquet`, then run this script to produce
+real-labeled train/val/test splits.
 
 DATA REQUIRED
 -------------
@@ -45,7 +47,7 @@ Usage:
   python hmn_seasonal_processor.py \\
       --articles-path     /path/to/articles.csv \\
       --transactions-path /path/to/transactions_train.csv \\
-      --trend-signals-path path/to/trend_signals.csv \\
+      --merged-univariate-path path/to/merged_univariate.parquet \\
       --output-dir        path/to/output/
 """
 
@@ -185,7 +187,7 @@ def parse_args() -> argparse.Namespace:
         Path(__file__).resolve().parents[2]
         / "data"
         / "processed"
-        / "live_monthly_univariate.parquet"
+        / "merged_univariate.parquet"
     )
     default_output = (
         Path(__file__).resolve().parents[1]
@@ -209,9 +211,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to the H&M transactions_train.csv file from the Kaggle dataset.",
     )
     parser.add_argument(
-        "--live-univariate-path",
+        "--merged-univariate-path",
         default=str(default_univariate_path),
-        help="Path to live_monthly_univariate.parquet produced by build_live_cube.py.",
+        help=(
+            "Path to merged_univariate.parquet (output of notebook 1b). "
+            "Loader filters source='live' for trend lookup."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -405,7 +410,7 @@ def main() -> None:
 
     articles_path = Path(args.articles_path).expanduser().resolve()
     transactions_path = Path(args.transactions_path).expanduser().resolve()
-    live_univariate_path = Path(args.live_univariate_path).expanduser().resolve()
+    merged_univariate_path = Path(args.merged_univariate_path).expanduser().resolve()
     seasonality_path = Path(args.seasonality_table_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -413,7 +418,7 @@ def main() -> None:
     for path, label in [
         (articles_path, "articles.csv"),
         (transactions_path, "transactions_train.csv"),
-        (live_univariate_path, "live_monthly_univariate.parquet"),
+        (merged_univariate_path, "merged_univariate.parquet"),
         (seasonality_path, "seasonality_table.csv"),
     ]:
         if not path.exists():
@@ -424,7 +429,7 @@ def main() -> None:
         f"H&M seasonal label generator\n"
         f"  articles:        {articles_path}\n"
         f"  transactions:    {transactions_path}\n"
-        f"  live univariate: {live_univariate_path}\n"
+        f"  merged univariate: {merged_univariate_path}\n"
         f"  seasonality:     {seasonality_path}\n"
         f"  output:          {output_dir}"
     )
@@ -450,9 +455,9 @@ def main() -> None:
     peak_months = compute_peak_months(transactions, attrs)
     print(f"  {len(peak_months):,} unique (color, category, material) combinations")
 
-    print("Loading trend signals from live univariate cube...")
+    print("Loading trend signals from merged univariate cube (source='live', latest month)...")
     lookup = load_trend_lookup_from_univariate(
-        live_univariate_path, source="live", latest_month=True
+        merged_univariate_path, source="live", latest_month=True
     )
 
     print("Loading seasonality curves...")

@@ -38,7 +38,7 @@ Turn free-text such as **`white linen pants`** into MLflow-backed **six-month ca
 
 1. Tokenize + synonym-expand (`pants → trousers`, `jeans → denim`, …).
 2. Resolve tokens against [`lookup.csv`](../data/processed/lookup.csv) (`category`, `id`, `name`).
-3. Slice [`monthly_fingerprint.parquet`](../data/processed/monthly_fingerprint.parquet) at the latest anchor month (or the optional calendar month you pick).
+3. Slice [`merged_fingerprint.parquet`](../data/processed/merged_fingerprint.parquet) at the latest anchor month (or the optional calendar month you pick).
 4. Build feature rows (`month_of_year`, `share_t`, `avg_price_t`, three lags) per matching fingerprint.
 5. Average forecasts across every fingerprint consistent with the partial specification (covers omitted gender/pattern dims).
 
@@ -99,8 +99,8 @@ from pipelines.serving.text_forecast import (
 )
 from pipelines.training.paths import (
     LOOKUP_CSV,
-    MONTHLY_FINGERPRINT_PARQUET,
-    MONTHLY_UNIVARIATE_PARQUET,
+    MERGED_FINGERPRINT_PARQUET,
+    MERGED_UNIVARIATE_PARQUET,
     PROJECT_ROOT,
 )
 
@@ -128,12 +128,12 @@ print("uni_model_uri:", UNI_URI)
     )
     cells.append(
         code(
-            r"""cube_fp = pd.read_parquet(MONTHLY_FINGERPRINT_PARQUET)
+            r"""cube_fp = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
 cube_fp["month"] = pd.to_datetime(cube_fp["month"]).dt.as_unit("ns")
 
 cube_uni = None
-if MONTHLY_UNIVARIATE_PARQUET.exists():
-    cube_uni = pd.read_parquet(MONTHLY_UNIVARIATE_PARQUET)
+if MERGED_UNIVARIATE_PARQUET.exists():
+    cube_uni = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
     cube_uni["month"] = pd.to_datetime(cube_uni["month"]).dt.as_unit("ns")
 
 lookup = pd.read_csv(LOOKUP_CSV)
