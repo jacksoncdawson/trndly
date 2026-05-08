@@ -1,1449 +1,603 @@
 """
 Uniqlo retail scraper for trndly trend signals.
 
-Scrapes Uniqlo's "New Arrivals" and category pages using a real browser
-(Playwright) to count how often each color, category, and material attribute
-appears across featured product listings. Normalizes those counts to 0–1 and
-writes the result as trend_signals_uniqlo.csv.
+Pulls Uniqlo's full women + men catalog directly from Uniqlo's internal
+listing API (no browser, no scrolling, no clicking). The endpoint returns
+the catalog paginated up to 100 items per page, and each item carries
+its own colors and PDP slug — everything we need to build
+items_uniqlo.csv without visiting any product detail page.
 
-WHERE EACH ATTRIBUTE COMES FROM
---------------------------------
-- category : product title keywords  ("jeans" → pants, "hoodie" → tops, etc.)
-- material  : product title keywords  ("linen", "denim", "knit", etc.)
-             + category inference when no material keyword is in the title
-- color     : color swatch aria-labels or chip labels
-             + product title keywords as a fallback
+OUTPUT
+------
+items_uniqlo.csv  — one row per (product × color variant). Schema mirrors
+items_gap.csv (additive provenance fields stay Gap-specific; for Uniqlo
+`web_product_type` is "" since the API doesn't expose a category label).
 
-BOT PROTECTION
+LISTING API
+-----------
+GET https://www.uniqlo.com/us/api/commerce/v5/en/products
+  ?path={genderId},,,
+  &genderId={genderId}
+  &offset={n}&limit=100
+  &httpFailure=true
+
+Response (relevant slice):
+  {
+    "status": "ok",
+    "result": {
+      "pagination": {"total": 698, "offset": 0, "count": 100},
+      "items": [
+        {
+          "productId": "E482195-000",
+          "l1Id":      "482195",
+          "name":      "Ribbed Cropped Bra Top",
+          "genderName": "WOMEN",
+          "colors": [
+            {"code": "COL18", "displayCode": "18",
+             "name": "WINE", "filterCode": "RED"},
+            ...
+          ],
+          ...
+        }, ...
+      ]
+    }
+  }
+
+Page size is server-capped at 100 (limit=120 → HTTP 400). Auth is unnecessary
+— bare User-Agent + Accept-Language is enough.
+
+PIPELINE SHAPE
 --------------
-Uniqlo does not use Akamai, PerimeterX, or Imperva, making it well-suited
-for headless / pipeline use. The standard de-fingerprinting init scripts are
-applied as a precaution. If you hit consistent empty pages, try --headless
-false.
+Phase 1   — paginate the listing API. Fetch offset=0 first to learn
+            `pagination.total`, then schedule offsets [100, 200, ...] in
+            parallel under a Semaphore. Per-page retry on 429/5xx. Dedup
+            per-target on `productId` (the API's ranking shuffle can return
+            the same product in two cursor windows; ~3-4% drift is normal).
 
-NOTE ON URLS
--------------
-If any page returns 0 titles, open the URL in your browser to verify the
-path is still correct — Uniqlo occasionally restructures categories. Update
-the URL from your browser's address bar and re-run.
+Phase 1.5 — (optional, default ON) For each unique productId whose title
+            alone yields material=None, fetch the PDP HTML and regex-extract
+            the embedded "composition" field from the inline Next.js JSON.
+            Re-extract material from title + composition.
 
-SETUP (one-time)
-----------------
-  pip install playwright
-  playwright install chromium
+Phase 2   — Project each (productId × color) combo to a row via
+            `_combo_to_row`, write streaming CSV via `StreamingItemWriter`.
 
-Usage:
-  python uniqlo_scraper.py
-  python uniqlo_scraper.py --output-path path/to/trend_signals_uniqlo.csv
-  python uniqlo_scraper.py --existing-path trend_signals_uniqlo.csv --blend-weight 0.5
-  python uniqlo_scraper.py --headless false
+CROSS-LISTING DEDUP
+-------------------
+Per-target dedup on `productId`. Cross-target the same productId with
+different `gender` is kept as two rows (e.g. unisex caps that appear in
+both genders). Resume key is (style_id, cc_id, gender), unique per row.
+
+Setup
+-----
+  pip install httpx pandas
+
+Usage
+-----
+  python uniqlo_scraper.py                            # full catalog + enrichment
+  python uniqlo_scraper.py --concurrency 8            # faster API + PDP fan-out
+  python uniqlo_scraper.py --max-products-per-page 5  # smoke test
+  python uniqlo_scraper.py --no-enrich-pdp            # skip PDP material pass
+  python uniqlo_scraper.py --resume                   # continue an interrupted run
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import asyncio
+import csv
+import datetime
+import os
+import random
 import re
 import sys
 import time
 from pathlib import Path
 
+import httpx
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from pipelines.collectors.scrape_url_utils import (  # noqa: E402
-    dedupe_product_urls_preserve_order,
+from pipelines.collectors.feature_lookups import (  # noqa: E402
+    COLOR_MASTER_TO_ID,
+    GENDER_TO_ID,
+    GRAPHICAL_APPEARANCE_TO_ID,
+    MATERIAL_TO_ID,
+    PRODUCT_TYPE_TO_ID,
+    extract_category,
+    extract_color,
+    extract_color_spectrum_id,
+    extract_graphical_appearance,
+    extract_material,
+    extract_product_group_id,
+    extract_product_type,
+    has_explicit_material_keyword,
 )
 from pipelines.training.feature_contract import (  # noqa: E402
-    DEFAULT_MISSING_SCORE,
     FEATURE_TYPES,
-    validate_trend_signals_frame,
 )
 
 # --------------------------------------------------------------------------- #
-# Target pages                                                                  #
+# Targets and API config                                                        #
 # --------------------------------------------------------------------------- #
 
-UNIQLO_PAGES = [
-    {"url": "https://www.uniqlo.com/us/en/women/new-arrivals/",          "label": "women new arrivals"},
-    {"url": "https://www.uniqlo.com/us/en/men/new-arrivals/",            "label": "men new arrivals"},
-    {"url": "https://www.uniqlo.com/us/en/women/tops",                   "label": "women tops"},
-    {"url": "https://www.uniqlo.com/us/en/men/tops",                     "label": "men tops"},
-    {"url": "https://www.uniqlo.com/us/en/women/bottoms",                "label": "women bottoms"},
-    {"url": "https://www.uniqlo.com/us/en/men/bottoms",                  "label": "men bottoms"},
-    {"url": "https://www.uniqlo.com/us/en/women/dresses-and-skirts",     "label": "women dresses"},
-    {"url": "https://www.uniqlo.com/us/en/women/sweaters",               "label": "women outerwear"},
-    {"url": "https://www.uniqlo.com/us/en/men/sweaters",                 "label": "men outerwear"},
+# Single shop-all listing per gender — collapses the old 9-PLP fan-out
+# (women new-arrivals + tops + bottoms + dresses + sweaters + men's
+# equivalents) into 2 calls.
+UNIQLO_TARGETS: list[dict] = [
+    {"genderId": "22210", "gender": "women", "label": "women shop all"},
+    {"genderId": "22211", "gender": "men",   "label": "men shop all"},
 ]
 
-# --------------------------------------------------------------------------- #
-# Selectors                                                                     #
-#                                                                               #
-# PRODUCT NAME selectors — tried in order, first non-empty match wins.         #
-# Uniqlo uses a React SPA with class names following a fr-ec-* pattern.        #
-# --------------------------------------------------------------------------- #
-
-PRODUCT_NAME_SELECTORS = [
-    # Confirmed from live inspection — scoped to product tiles so we don't
-    # pick up prices, filters, and other ITOTypography elements on the page.
-    "[class*='product-tile'] [data-testid='ITOTypography']",
-    "[class*='product-tile__name'] [data-testid='ITOTypography']",
-    "[class*='product-tile__description'] [data-testid='ITOTypography']",
-    # Generic fallbacks
-    "[class*='product-name']",
-    "[class*='ProductName']",
-    "article h2",
-    "article h3",
-    "li[class*='product'] h2",
-    "li[class*='product'] h3",
-]
-
-# COLOR SWATCH selectors — Uniqlo shows color chips on product tiles with
-# the color name in aria-label or as a data attribute.
-COLOR_SWATCH_SELECTORS = [
-    # Uniqlo-specific
-    "[class*='fr-ec-color-chip'][aria-label]",
-    "[class*='fr-ec-color-chip'] [aria-label]",
-    "[class*='fr-ec-product-tile'] [aria-label][class*='color']",
-    "[class*='ColorChip'][aria-label]",
-    "[class*='color-chip'][aria-label]",
-    # Generic fallbacks
-    "[class*='ColorSwatch'] [aria-label]",
-    "[class*='color-swatch'] [aria-label]",
-    "[class*='Swatch'] button[aria-label]",
-    "[class*='swatch'] button[aria-label]",
-    "button[aria-label][class*='color']",
-    "[data-color]",
-    "[data-color-name]",
-]
-
-# Selector to wait for before extracting — signals the product grid is ready
-PRODUCT_GRID_WAIT_SELECTORS = [
-    # Confirmed — wait for the product name element to appear
-    "[data-testid='ITOTypography']",
-    # Generic fallbacks
-    "[class*='ProductGrid']",
-    "[class*='product-grid']",
-    "[class*='ProductTile']",
-    "article",
-    "li[class*='product']",
-]
-
-# Selectors for product card links on Uniqlo listing pages
-PRODUCT_CARD_LINK_SELECTORS = [
-    "[class*='product-tile'] a[href*='/products/']",
-    "[class*='ProductTile'] a[href*='/products/']",
-    "a[href*='/us/en/products/']",
-    "[class*='product'] a[href]",
-    "article a[href]",
-]
-
-# --------------------------------------------------------------------------- #
-# Attribute keyword maps                                                        #
-# --------------------------------------------------------------------------- #
-
-# For COLOR: Uniqlo uses "SMOKY" prefix for muted tones and other descriptive
-# names. These are listed up-front before generic fallbacks.
-COLOR_KEYWORDS: list[tuple[str, str]] = [
-    # Uniqlo-specific names
-    ("smoky blue", "blue"),
-    ("smoky navy", "navy"),
-    ("smoky green", "green"),
-    ("smoky pink", "pink"),
-    ("smoky yellow", "beige"),
-    ("smoky gray", "gray"),
-    ("smoky grey", "gray"),
-    ("smoky black", "black"),
-    ("off black", "black"),
-    ("off white", "white"),
-    ("natural", "beige"),
-    ("ecru", "beige"),
-    ("oatmeal", "beige"),
-    # Shade-qualified generics (color_spectrum from lookup: Dark, Dusty Light, Light, Medium, Bright)
-    ("dusty light blue", "blue"),
-    ("medium dusty blue", "blue"),
-    ("light blue", "blue"),
-    ("medium blue", "blue"),
-    ("dark blue", "blue"),
-    ("bright blue", "blue"),
-    ("dark navy", "navy"),
-    ("light green", "green"),
-    ("dark green", "green"),
-    ("bright green", "green"),
-    ("dusty green", "green"),
-    ("light pink", "pink"),
-    ("bright pink", "pink"),
-    ("hot pink", "pink"),
-    ("dark pink", "pink"),
-    ("light red", "red"),
-    ("bright red", "red"),
-    ("dark red", "red"),
-    ("light gray", "gray"),
-    ("dark gray", "gray"),
-    ("light grey", "gray"),
-    ("dark grey", "gray"),
-    ("dark brown", "brown"),
-    ("light brown", "brown"),
-    ("light purple", "purple"),
-    ("dark purple", "purple"),
-    ("bright purple", "purple"),
-    ("mustard", "beige"),
-    ("butter", "beige"),
-    ("golden", "beige"),
-    ("terracotta", "red"),
-    ("orange", "orange"),
-    ("tangerine", "orange"),
-    ("yellow", "yellow"),
-    ("lemon", "yellow"),
-    ("gold", "yellow"),
-    ("silver", "metal"),
-    ("metallic", "metal"),
-    ("brick", "red"),
-    ("wine", "red"),
-    ("rust", "red"),
-    ("coral", "pink"),
-    ("blush", "pink"),
-    ("sage", "green"),
-    ("olive", "green"),
-    ("forest", "green"),
-    ("moss", "green"),
-    ("camel", "beige"),
-    ("tan", "beige"),
-    ("khaki", "beige"),
-    ("plum", "purple"),
-    ("lavender", "purple"),
-    ("lilac", "purple"),
-    # Shared generics
-    ("navy", "navy"),
-    ("black", "black"),
-    ("white", "white"),
-    ("cream", "white"),
-    ("ivory", "white"),
-    ("red", "red"),
-    ("burgundy", "red"),
-    ("maroon", "red"),
-    ("green", "green"),
-    ("cobalt", "blue"),
-    ("indigo", "blue"),
-    ("turquoise", "blue"),
-    ("aqua", "blue"),
-    ("teal", "blue"),
-    ("blue", "blue"),
-    ("beige", "beige"),
-    ("sand", "beige"),
-    ("taupe", "beige"),
-    ("amber", "brown"),
-    ("mocha", "brown"),
-    ("chocolate", "brown"),
-    ("cognac", "brown"),
-    ("espresso", "brown"),
-    ("brown", "brown"),
-    ("dusty pink", "pink"),
-    ("mauve", "pink"),
-    ("rose", "pink"),
-    ("peach", "pink"),
-    ("pink", "pink"),
-    ("violet", "purple"),
-    ("purple", "purple"),
-    ("charcoal", "gray"),
-    ("heather", "gray"),
-    ("slate", "gray"),
-    ("stone", "gray"),
-    ("grey", "gray"),
-    ("gray", "gray"),
-]
-
-# For CATEGORY: checked against product title.
-# Uniqlo uses terms like "Ultra Stretch", "AIRism", "Heattech" in titles
-# but the garment type words are standard enough for the shared list.
-CATEGORY_KEYWORDS: list[tuple[str, str]] = [
-    # Pants / bottoms
-    ("barrel jean", "pants"),
-    ("straight jean", "pants"),
-    ("slim jean", "pants"),
-    ("wide-leg jean", "pants"),
-    ("wide leg jean", "pants"),
-    ("jeans", "pants"),
-    ("trouser", "pants"),
-    ("chino", "pants"),
-    ("legging", "pants"),
-    ("jogger", "pants"),
-    ("jort", "shorts"),
-    ("sweatpant", "pants"),
-    ("dungarees", "pants"),
-    ("overalls", "pants"),
-    ("pant", "pants"),
-    # Shorts
-    ("shorts", "shorts"),
-    # Skirt
-    ("sarong", "skirt"),
-    ("skirt", "skirt"),
-    # Dress / full body
-    ("playsuit", "dress"),
-    ("romper", "dress"),
-    ("jumpsuit", "dress"),
-    ("bodysuit", "dress"),
-    ("body suit", "dress"),
-    ("dress", "dress"),
-    # Outerwear
-    ("anorak", "outerwear"),
-    ("windbreaker", "outerwear"),
-    ("gilet", "outerwear"),
-    ("waistcoat", "outerwear"),
-    ("jacket", "outerwear"),
-    ("coat", "outerwear"),
-    ("parka", "outerwear"),
-    ("puffer", "outerwear"),
-    ("blouson", "outerwear"),
-    ("blazer", "outerwear"),
-    ("cardigan", "outerwear"),
-    # Tops
-    ("polo", "tops"),
-    ("corset", "tops"),
-    ("hoodie", "tops"),
-    ("sweatshirt", "tops"),
-    ("sweater", "tops"),
-    ("pullover", "tops"),
-    ("flannel", "tops"),
-    ("shirt", "tops"),
-    ("tee", "tops"),
-    ("t-shirt", "tops"),
-    ("crop", "tops"),
-    ("blouse", "tops"),
-    ("cami", "tops"),
-    ("tank", "tops"),
-    ("vest", "tops"),
-    ("top", "tops"),
-    # Shoes
-    ("pump", "shoes"),
-    ("heel", "shoes"),
-    ("loafer", "shoes"),
-    ("mule", "shoes"),
-    ("clog", "shoes"),
-    ("ballerina", "shoes"),
-    ("slipper", "shoes"),
-    ("flip flop", "shoes"),
-    ("wedge", "shoes"),
-    ("sneaker", "shoes"),
-    ("boot", "shoes"),
-    ("sandal", "shoes"),
-    ("shoe", "shoes"),
-    # Accessories
-    ("sunglasses", "accessories"),
-    ("glasses", "accessories"),
-    ("watch", "accessories"),
-    ("wallet", "accessories"),
-    ("bracelet", "accessories"),
-    ("necklace", "accessories"),
-    ("earring", "accessories"),
-    ("ring", "accessories"),
-    ("gloves", "accessories"),
-    ("bag", "accessories"),
-    ("belt", "accessories"),
-    ("hat", "accessories"),
-    ("beanie", "accessories"),
-    ("scarf", "accessories"),
-    ("sock", "accessories"),
-]
-
-# For MATERIAL: Uniqlo is very material-focused — AIRism (polyester),
-# Heattech (polyester blend), flannel (cotton), etc.
-# Sourced from lookup.csv material list + common retail keyword variants.
-MATERIAL_KEYWORDS: list[tuple[str, str]] = [
-    # Uniqlo brand materials first (before generic matches)
-    ("airism", "polyester"),
-    ("heattech", "polyester"),
-    # Denim
-    ("denim", "denim"),
-    ("jean", "denim"),
-    ("jort", "denim"),
-    # Linen
-    ("linen-blend", "linen"),
-    ("linen", "linen"),
-    # Silk / silk-like
-    ("chiffon", "silk"),
-    ("crepe", "silk"),
-    ("georgette", "silk"),
-    ("silk", "silk"),
-    ("satin", "silk"),
-    # Wool / wool-like
-    ("cashmere", "wool"),
-    ("merino", "wool"),
-    ("shearling", "wool"),
-    ("sherpa", "wool"),
-    ("faux fur", "wool"),
-    ("wool", "wool"),
-    ("fleece", "wool"),
-    # Leather / leather-like
-    ("imitation leather", "leather"),
-    ("imitation suede", "leather"),
-    ("faux leather", "leather"),
-    ("vegan leather", "leather"),
-    ("suede", "leather"),
-    ("leather", "leather"),
-    # Knit / knit-like
-    ("rib-knit", "knit"),
-    ("ribbed", "knit"),
-    ("jersey", "knit"),
-    ("velvet", "knit"),
-    ("velour", "knit"),
-    ("knit", "knit"),
-    ("crochet", "knit"),
-    ("waffle", "knit"),
-    # Polyester / synthetics
-    ("nylon", "polyester"),
-    ("acrylic", "polyester"),
-    ("tulle", "polyester"),
-    ("mesh", "polyester"),
-    ("spandex", "polyester"),
-    ("elastane", "polyester"),
-    ("polyester", "polyester"),
-    ("recycled", "polyester"),
-    # Cotton / cellulosics
-    ("poplin", "cotton"),
-    ("twill", "cotton"),
-    ("terry", "cotton"),
-    ("flannel", "cotton"),
-    ("oxford", "cotton"),
-    ("corduroy", "cotton"),
-    ("canvas", "cotton"),
-    ("tencel", "cotton"),
-    ("lyocell", "cotton"),
-    ("modal", "cotton"),
-    ("viscose", "cotton"),
-    ("rayon", "cotton"),
-    ("cotton", "cotton"),
-]
-
-# When no material keyword is in the title, infer from category (pants: see
-# extract_material — do not default all trousers to denim).
-CATEGORY_TO_MATERIAL_DEFAULT: dict[str, str] = {
-    "shorts": "cotton",
-    "dress": "cotton",
-    "tops": "cotton",
-    "outerwear": "polyester",
-    "shoes": "leather",
-    "accessories": "cotton",
-    "skirt": "cotton",
+API_URL = "https://www.uniqlo.com/us/api/commerce/v5/en/products"
+API_PAGE_SIZE = 100  # server caps at 100 — limit=120 returns HTTP 400.
+API_BASE_PARAMS: dict[str, str] = {
+    "httpFailure": "true",
+    "imageRatio":  "3x4",
+}
+API_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept":          "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin":          "https://www.uniqlo.com",
+    "Referer":         "https://www.uniqlo.com/",
 }
 
-GRAPHICAL_APPEARANCE_KEYWORDS: list[tuple[str, str]] = [
-    ("polka dot", "Dot"),
-    ("striped", "Stripe"),
-    ("stripe", "Stripe"),
-    ("plaid", "Check"),
-    ("gingham", "Check"),
-    ("tartan", "Check"),
-    ("check", "Check"),
-    ("floral", "All over pattern"),
-    ("animal print", "All over pattern"),
-    ("all over", "All over pattern"),
-    ("graphic tee", "Front print"),
-    ("graphic", "Front print"),
-    ("placement print", "Placement print"),
-    ("print", "Placement print"),
-    ("embroidered", "Embroidery"),
-    ("embroidery", "Embroidery"),
-    ("lace", "Lace"),
-    ("denim", "Denim"),
-    ("heather", "Melange"),
-    ("melange", "Melange"),
-    ("glitter", "Glittering/Metallic"),
-    ("metallic", "Glittering/Metallic"),
-    ("sequin", "Sequin"),
-    ("mesh", "Mesh"),
-    ("jacquard", "Jacquard"),
-    ("chambray", "Chambray"),
-    ("argyle", "Argyle"),
-    ("dot", "Dot"),
-]
-GRAPHICAL_APPEARANCE_DEFAULT = "Solid"
+RETRYABLE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+DEFAULT_MAX_ATTEMPTS = 5
 
-PRODUCT_TYPE_KEYWORDS: list[tuple[str, str]] = [
-    ("polo", "Polo shirt"),
-    ("hoodie", "Hoodie"),
-    ("sweatshirt", "Hoodie"),
-    ("cardigan", "Cardigan"),
-    ("sweater", "Sweater"),
-    ("pullover", "Sweater"),
-    ("blazer", "Blazer"),
-    ("puffer", "Jacket"),
-    ("windbreaker", "Jacket"),
-    ("jacket", "Jacket"),
-    ("parka", "Coat"),
-    ("anorak", "Coat"),
-    ("coat", "Coat"),
-    ("jeans", "Trousers"),
-    ("jean", "Trousers"),
-    ("trouser", "Trousers"),
-    ("chino", "Trousers"),
-    ("jogger", "Trousers"),
-    ("sweatpant", "Trousers"),
-    ("jort", "Shorts"),
-    ("legging", "Leggings/Tights"),
-    ("dungarees", "Dungarees"),
-    ("overalls", "Dungarees"),
-    ("pant", "Trousers"),
-    ("shorts", "Shorts"),
-    ("sarong", "Sarong"),
-    ("skirt", "Skirt"),
-    ("playsuit", "Jumpsuit/Playsuit"),
-    ("romper", "Jumpsuit/Playsuit"),
-    ("jumpsuit", "Jumpsuit/Playsuit"),
-    ("bodysuit", "Bodysuit"),
-    ("body suit", "Bodysuit"),
-    ("dress", "Dress"),
-    ("t-shirt", "T-shirt"),
-    ("tee", "T-shirt"),
-    ("cami", "Vest top"),
-    ("tank", "Vest top"),
-    ("vest", "Vest top"),
-    ("blouse", "Blouse"),
-    ("crop", "Top"),
-    ("shirt", "Shirt"),
-    ("top", "Top"),
-    ("sneaker", "Sneakers"),
-    ("boot", "Boots"),
-    ("sandal", "Sandals"),
-    ("pump", "Pumps"),
-    ("loafer", "Flat shoe"),
-    ("mule", "Flat shoe"),
-    ("ballerina", "Ballerinas"),
-    ("slipper", "Slippers"),
-    ("wedge", "Wedge"),
-    ("heel", "Heels"),
-    ("shoe", "Other shoe"),
-    ("sunglasses", "Sunglasses"),
-    ("glasses", "Eyeglasses"),
-    ("watch", "Watch"),
-    ("wallet", "Wallet"),
-    ("bracelet", "Bracelet"),
-    ("necklace", "Necklace"),
-    ("earring", "Earring"),
-    ("ring", "Ring"),
-    ("gloves", "Gloves"),
-    ("bag", "Bag"),
-    ("belt", "Belt"),
-    ("beanie", "Beanie"),
-    ("hat", "Hat/beanie"),
-    ("scarf", "Scarf"),
-    ("sock", "Socks"),
-]
-
-COLOR_MASTER_TO_ID: dict[str, int] = {
-    "black": 1,
-    "blue": 2,
-    "navy": 2,
-    "white": 3,
-    "beige": 4,
-    "green": 5,
-    "gray": 6,
-    "grey": 6,
-    "red": 7,
-    "pink": 8,
-    "brown": 9,
-    "yellow": 10,
-    "orange": 11,
-    "metal": 12,
-    "purple": 13,
-}
-
-GENDER_TO_ID: dict[str, int] = {"women": 1, "unisex": 2, "men": 3}
-
-GRAPHICAL_APPEARANCE_TO_ID: dict[str, int] = {
-    # Aligned with trndly/EDA/data/lookup.csv (graphical_appearance)
-    "Unknown": 0,
-    "Solid": 1,
-    "All over pattern": 2,
-    "Denim": 3,
-    "Melange": 4,
-    "Stripe": 5,
-    "Lace": 6,
-    "Check": 7,
-    "Placement print": 8,
-    "Embroidery": 9,
-    "Dot": 10,
-    "Front print": 11,
-    "Colour blocking": 12,
-    "Glittering/Metallic": 13,
-    "Contrast": 14,
-    "Jacquard": 15,
-    "Treatment": 16,
-    "Metallic": 17,
-    "Mixed solid/pattern": 18,
-    "Sequin": 19,
-    "Mesh": 20,
-    "Neps": 21,
-    "Chambray": 22,
-    "Slub": 23,
-    "Transparent": 24,
-    "Argyle": 25,
-    "Hologram": 26,
-}
-
-MATERIAL_TO_ID: dict[str, int] = {
-    "cotton": 1, "knit": 6, "denim": 3, "linen": 12, "silk": 26,
-    "wool": 9, "polyester": 15, "leather": 18,
-}
-
-PRODUCT_TYPE_TO_ID: dict[str, int] = {
-    "Trousers": 1, "Dress": 2, "Sweater": 3, "T-shirt": 4, "Top": 5,
-    "Blouse": 6, "Vest top": 7, "Shorts": 11, "Skirt": 13, "Shirt": 14,
-    "Leggings/Tights": 15, "Jacket": 16, "Socks": 17, "Blazer": 18,
-    "Hoodie": 19, "Cardigan": 20, "Bag": 22, "Jumpsuit/Playsuit": 23,
-    "Belt": 24, "Earring": 26, "Boots": 27, "Scarf": 29, "Necklace": 30,
-    "Coat": 31, "Sandals": 32, "Bodysuit": 33, "Sunglasses": 34,
-    "Sneakers": 35, "Polo shirt": 39, "Hat/beanie": 41, "Flat shoe": 44,
-    "Ballerinas": 46, "Sarong": 47, "Wedge": 49, "Ring": 51, "Pumps": 53,
-    "Dungarees": 54, "Gloves": 55, "Heels": 68, "Watch": 70, "Wallet": 73,
-    "Beanie": 74, "Eyeglasses": 95, "Bracelet": 63, "Flip flop": 59,
-    "Slippers": 60, "Other shoe": 58,
-}
-
-PRODUCT_TYPE_TO_GROUP_ID: dict[str, int] = {
-    "T-shirt": 1, "Top": 1, "Blouse": 1, "Vest top": 1, "Shirt": 1,
-    "Sweater": 1, "Hoodie": 1, "Cardigan": 1, "Polo shirt": 1,
-    "Jacket": 1, "Coat": 1, "Blazer": 1,
-    "Trousers": 2, "Shorts": 2, "Skirt": 2, "Leggings/Tights": 2,
-    "Dungarees": 2, "Sarong": 2,
-    "Dress": 3, "Jumpsuit/Playsuit": 3, "Bodysuit": 3,
-    "Bag": 6, "Belt": 6, "Scarf": 6, "Hat/beanie": 6, "Beanie": 6,
-    "Gloves": 6, "Sunglasses": 6, "Eyeglasses": 6, "Watch": 6,
-    "Wallet": 6, "Bracelet": 6, "Necklace": 6, "Earring": 6, "Ring": 6,
-    "Boots": 7, "Sneakers": 7, "Sandals": 7, "Flat shoe": 7,
-    "Ballerinas": 7, "Slippers": 7, "Flip flop": 7, "Wedge": 7,
-    "Heels": 7, "Pumps": 7, "Other shoe": 7,
-    "Socks": 8,
-}
-
-COLOR_SPECTRUM_KEYWORDS: list[tuple[str, int]] = [
-    ("medium dusty", 4), ("dusty", 2), ("heather", 2), ("muted", 2),
-    ("washed", 2), ("faded", 2), ("light", 3), ("pale", 3), ("soft", 3),
-    ("pastel", 3), ("cream", 3), ("bright", 6), ("vivid", 6), ("neon", 6),
-    ("electric", 6), ("dark", 1), ("deep", 1), ("rich", 1), ("medium", 5), ("mid", 5),
+CSV_FIELDNAMES = [
+    "scraped_at", "retailer",
+    "style_id", "cc_id", "web_product_type",
+    "title", "gender",
+    "color_raw", "product_type_raw", "material_raw", "graphical_appearance_raw",
+    "color_master_id", "color_spectrum_id", "gender_id",
+    "product_type_id", "product_group_id", "material_id", "graphical_appearance_id",
 ]
 
 
 # --------------------------------------------------------------------------- #
-# Attribute extraction                                                          #
+# API client                                                                    #
 # --------------------------------------------------------------------------- #
 
-def _first_match(text: str, keyword_map: list[tuple[str, str]]) -> str | None:
-    lowered = text.lower()
-    for keyword, mapped in keyword_map:
-        if keyword in lowered:
-            return mapped
-    return None
-
-
-def extract_color(text: str) -> str | None:
-    return _first_match(text, COLOR_KEYWORDS)
-
-
-def extract_category(text: str) -> str | None:
-    return _first_match(text, CATEGORY_KEYWORDS)
-
-
-def extract_material(text: str, inferred_category: str | None = None) -> str | None:
-    result = _first_match(text, MATERIAL_KEYWORDS)
-    if result:
-        return result
-    if inferred_category == "pants":
-        lowered = text.lower()
-        if any(
-            hint in lowered
-            for hint in (
-                "jean",
-                "denim",
-                "jort",
-                "5-pocket",
-                "five pocket",
-                "selvedge",
-                "selvage",
-            )
-        ):
-            return "denim"
-        return None
-    if inferred_category:
-        return CATEGORY_TO_MATERIAL_DEFAULT.get(inferred_category)
-    return None
-
-
-def extract_graphical_appearance(text: str) -> str:
-    result = _first_match(text, GRAPHICAL_APPEARANCE_KEYWORDS)
-    return result if result else GRAPHICAL_APPEARANCE_DEFAULT
-
-
-def extract_product_type(text: str) -> str | None:
-    return _first_match(text, PRODUCT_TYPE_KEYWORDS)
-
-
-def extract_color_spectrum_id(color_label: str) -> int:
-    lowered = color_label.lower()
-    for keyword, spectrum_id in COLOR_SPECTRUM_KEYWORDS:
-        if keyword in lowered:
-            return spectrum_id
-    return 0
-
-
-def extract_product_group_id(product_type: str | None) -> int:
-    if not product_type:
-        return 0
-    return PRODUCT_TYPE_TO_GROUP_ID.get(product_type, 0)
-
-
-# --------------------------------------------------------------------------- #
-# Browser helpers                                                               #
-# --------------------------------------------------------------------------- #
-
-def _wait_for_products(page: "Page", timeout_ms: int = 15_000) -> bool:
+async def _request_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    params: dict | None = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    label: str = "",
+    verbose: bool = True,
+) -> httpx.Response | None:
+    """GET with exponential-backoff retry on 429/5xx and network errors.
+    Returns the Response on success, None when retries are exhausted.
     """
-    Wait until at least one product grid selector appears on the page.
-    Returns True if found, False if all selectors timed out.
-    """
-    for selector in PRODUCT_GRID_WAIT_SELECTORS:
+    for attempt in range(1, max_attempts + 1):
         try:
-            page.wait_for_selector(selector, timeout=timeout_ms)
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def _scroll_to_bottom(page: "Page", pause_secs: float = 1.2, max_scrolls: int = 8) -> None:
-    for _ in range(max_scrolls):
-        page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-        time.sleep(pause_secs)
-
-
-def _extract_product_names(page: "Page") -> list[str]:
-    """Extract product title text using the first selector that returns results."""
-    for selector in PRODUCT_NAME_SELECTORS:
-        try:
-            elements = page.query_selector_all(selector)
-            texts = [el.inner_text().strip() for el in elements if el.inner_text().strip()]
-            if texts:
-                return texts
-        except Exception:
-            continue
-    return []
-
-
-def _extract_swatch_colors(page: "Page") -> list[str]:
-    """
-    Extract color names from swatch/chip aria-labels.
-    Uniqlo typically exposes color names as aria-label on color chip elements.
-    """
-    for selector in COLOR_SWATCH_SELECTORS:
-        try:
-            elements = page.query_selector_all(selector)
-            if not elements:
+            r = await client.get(url, params=params, follow_redirects=True)
+            if r.status_code == 200:
+                return r
+            if r.status_code in RETRYABLE_STATUSES:
+                wait = (2 ** (attempt - 1)) + random.uniform(0, 0.6)
+                if verbose:
+                    print(
+                        f"    [http] {label} got {r.status_code}, "
+                        f"retry {attempt}/{max_attempts} in {wait:.1f}s"
+                    )
+                await asyncio.sleep(wait)
                 continue
-            labels: list[str] = []
-            for el in elements:
-                label = (
-                    el.get_attribute("aria-label")
-                    or el.get_attribute("alt")
-                    or el.get_attribute("title")
-                    or el.get_attribute("data-color")
-                    or el.get_attribute("data-color-name")
-                    or ""
-                )
-                if label.strip():
-                    labels.append(label.strip())
-            if labels:
-                return labels
-        except Exception:
-            continue
-    return []
-
-
-def _extract_pdp_swatch_colors(page: "Page") -> list[str]:
-    """
-    Color chips on the PDP only — scoped under main / buy-box so we do not
-    collect chips from carousels, recommendations, or listing remnants.
-    """
-    for container in (
-        "main",
-        "[class*='pdp']",
-        "[class*='Pdp']",
-        "[class*='product-detail']",
-        "[class*='ProductDetail']",
-        "[class*='buy-box']",
-        "[class*='BuyBox']",
-    ):
-        try:
-            root = page.query_selector(container)
-            if not root:
-                continue
-            for selector in COLOR_SWATCH_SELECTORS:
-                try:
-                    elements = root.query_selector_all(selector)
-                    if not elements:
-                        continue
-                    labels: list[str] = []
-                    for el in elements:
-                        label = (
-                            el.get_attribute("aria-label")
-                            or el.get_attribute("alt")
-                            or el.get_attribute("title")
-                            or el.get_attribute("data-color")
-                            or el.get_attribute("data-color-name")
-                            or ""
-                        )
-                        if label.strip():
-                            labels.append(label.strip())
-                    if labels:
-                        return labels
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    return []
-
-
-def _dedupe_preserve_order(labels: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for lab in labels:
-        k = (lab or "").strip().lower()
-        if k and k not in seen:
-            seen.add(k)
-            out.append(lab.strip())
-    return out
-
-
-def _filter_uniqlo_dom_color_noise(labels: list[str]) -> list[str]:
-    """
-    PDP color-chip selectors can still match quantity steppers, share, etc.
-    Strip obvious non-color aria-labels before treating DOM as authoritative.
-    """
-    junk = (
-        "close", "share", "minimum", "maximum", "increase", "decrease",
-        "button", "cart", "checkout", "menu", "search", "account", "wishlist",
-        "favorite", "notify", "quantity", "sign in", "sign-in",
-        "add to", "added", "remove", "delete", "zoom", "play", "pause",
-        "filter", "sort", "rating", "review",
-    )
-    out: list[str] = []
-    for lab in labels:
-        low = lab.lower().strip()
-        if any(j in low for j in junk):
-            continue
-        if len(lab) > 80:
-            continue
-        out.append(lab.strip())
-    return out
-
-
-def _uniqlo_color_batch_quality(labels: list[str]) -> float:
-    """Share of labels that look like real Uniqlo color names (keyword or code)."""
-    if not labels:
-        return 0.0
-    hits = 0
-    for lab in labels:
-        if extract_color(lab):
-            hits += 1
-        elif re.match(r"^\d{1,3}\s+\S", lab.strip()):
-            hits += 1
-    return hits / len(labels)
-
-
-def _uniqlo_pdp_product_slug(prod_url: str) -> str | None:
-    """e.g. .../products/E458186-000 → 'E458186-000' (uppercased)."""
-    m = re.search(r"/products/([^/?#]+)", prod_url, re.I)
-    if not m:
-        return None
-    slug = m.group(1).strip()
-    if not slug:
-        return None
-    return slug.split(".")[0].upper()
-
-
-def _uniqlo_item_codes_for_match(item: dict) -> set[str]:
-    """Collect product identifiers from one commerce API item for URL matching."""
-    out: set[str] = set()
-    candidates: list[str] = []
-    for key in (
-        "losProductCode",
-        "parentLosProductCode",
-        "productCode",
-        "parentProductCode",
-        "code",
-        "shortName",
-    ):
-        v = item.get(key)
-        if isinstance(v, str) and v.strip():
-            candidates.append(v.strip().upper())
-    for key in ("productId", "product_id", "id"):
-        v = item.get(key)
-        if v is not None and str(v).strip():
-            candidates.append(str(v).strip().upper())
-    for s in candidates:
-        out.add(s)
-        out.add(re.sub(r"\s+", "", s))
-        digits = re.sub(r"\D", "", s)
-        if len(digits) >= 6:
-            out.add(digits)
-    return {x for x in out if x}
-
-
-def _uniqlo_api_item_matches_pdp(item: dict, prod_url: str) -> bool:
-    slug = _uniqlo_pdp_product_slug(prod_url)
-    if not slug:
-        return False
-    slug_alnum = re.sub(r"[^A-Z0-9]", "", slug.upper())
-    slug_digits = re.sub(r"\D", "", slug_alnum)
-    for c in _uniqlo_item_codes_for_match(item):
-        c_alnum = re.sub(r"[^A-Z0-9]", "", c.upper())
-        if not c_alnum:
-            continue
-        if slug_alnum == c_alnum:
-            return True
-        if len(c_alnum) >= 6 and (c_alnum in slug_alnum or slug_alnum in c_alnum):
-            return True
-        cd = re.sub(r"\D", "", c_alnum)
-        if (
-            len(slug_digits) >= 6
-            and len(cd) >= 6
-            and (slug_digits == cd or slug_digits in cd or cd in slug_digits)
-        ):
-            return True
-    return False
-
-
-def _pick_best_api_color_batch_for_pdp(
-    api_entries: list[tuple[list[str], dict]],
-    prod_url: str,
-) -> list[str]:
-    """
-    Commerce responses often include multiple `result.items` (carousel, etc.).
-    Each entry is one item's color list plus that item's dict. Prefer the batch
-    whose product id matches the PDP URL, then best color-keyword quality, then
-    the **largest** batch on ties (main SKU usually has the full color run;
-    tiny carousel items often tie on quality but have fewer swatches).
-    """
-    if not api_entries:
-        return []
-    reasonable = [(b, it) for b, it in api_entries if 1 <= len(b) <= 48]
-    if not reasonable:
-        flat: list[str] = []
-        for b, _ in api_entries:
-            flat.extend(b)
-        return _dedupe_preserve_order(flat)
-
-    matched = [(b, it) for b, it in reasonable if _uniqlo_api_item_matches_pdp(it, prod_url)]
-    pool = matched if matched else reasonable
-
-    def sort_key(entry: tuple[list[str], dict]) -> tuple[float, int]:
-        b, _ = entry
-        return (_uniqlo_color_batch_quality(b), len(b))
-
-    return max(pool, key=sort_key)[0]
-
-
-# --------------------------------------------------------------------------- #
-# Main scraping loop                                                            #
-# --------------------------------------------------------------------------- #
-
-def scrape_uniqlo(
-    sleep_between_pages: float = 3.0,
-    headless: bool = True,
-) -> tuple[list[str], list[str]]:
-    """
-    Scrape all Uniqlo pages.
-    Returns (product_titles, color_labels).
-
-    Colors are sourced from Uniqlo's internal product API (intercepted via
-    Playwright's response handler) which returns proper color names like
-    "Off White", "Dark Navy", etc. The DOM color chips only carry numeric
-    codes ("37") so this interception approach is required for accurate colors.
-    Falls back to DOM swatch labels and then title keywords if the API yields
-    nothing.
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("ERROR: playwright is not installed.")
-        print("  Run: pip install playwright && playwright install chromium")
-        sys.exit(1)
-
-    all_titles: list[str] = []
-    all_swatch_colors: list[str] = []
-    api_colors: list[str] = []
-    raw_items: list[dict] = []
-
-    def _handle_response(response: object) -> None:
-        """Intercept Uniqlo's internal product API to collect real color names."""
-        try:
-            url = response.url  # type: ignore[attr-defined]
-            if "/api/commerce/v5/en/products" not in url:
-                return
-            if response.status != 200:  # type: ignore[attr-defined]
-                return
-            data = response.json()  # type: ignore[attr-defined]
-            items = data.get("result", {}).get("items", [])
-            for item in items:
-                for color_obj in item.get("colors", []):
-                    name = color_obj.get("name", "").strip()
-                    if name:
-                        api_colors.append(name)
-        except Exception:
-            pass
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            },
-        )
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            "window.chrome = {runtime: {}};"
-        )
-
-        page = context.new_page()
-        page.on("response", _handle_response)
-
-        for page_info in UNIQLO_PAGES:
-            url = page_info["url"]
-            label = page_info["label"]
-            print(f"  [{label}] → {url}")
-
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-
-                grid_found = _wait_for_products(page, timeout_ms=15_000)
-                if not grid_found:
-                    page_title = page.title()
-                    print(f"    WARNING: product grid not found (page title: '{page_title}')")
-
-                time.sleep(1.5)
-                _scroll_to_bottom(page)
-
-                titles = _extract_product_names(page)
-                swatches = _extract_swatch_colors(page)
-
-                api_count = len(api_colors)
-                print(f"    {len(titles)} product titles, {len(swatches)} DOM swatches, {api_count} API colors so far")
-                all_titles.extend(titles)
-                all_swatch_colors.extend(swatches)
-
-                gender = "women" if label.startswith("women") else "men" if label.startswith("men") else "unisex"
-                # Snapshot API colors collected so far for this page's titles.
-                # api_colors accumulates across pages, so take a copy of the
-                # colors added during this page's load (swatches as fallback).
-                page_colors = _dedupe_preserve_order(list(api_colors) if api_colors else list(swatches))
-                for t in titles:
-                    raw_items.append({"title": t, "gender": gender, "page_swatches": page_colors})
-
-            except Exception as exc:
-                print(f"    ERROR: {exc}")
-
-            time.sleep(sleep_between_pages)
-
-        browser.close()
-
-    # Prefer API-intercepted colors (real names) over DOM swatch codes
-    final_colors = api_colors if api_colors else all_swatch_colors
-    if api_colors:
-        print(f"  Using {len(api_colors)} API-intercepted color names")
-    else:
-        print(f"  API interception yielded nothing — falling back to {len(all_swatch_colors)} DOM swatch labels")
-
-    return all_titles, final_colors, raw_items
-
-
-def _extract_product_urls(page: "Page", base_url: str = "https://www.uniqlo.com") -> list[str]:
-    seen: set[str] = set()
-    urls: list[str] = []
-    for selector in PRODUCT_CARD_LINK_SELECTORS:
-        try:
-            elements = page.query_selector_all(selector)
-            for el in elements:
-                href = el.get_attribute("href") or ""
-                if not href:
-                    continue
-                if href.startswith("/"):
-                    href = base_url + href
-                if href not in seen and "uniqlo.com" in href:
-                    seen.add(href)
-                    urls.append(href)
-            if urls:
-                return urls
-        except Exception:
-            continue
-    return urls
-
-
-def scrape_uniqlo_detailed(
-    sleep_between_pages: float = 3.0,
-    sleep_between_products: float = 2.0,
-    headless: bool = True,
-    max_products_per_page: int = 50,
-) -> list[dict]:
-    """
-    Two-step scraper: listing page → product URLs → visit each product page.
-
-    Colors are chosen in this order:
-      1. **Scoped PDP swatches** — chips under `main` / buy-box only (matches
-         the Color row on the product page, not site-wide chips).
-      2. **Commerce API** — responses may include several `result.items` (this
-         PDP plus recommendations). We take **one item's** `colors` list at a time,
-         prefer the item whose product code matches the PDP URL, then quality /
-         smallest batch on ties.
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("ERROR: playwright not installed.")
-        sys.exit(1)
-
-    raw_items: list[dict] = []
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-        )
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            "window.chrome = {runtime: {}};"
-        )
-        page = context.new_page()
-
-        for page_info in UNIQLO_PAGES:
-            url   = page_info["url"]
-            label = page_info["label"]
-            gender = "women" if label.startswith("women") else "men" if label.startswith("men") else "unisex"
-            print(f"\n  [{label}] → {url}")
-
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                _wait_for_products(page, timeout_ms=15_000)
-                time.sleep(1.5)
-                _scroll_to_bottom(page)
-                raw_urls = _extract_product_urls(page)
-                product_urls = dedupe_product_urls_preserve_order(raw_urls)
+            if verbose:
+                print(f"    [http] {label} non-retryable {r.status_code}: {r.text[:200]}")
+            return None
+        except (httpx.TimeoutException, httpx.RequestError) as exc:
+            wait = (2 ** (attempt - 1)) + random.uniform(0, 0.6)
+            if verbose:
                 print(
-                    f"    Found {len(product_urls)} distinct product URLs "
-                    f"from {len(raw_urls)} listing links (cap {max_products_per_page})"
+                    f"    [http] {label} {type(exc).__name__}: "
+                    f"retry {attempt}/{max_attempts} in {wait:.1f}s"
                 )
-                product_urls = product_urls[:max_products_per_page]
-            except Exception as exc:
-                print(f"    ERROR loading listing page: {exc}")
-                continue
+            await asyncio.sleep(wait)
+    if verbose:
+        print(f"    [http] {label} GAVE UP after {max_attempts} attempts")
+    return None
 
-            for i, prod_url in enumerate(product_urls, 1):
-                api_entries: list[tuple[list[str], dict]] = []
 
-                def _handle_product_response(response: object) -> None:
-                    try:
-                        r_url = response.url  # type: ignore[attr-defined]
-                        if "/api/commerce/v5/en/products" not in r_url:
-                            return
-                        if response.status != 200:  # type: ignore[attr-defined]
-                            return
-                        data = response.json()  # type: ignore[attr-defined]
-                        items = data.get("result", {}).get("items", [])
-                        for item in items:
-                            batch: list[str] = []
-                            for c in item.get("colors", []):
-                                name = c.get("name", "").strip()
-                                if name:
-                                    batch.append(name)
-                            if batch:
-                                api_entries.append((batch, item))
-                    except Exception:
-                        pass
+async def _fetch_listing_page(
+    client: httpx.AsyncClient,
+    gender_id: str,
+    offset: int,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    verbose: bool = True,
+) -> dict | None:
+    """One GET against the Uniqlo catalog API. Returns parsed JSON or None.
+    Uniqlo returns `result.pagination.total` and `result.items[]` — see module
+    docstring for the response shape.
+    """
+    params = {
+        **API_BASE_PARAMS,
+        "path":     f"{gender_id},,,",
+        "genderId": gender_id,
+        "offset":   str(offset),
+        "limit":    str(API_PAGE_SIZE),
+    }
+    resp = await _request_with_retry(
+        client, API_URL, params=params, max_attempts=max_attempts,
+        label=f"api gender={gender_id} offset={offset}", verbose=verbose,
+    )
+    return resp.json() if resp is not None else None
 
-                page.on("response", _handle_product_response)
-                try:
-                    page.goto(prod_url, wait_until="domcontentloaded", timeout=30_000)
-                    time.sleep(1.5)
 
-                    # Title from PDP
-                    title = ""
-                    for sel in ["h1[class*='product-name']", "h1[data-testid='ITOTypography']",
-                                "[class*='product-name'] h1", "h1"]:
-                        try:
-                            el = page.query_selector(sel)
-                            if el:
-                                title = el.inner_text().strip()
-                                if title:
-                                    break
-                        except Exception:
-                            continue
+async def _fetch_listings_for_target(
+    client: httpx.AsyncClient,
+    target: dict,
+    semaphore: asyncio.Semaphore,
+    verbose: bool = True,
+) -> tuple[list[dict], int]:
+    """Paginate one (genderId, gender) target to completion.
 
-                    # 1) Scoped PDP swatches (what the shopper sees under Color).
-                    # 2) API batches — multiple responses fire on a PDP; pick the batch
-                    #    whose names look most like real colors (not smallest blindly).
-                    # DOM selectors can still hit quantity/share controls; filter those
-                    # and only prefer DOM when a solid share of labels map to colors.
-                    dom_raw = _dedupe_preserve_order(_extract_pdp_swatch_colors(page))
-                    dom_swatches = _filter_uniqlo_dom_color_noise(dom_raw)
-                    api_swatches = _dedupe_preserve_order(
-                        _pick_best_api_color_batch_for_pdp(api_entries, prod_url)
-                    )
-                    q_dom = _uniqlo_color_batch_quality(dom_swatches)
-                    q_api = _uniqlo_color_batch_quality(api_swatches)
-                    min_dom_quality = 0.34
-                    dom_ok = (
-                        dom_swatches
-                        and q_dom >= min_dom_quality
-                        and q_dom >= q_api
-                    )
-                    # Visible chips can be a subset; if API has many more plausible
-                    # colors at similar quality, keep the API list.
-                    api_richer = (
-                        api_swatches
-                        and len(api_swatches) >= len(dom_swatches) + 4
-                        and q_api >= q_dom - 0.1
-                    )
-                    if dom_ok and not api_richer:
-                        colors = dom_swatches
-                    elif api_swatches:
-                        colors = api_swatches
-                    else:
-                        colors = dom_swatches
+    Returns (combos, total_count) where combos is a list of one dict per
+    (productId, color) pair (deduped on the pair within this target), and
+    total_count is the API's reported `pagination.total` (the completeness
+    oracle).
+    """
+    gender_id = target["genderId"]
+    gender    = target["gender"]
+    label     = target["label"]
 
-                    colors = _dedupe_preserve_order(colors)
+    # First page tells us total + page count.
+    async with semaphore:
+        first = await _fetch_listing_page(client, gender_id, offset=0, verbose=verbose)
+    if first is None or first.get("status") != "ok":
+        print(f"  [{label}] FAILED to fetch offset 0 — aborting this target")
+        return [], 0
 
-                    category     = extract_category(title)
-                    material     = extract_material(title, inferred_category=category)
-                    product_type = extract_product_type(title)
-                    base_graphical = extract_graphical_appearance(title)
+    pagination = first.get("result", {}).get("pagination") or {}
+    total_count = int(pagination.get("total", 0))
+    print(f"  [{label}] total={total_count} pageSize={API_PAGE_SIZE}")
 
-                    if colors:
-                        for color_label in colors:
-                            color    = extract_color(color_label) or extract_color(title)
-                            graphical = extract_graphical_appearance(color_label)
-                            if graphical == GRAPHICAL_APPEARANCE_DEFAULT:
-                                graphical = base_graphical
-                            raw_items.append({
-                                "title": title, "gender": gender,
-                                "color_raw": color_label, "color": color or "unknown",
-                                "product_type_raw": product_type or "unknown",
-                                "material_raw": material or "unknown",
-                                "graphical_appearance_raw": graphical,
-                            })
-                    else:
-                        color = extract_color(title)
-                        raw_items.append({
-                            "title": title, "gender": gender,
-                            "color_raw": color or "unknown", "color": color or "unknown",
-                            "product_type_raw": product_type or "unknown",
-                            "material_raw": material or "unknown",
-                            "graphical_appearance_raw": base_graphical,
-                        })
-                except Exception as exc:
-                    print(f"      ERROR on {prod_url}: {exc}")
-                finally:
-                    page.remove_listener("response", _handle_product_response)
+    pages: list[dict | None] = [first]
+    if total_count > API_PAGE_SIZE:
+        async def fetch_one(off: int) -> dict | None:
+            async with semaphore:
+                return await _fetch_listing_page(client, gender_id, offset=off, verbose=verbose)
+        offsets = list(range(API_PAGE_SIZE, total_count, API_PAGE_SIZE))
+        rest = await asyncio.gather(*[fetch_one(o) for o in offsets])
+        pages.extend(rest)
 
-                if i % 10 == 0:
-                    print(f"    ... {i}/{len(product_urls)} products scraped, {len(raw_items)} rows so far")
-                time.sleep(sleep_between_products)
+    failed_offsets = [i * API_PAGE_SIZE for i, p in enumerate(pages) if p is None]
+    if failed_offsets:
+        print(f"  [{label}] WARNING: offsets {failed_offsets} failed permanently")
 
-            time.sleep(sleep_between_pages)
+    # Dedup per-target on (productId, color.code). Across cursor windows the
+    # API can shuffle — same productId may appear in two pages.
+    combos: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for page_data in pages:
+        if not page_data or page_data.get("status") != "ok":
+            continue
+        for item in page_data.get("result", {}).get("items", []) or []:
+            product_id = str(item.get("productId") or "")
+            l1_id      = str(item.get("l1Id") or "")
+            name       = item.get("name") or ""
+            for color in item.get("colors", []) or []:
+                cc_code = str(color.get("code") or "")
+                key = (product_id, cc_code)
+                if key in seen:
+                    continue
+                seen.add(key)
+                combos.append({
+                    "product_id":     product_id,
+                    "l1_id":          l1_id,
+                    "name":           name,
+                    "cc_code":        cc_code,
+                    "cc_display":     str(color.get("displayCode") or ""),
+                    "color_name":     color.get("name") or "",
+                    "color_filter":   color.get("filterCode") or "",
+                    "gender":         gender,
+                })
 
-        browser.close()
+    unique_products = len({c["product_id"] for c in combos})
+    if total_count and unique_products < total_count:
+        print(
+            f"  [{label}] {unique_products}/{total_count} unique products "
+            f"({total_count - unique_products} short — API ranking-shuffle drift, normal)"
+        )
+    elif total_count:
+        print(f"  [{label}] collected {unique_products}/{total_count} unique products ✓")
 
-    print(f"\nDetailed scrape complete: {len(raw_items)} total item-color rows")
-    return raw_items
+    return combos, total_count
+
+
+async def _scrape_uniqlo_via_api(
+    targets: list[dict] = UNIQLO_TARGETS,
+    concurrency: int = 6,
+    max_products_per_page: int | None = None,
+    verbose: bool = True,
+) -> tuple[list[dict], dict[str, int]]:
+    """Run all targets concurrently. Returns (combos, totals_by_label) where
+    `totals_by_label` is the API's reported `pagination.total` per target.
+    """
+    timeout = httpx.Timeout(connect=10, read=30, write=15, pool=15)
+    limits  = httpx.Limits(max_connections=max(concurrency * 2, 16))
+    sem     = asyncio.Semaphore(concurrency)
+
+    async with httpx.AsyncClient(headers=API_HEADERS, timeout=timeout, limits=limits) as client:
+        results = await asyncio.gather(*[
+            _fetch_listings_for_target(client, t, sem, verbose=verbose) for t in targets
+        ])
+
+    all_combos: list[dict] = []
+    totals: dict[str, int] = {}
+    for target, (combos, total_count) in zip(targets, results):
+        if max_products_per_page is not None:
+            # Cap by unique productIds (not raw rows) so a 5-color hoodie
+            # doesn't eat the whole budget.
+            unique_pids: list[str] = []
+            keep_ids: set[str] = set()
+            for c in combos:
+                if c["product_id"] not in keep_ids and len(keep_ids) < max_products_per_page:
+                    keep_ids.add(c["product_id"])
+                    unique_pids.append(c["product_id"])
+            combos = [c for c in combos if c["product_id"] in keep_ids]
+        all_combos.extend(combos)
+        totals[target["label"]] = total_count
+    return all_combos, totals
 
 
 # --------------------------------------------------------------------------- #
-# Frequency counting and normalization                                          #
+# PDP material enrichment (2nd pass)                                            #
+# --------------------------------------------------------------------------- #
+
+# PDP HTML embeds the product JSON inline (Next.js __NEXT_DATA__). The
+# "composition" field carries the fabric string. The escape level is single-
+# JSON (one backslash-escaped layer), so a normal JSON-string regex matches.
+PDP_URL_TEMPLATE = "https://www.uniqlo.com/us/en/products/{product_id}"
+COMPOSITION_RE = re.compile(r'"composition"\s*:\s*"((?:\\.|[^"\\])*)"')
+PDP_HEADERS = {**API_HEADERS, "Accept": "text/html,application/xhtml+xml,*/*"}
+
+
+async def _fetch_pdp_fabric(
+    client: httpx.AsyncClient,
+    product_id: str,
+    semaphore: asyncio.Semaphore,
+    verbose: bool = True,
+) -> str:
+    """Fetch one PDP and return the decoded composition string. Returns ""
+    on fetch failure or when the regex doesn't match.
+    """
+    url = PDP_URL_TEMPLATE.format(product_id=product_id)
+    async with semaphore:
+        resp = await _request_with_retry(
+            client, url, label=f"pdp/{product_id}", verbose=verbose,
+        )
+    if resp is None:
+        return ""
+    m = COMPOSITION_RE.search(resp.text)
+    if not m:
+        return ""
+    raw = m.group(1)
+    # Decode \uXXXX, \", \\, etc. (single-layer JSON escapes).
+    try:
+        decoded = bytes(raw, "utf-8").decode("unicode_escape")
+    except Exception:
+        decoded = raw
+    # The composition string sometimes carries embedded HTML <br>; flatten.
+    return decoded.replace("<br>", " | ").replace("&lt;br&gt;", " | ")
+
+
+async def _enrich_materials_via_pdps(
+    product_ids: list[str],
+    concurrency: int = 6,
+    verbose: bool = True,
+) -> dict[str, str]:
+    """Concurrently fetch PDPs for each unique productId. Returns
+    {product_id -> composition_text} with empty entries omitted.
+    """
+    if not product_ids:
+        return {}
+    timeout = httpx.Timeout(connect=10, read=30, write=15, pool=15)
+    limits  = httpx.Limits(max_connections=max(concurrency * 2, 16))
+    sem     = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient(headers=PDP_HEADERS, timeout=timeout, limits=limits) as client:
+        results = await asyncio.gather(*[
+            _fetch_pdp_fabric(client, pid, sem, verbose=verbose) for pid in product_ids
+        ])
+    return {pid: text for pid, text in zip(product_ids, results) if text}
+
+
+# --------------------------------------------------------------------------- #
+# Per-combo attribute extraction (pure)                                         #
+# --------------------------------------------------------------------------- #
+
+def _combo_to_row(
+    combo: dict,
+    scraped_at: str,
+    retailer: str = "uniqlo",
+    enriched_material_by_product: dict[str, str] | None = None,
+) -> dict:
+    """Project one (product × color) combo into the items_uniqlo.csv row.
+
+    Strategy mirrors gap_scraper:
+      - title source: API `name` field
+      - color source: color.name preferred (e.g. "WINE"), fall back to
+        filterCode (e.g. "RED")
+      - material source: title first; if title yields None and PDP enrichment
+        has a composition string for this productId, re-extract on
+        title + composition (uses the new percentage-aware extract_material
+        in feature_lookups, so blends like "96% Cotton, 4% Spandex" map to
+        cotton instead of polyester).
+      - graphical: derived from color label first, fall back to title.
+
+    style_id is the canonical PDP slug (`productId`, e.g. "E482195-000").
+    cc_id is `{l1Id}-{displayCode}` for global uniqueness across products.
+    web_product_type stays "" — Uniqlo's API doesn't expose a category label.
+    """
+    title       = combo["name"]
+    color_name  = combo["color_name"] or ""
+    color_label = color_name or combo["color_filter"] or ""
+    gender      = combo["gender"]
+
+    category = extract_category(title)
+    # Authoritative material source order:
+    #   1. PDP composition (if enrichment ran for this product) — never wrong
+    #      about actual fabric content.
+    #   2. Title with category-default fallback — always has *some* answer
+    #      when category is recognized but title has no fabric word; the
+    #      default (e.g. tops → cotton) can mis-classify synthetic-fabric
+    #      products like AIRism polyester tees.
+    composition = ""
+    if enriched_material_by_product is not None:
+        composition = enriched_material_by_product.get(combo["product_id"], "")
+    if composition:
+        material = extract_material(composition, inferred_category=category)
+    else:
+        material = extract_material(title, inferred_category=category)
+
+    product_type   = extract_product_type(title)
+    base_graphical = extract_graphical_appearance(title)
+
+    color = extract_color(color_label) or extract_color(title)
+    graphical = extract_graphical_appearance(color_label)
+    if graphical == "Solid":
+        graphical = base_graphical
+
+    color_raw = color_label or "unknown"
+    cc_id = f"{combo['l1_id']}-{combo['cc_display']}" if combo.get("l1_id") else combo.get("cc_code", "")
+    return {
+        "scraped_at":               scraped_at,
+        "retailer":                 retailer,
+        "style_id":                 combo["product_id"],
+        "cc_id":                    cc_id,
+        "web_product_type":         "",
+        "title":                    title,
+        "gender":                   gender,
+        "color_raw":                color_raw,
+        "product_type_raw":         product_type or "unknown",
+        "material_raw":             material or "unknown",
+        "graphical_appearance_raw": graphical,
+        "color_master_id":          COLOR_MASTER_TO_ID.get(color or "", 0),
+        "color_spectrum_id":        extract_color_spectrum_id(color_raw),
+        "gender_id":                GENDER_TO_ID.get(gender, 2),
+        "product_type_id":          PRODUCT_TYPE_TO_ID.get(product_type or "", 0),
+        "product_group_id":         extract_product_group_id(product_type),
+        "material_id":              MATERIAL_TO_ID.get(material or "", 0),
+        "graphical_appearance_id":  GRAPHICAL_APPEARANCE_TO_ID.get(graphical, 1),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Streaming CSV writer with checkpoint/resume (parity with gap_scraper)         #
+# --------------------------------------------------------------------------- #
+
+class StreamingItemWriter:
+    """Append rows to items_uniqlo_partial.csv as they're produced; on close,
+    atomically rename to the final path. With `resume=True`, prior
+    (style_id, cc_id, gender) keys are loaded so duplicate work is skipped.
+    """
+
+    def __init__(self, final_path: Path, resume: bool = False) -> None:
+        self.final_path   = final_path
+        self.partial_path = final_path.with_name(final_path.stem + "_partial.csv")
+        self._resume      = resume
+        self._existing: set[tuple[str, str, str]] = set()
+        self._handle      = None
+        self._writer      = None
+
+    def __enter__(self) -> "StreamingItemWriter":
+        if self._resume and self.partial_path.exists():
+            with self.partial_path.open("r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    self._existing.add((
+                        row.get("style_id", ""),
+                        row.get("cc_id", ""),
+                        row.get("gender", ""),
+                    ))
+            print(f"  [resume] loaded {len(self._existing)} prior keys from {self.partial_path}")
+            self._handle = self.partial_path.open("a", newline="")
+            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
+        else:
+            if self.partial_path.exists():
+                self.partial_path.unlink()
+            self._handle = self.partial_path.open("w", newline="")
+            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
+            self._writer.writeheader()
+            self._handle.flush()
+        return self
+
+    def already_have(self, style_id: str, cc_id: str, gender: str) -> bool:
+        return (style_id, cc_id, gender) in self._existing
+
+    def write(self, row: dict) -> None:
+        self._writer.writerow(row)
+        self._handle.flush()
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._handle is not None:
+            self._handle.close()
+        if exc_type is None:
+            os.replace(self.partial_path, self.final_path)
+
+
+def _read_existing_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with path.open("r", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+# --------------------------------------------------------------------------- #
+# Frequency counting / normalization                                            #
 # --------------------------------------------------------------------------- #
 
 def count_attribute_frequencies(
-    titles: list[str],
-    swatch_colors: list[str],
-) -> dict[str, dict[str, int]]:
-    """
-    Count occurrences of each feature value across all products.
-
-    Color is sourced from swatch_colors first (more reliable), then title fallback.
-    Category and material come from title keyword matching.
-    """
+    rows: list[dict],
+) -> tuple[dict[str, dict[str, int]], int]:
     counts: dict[str, dict[str, int]] = {ft: {} for ft in FEATURE_TYPES}
+    products: dict[tuple[str, str], dict] = {}
 
-    for swatch_label in swatch_colors:
-        color = extract_color(swatch_label)
-        if color:
-            counts["color"][color] = counts["color"].get(color, 0) + 1
+    for item in rows:
+        key = (item.get("title", ""), item.get("gender", ""))
+        if key not in products:
+            material_raw = item.get("material_raw")
+            products[key] = {
+                "category": extract_category(item.get("title", "")),
+                "material": material_raw if material_raw and material_raw != "unknown" else None,
+                "colors":   set(),
+            }
+        color_label = item.get("color_raw", "")
+        canon = extract_color(color_label) if color_label and color_label != "unknown" else None
+        if canon:
+            products[key]["colors"].add(canon)
 
-    for title in titles:
-        category = extract_category(title)
-        if category:
-            counts["category"][category] = counts["category"].get(category, 0) + 1
+    for prod in products.values():
+        if prod["category"]:
+            counts["category"][prod["category"]] = counts["category"].get(prod["category"], 0) + 1
+        if prod["material"]:
+            counts["material"][prod["material"]] = counts["material"].get(prod["material"], 0) + 1
+        for c in prod["colors"]:
+            counts["color"][c] = counts["color"].get(c, 0) + 1
 
-        material = extract_material(title, inferred_category=category)
-        if material:
-            counts["material"][material] = counts["material"].get(material, 0) + 1
-
-        # Color from title only when no swatch/API colors were captured.
-        # When the API interception works, swatch_colors contains real names
-        # (e.g. "Off White", "Dark Navy") and title extraction is unnecessary.
-        if not swatch_colors:
-            color = extract_color(title)
-            if color:
-                counts["color"][color] = counts["color"].get(color, 0) + 1
-
-    return counts
+    return counts, len(products)
 
 
 def normalize_counts(
     counts: dict[str, dict[str, int]],
     total_items: int,
 ) -> dict[str, dict[str, float]]:
-    """
-    Normalize raw feature counts to proportion scores.
-
-    score = count / total_items  (actual market-share proportion)
-
-    Using total items scraped as the denominator (instead of the per-feature
-    max count) makes scores directly comparable across retailers and over time:
-    a score of 0.30 always means "30% of products on this site had this value".
-    """
     denom = max(total_items, 1)
-    scores: dict[str, dict[str, float]] = {}
-    for feature_type, value_counts in counts.items():
-        scores[feature_type] = {
-            value: round(count / denom, 6)
-            for value, count in value_counts.items()
-        }
-    return scores
-
-
-def build_trend_signals_frame(
-    scores: dict[str, dict[str, float]],
-    known_feature_values: dict[str, list[str]],
-) -> pd.DataFrame:
-    rows = []
-    for feature_type, values in known_feature_values.items():
-        type_scores = scores.get(feature_type, {})
-        for feature_value in values:
-            rows.append({
-                "feature_type": feature_type,
-                "feature_value": feature_value,
-                "current": type_scores.get(feature_value, DEFAULT_MISSING_SCORE),
-            })
-    return pd.DataFrame(rows)
-
-
-def build_raw_items_frame(
-    raw_items: list[dict],
-    scraped_date: str,
-    retailer: str = "uniqlo",
-) -> pd.DataFrame:
-    """Build a one-row-per-item-color DataFrame with lookup-table IDs.
-
-    Each product is expanded to one row per unique swatch/API color seen on
-    its page, matching the H&M one-row-per-article-color schema.
-    """
-    rows = []
-    for item in raw_items:
-        title        = item["title"]
-        gender       = item["gender"]
-        product_type = extract_product_type(title)
-        material     = extract_material(title, inferred_category=extract_category(title))
-        graphical    = extract_graphical_appearance(title)
-
-        if item.get("color"):
-            color_labels = [item.get("color_raw") or item["color"]]
-        elif item.get("page_swatches"):
-            color_labels = _dedupe_preserve_order(item["page_swatches"])
-        else:
-            title_color = extract_color(title)
-            color_labels = [title_color] if title_color else ["unknown"]
-
-        for color_raw_lbl in color_labels:
-            color = item.get("color") if item.get("color") else (
-                extract_color(color_raw_lbl) if color_raw_lbl != "unknown" else None
-            )
-            rows.append({
-                "scraped_at":               scraped_date,
-                "retailer":                 retailer,
-                "title":                    title,
-                "gender":                   gender,
-                "color_raw":                color_raw_lbl,
-                "product_type_raw":         product_type or "unknown",
-                "material_raw":             material or "unknown",
-                "graphical_appearance_raw": graphical,
-                "color_master_id":          COLOR_MASTER_TO_ID.get(color or "", 0),
-                "color_spectrum_id":        extract_color_spectrum_id(color_raw_lbl),
-                "gender_id":                GENDER_TO_ID.get(gender, 2),
-                "product_type_id":          PRODUCT_TYPE_TO_ID.get(product_type or "", 0),
-                "product_group_id":         extract_product_group_id(product_type),
-                "material_id":              MATERIAL_TO_ID.get(material or "", 0),
-                "graphical_appearance_id":  GRAPHICAL_APPEARANCE_TO_ID.get(graphical, 1),
-            })
-    return pd.DataFrame(rows)
-
-
-def blend_with_existing(
-    scraped: pd.DataFrame,
-    existing_path: Path,
-    blend_weight: float,
-) -> pd.DataFrame:
-    existing = pd.read_csv(existing_path)
-    existing_validated = validate_trend_signals_frame(existing)
-    existing_map = {
-        (row["feature_type"], row["feature_value"]): row["current"]
-        for _, row in existing_validated.iterrows()
+    return {
+        ft: {value: round(count / denom, 6) for value, count in vals.items()}
+        for ft, vals in counts.items()
     }
-    blended = scraped.copy()
-    for idx, row in blended.iterrows():
-        key = (row["feature_type"], row["feature_value"])
-        existing_score = existing_map.get(key, DEFAULT_MISSING_SCORE)
-        blended.at[idx, "current"] = round(
-            blend_weight * float(row["current"]) + (1.0 - blend_weight) * existing_score,
-            6,
-        )
-    return blended
 
-
-# --------------------------------------------------------------------------- #
-# Argument parsing                                                              #
-# --------------------------------------------------------------------------- #
 
 KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
     "color":    [
@@ -1455,122 +609,167 @@ KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# CLI                                                                           #
+# --------------------------------------------------------------------------- #
+
 def parse_args() -> argparse.Namespace:
     _synth = Path(__file__).resolve().parents[1] / "training" / "synthetic_data"
-    default_output = _synth / "trend_signals_uniqlo.csv"
-    default_items  = _synth / "items_uniqlo.csv"
+    default_items = _synth / "items_uniqlo.csv"
     parser = argparse.ArgumentParser(
-        description="Scrape Uniqlo new arrivals and write trend_signals_uniqlo.csv + items_uniqlo.csv."
+        description="Scrape Uniqlo via the internal listing API. Writes "
+                    "items_uniqlo.csv (one row per product-color variant). "
+                    "build_live_cube.py aggregates items_*.csv into "
+                    "live_monthly_fingerprint.parquet + live_monthly_univariate.parquet."
     )
-    parser.add_argument("--output-path", default=str(default_output))
     parser.add_argument(
         "--items-path", default=str(default_items),
-        help="Where to write the raw items CSV (one row per product title).",
+        help="Where to write the raw items CSV (one row per product-color variant).",
     )
     parser.add_argument(
-        "--existing-path", default=None,
-        help="Existing trend_signals.csv to blend with scraped scores.",
+        "--concurrency", type=int, default=6,
+        help="Concurrent API page fetches and PDP fetches (default 6).",
     )
     parser.add_argument(
-        "--blend-weight", type=float, default=0.5,
-        help="Weight for scraped scores when blending (default 0.5).",
+        "--max-products-per-page", type=int, default=None,
+        help="Cap unique products per target. None = no cap. "
+             "Use a small value (e.g. 5) for smoke tests.",
     )
     parser.add_argument(
-        "--sleep", type=float, default=3.0,
-        help="Seconds between page loads (default 3.0).",
+        "--resume", action="store_true",
+        help="If items_uniqlo_partial.csv exists, skip already-written "
+             "(style_id, cc_id, gender) keys and append the rest.",
     )
     parser.add_argument(
-        "--headless", type=lambda v: v.lower() != "false", default=True,
-        help="Run headless browser. Pass 'false' for a visible window (default: true).",
+        "--strict", action="store_true",
+        help="Exit non-zero if collected unique products < API total for any target.",
     )
     parser.add_argument(
-        "--detailed", action="store_true", default=False,
-        help="Visit each product detail page for accurate per-item colors and material.",
+        "--enrich-pdp", dest="enrich_pdp", action="store_true", default=True,
+        help="Default ON. After Phase 1, fetch each PDP whose material can't be "
+             "extracted from title alone, parse the embedded 'composition' JSON "
+             "field, and use it for material extraction.",
     )
     parser.add_argument(
-        "--max-products", type=int, default=50,
-        help="Max products to visit per listing page in --detailed mode (default: 50).",
+        "--no-enrich-pdp", dest="enrich_pdp", action="store_false",
+        help="Skip the PDP enrichment pass (faster smoke testing).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
-    import datetime
-
     args = parse_args()
-    output_path = Path(args.output_path).expanduser().resolve()
-    items_path  = Path(args.items_path).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    items_path = Path(args.items_path).expanduser().resolve()
     items_path.parent.mkdir(parents=True, exist_ok=True)
 
+    cap_msg = "no cap" if args.max_products_per_page is None else f"max {args.max_products_per_page}/target"
     print(
-        f"Uniqlo retail scraper\n"
-        f"  pages: {len(UNIQLO_PAGES)}  headless: {args.headless}\n"
-        f"  color source: API interception (falls back to DOM swatches, then title keywords)\n"
-        f"  detailed mode: {args.detailed}"
-        + (f"  (max {args.max_products} products/page)" if args.detailed else "") + "\n"
-        f"  output: {output_path}\n"
-        f"  items:  {items_path}"
+        f"Uniqlo retail scraper (API mode)\n"
+        f"  targets:     {len(UNIQLO_TARGETS)}  concurrency: {args.concurrency}  ({cap_msg})\n"
+        f"  output:      {items_path}\n"
+        f"  resume:      {args.resume}\n"
+        f"  enrich-pdp:  {args.enrich_pdp}\n"
     )
 
-    titles, swatch_colors, raw_items = scrape_uniqlo(
-        sleep_between_pages=args.sleep,
-        headless=args.headless,
-    )
+    scraped_at = datetime.date.today().isoformat()
+    start = time.perf_counter()
 
-    if args.detailed:
-        print("\nRunning detailed per-product scrape for items CSV...")
-        raw_items = scrape_uniqlo_detailed(
-            sleep_between_pages=args.sleep,
-            sleep_between_products=2.0,
-            headless=args.headless,
-            max_products_per_page=args.max_products,
-        )
+    print("Phase 1: paginating Uniqlo catalog API ...")
+    combos, totals = asyncio.run(_scrape_uniqlo_via_api(
+        targets=UNIQLO_TARGETS,
+        concurrency=args.concurrency,
+        max_products_per_page=args.max_products_per_page,
+    ))
 
-    print(f"\nTotal collected: {len(titles)} product titles, {len(swatch_colors)} colors")
+    enriched: dict[str, str] = {}
+    if args.enrich_pdp:
+        # Enrich every product whose title doesn't contain an explicit fabric
+        # keyword. Products that resolve via category-default (e.g. tops →
+        # cotton) are still enriched so synthetic-fabric tops don't lock in
+        # a wrong answer before the PDP can speak.
+        unknown_pids: list[str] = []
+        seen: set[str] = set()
+        for combo in combos:
+            pid = combo["product_id"]
+            if pid in seen:
+                continue
+            seen.add(pid)
+            if not has_explicit_material_keyword(combo["name"]):
+                unknown_pids.append(pid)
+        if unknown_pids:
+            print(
+                f"\nPhase 1.5: enriching material for {len(unknown_pids)} "
+                f"products via PDP composition fields ..."
+            )
+            t0 = time.perf_counter()
+            enriched = asyncio.run(_enrich_materials_via_pdps(
+                unknown_pids, concurrency=args.concurrency, verbose=False,
+            ))
+            print(
+                f"  enriched {len(enriched)}/{len(unknown_pids)} PDPs "
+                f"in {time.perf_counter()-t0:.1f}s "
+                f"({len(unknown_pids) - len(enriched)} returned no composition)"
+            )
+        else:
+            print("\nPhase 1.5: no products need PDP enrichment (skipping).")
 
-    if not titles and not swatch_colors:
-        print(
-            "\nWARNING: Nothing was scraped. Uniqlo's bot protection may be\n"
-            "blocking headless Chrome. Try running with --headless false\n"
-            "to open a visible browser window, which is harder to detect."
-        )
+    print(f"\nPhase 2: writing items CSV ({len(combos)} combos to project) ...")
+    written = 0
+    skipped = 0
+    with StreamingItemWriter(items_path, resume=args.resume) as writer:
+        for combo in combos:
+            row = _combo_to_row(
+                combo, scraped_at=scraped_at, retailer="uniqlo",
+                enriched_material_by_product=enriched,
+            )
+            if writer.already_have(row["style_id"], row["cc_id"], row["gender"]):
+                skipped += 1
+                continue
+            writer.write(row)
+            written += 1
+    elapsed = time.perf_counter() - start
 
-    counts = count_attribute_frequencies(titles, swatch_colors)
-    scores = normalize_counts(counts, total_items=len(titles))
+    if args.resume and skipped:
+        print(f"  [resume] skipped {skipped} previously written rows; appended {written}")
 
-    print(f"\nTotal items used as proportion denominator: {len(titles)}")
-    print("\nAttribute coverage:")
+    rows = _read_existing_rows(items_path)
+    print(f"\nWrote {len(rows)} rows → {items_path}")
+    mins, secs = divmod(elapsed, 60)
+    print(f"Elapsed: {int(mins)}m {secs:.1f}s")
+
+    print("\nCompleteness vs Uniqlo API total (unique productIds per target):")
+    short = False
+    for target in UNIQLO_TARGETS:
+        label  = target["label"]
+        gender = target["gender"]
+        unique_ids = len({r.get("style_id") for r in rows if r.get("gender") == gender})
+        total = totals.get(label, 0)
+        delta = total - unique_ids
+        if args.max_products_per_page is not None:
+            ok = "(capped)"
+        elif delta <= 0:
+            ok = "OK"
+        elif delta / max(total, 1) < 0.05:
+            ok = "OK (drift)"
+        else:
+            ok = "SHORT"
+            short = True
+        print(f"  {label:<18} got {unique_ids:>4} / api {total:>4}   {ok}")
+
+    counts, total_products = count_attribute_frequencies(rows)
+    scores = normalize_counts(counts, total_items=total_products)
+    print(f"\nDistinct (title, gender) products: {total_products}")
+    print("Attribute coverage:")
     for feature_type in FEATURE_TYPES:
         found = len(counts.get(feature_type, {}))
-        total = len(KNOWN_FEATURE_VALUES[feature_type])
+        total = len(KNOWN_FEATURE_VALUES.get(feature_type, []))
         print(f"  {feature_type}: {found}/{total} values seen")
         for value, score in sorted(scores.get(feature_type, {}).items(), key=lambda x: -x[1]):
-            count = counts[feature_type].get(value, 0)
-            print(f"    {value:<15} score={score:.3f}  (count={count})")
+            cnt = counts[feature_type].get(value, 0)
+            print(f"    {value:<15} score={score:.3f}  (count={cnt})")
 
-    frame = build_trend_signals_frame(scores=scores, known_feature_values=KNOWN_FEATURE_VALUES)
-
-    if args.existing_path and Path(args.existing_path).exists():
-        frame = blend_with_existing(
-            scraped=frame,
-            existing_path=Path(args.existing_path),
-            blend_weight=args.blend_weight,
-        )
-        print(f"\nBlended with existing: {args.existing_path}")
-
-    validated = validate_trend_signals_frame(frame)
-    validated.to_csv(output_path, index=False)
-    print(f"\nWrote {len(validated)} rows → {output_path}")
-
-    meta_path = output_path.with_name(output_path.stem + "_meta.json")
-    meta_path.write_text(json.dumps({"total_items": len(titles)}, indent=2))
-    print(f"Wrote metadata   → {meta_path}")
-
-    scraped_date = datetime.date.today().isoformat()
-    items_frame = build_raw_items_frame(raw_items, scraped_date=scraped_date, retailer="uniqlo")
-    items_frame.to_csv(items_path, index=False)
-    print(f"Wrote {len(items_frame)} raw item rows → {items_path}")
+    if short and args.strict:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

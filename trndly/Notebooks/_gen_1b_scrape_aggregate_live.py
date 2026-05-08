@@ -30,14 +30,14 @@ def main() -> None:
 
     cells.append(
         md(
-            r"""# `1b_scrape_aggregate_live` — scrapers + trends + optional live cubes (step **~2.5** in the pipeline)
+            r"""# `1b_scrape_aggregate_live` — scrapers + live cubes (step **~2.5** in the pipeline)
 
 In the notebook folder this sorts **right after** [`1_aggregate_historical.ipynb`](1_aggregate_historical.ipynb) and **before** [`2_feature_processing.ipynb`](2_feature_processing.ipynb).
 
 ### Canonical run order
 
 1. **`1_aggregate_historical.ipynb`** — `monthly_*.parquet`, `lookup.csv`
-2. **`1b_scrape_aggregate_live.ipynb`** *(this notebook; optional)* — refresh **`trend_signals_*.csv`** → **`pipelines/training/data/trend_signals.csv`**; optionally merge **`live_monthly_*.parquet`** into processed cubes
+2. **`1b_scrape_aggregate_live.ipynb`** *(this notebook; optional)* — refresh retailer **`items_*.csv`** → **`build_live_cube.py`** → merge **`live_monthly_*.parquet`** into processed cubes
 3. **`2_feature_processing.ipynb`** — training parquets from cubes
 4. **`3_train_models.ipynb`** → **`4_hyperparameter_search.ipynb`** → **`5_forecast_from_text.ipynb`**
 
@@ -47,29 +47,29 @@ If you skip scrapers and live parquet merges, go **`1 → 2 → 3 …`** as usua
 
 | Step | Output | Used by |
 |------|--------|---------|
-| Retail scrapers (`pipelines/collectors/*_scraper.py`) | `pipelines/training/synthetic_data/trend_signals_<retailer>.csv` | `combine_trend_signals` → **`trend_signals.csv`** |
-| **`combine_trend_signals.py`** | **`pipelines/training/data/trend_signals.csv`** | `hmn_seasonal_processor.py`, **`/predict`** |
-| Cubes from notebook **1** | `data/processed/monthly_*.parquet` | notebooks **2–5**, **`/forecast-text`** |
+| Retail scrapers (`pipelines/collectors/*_scraper.py`) | `pipelines/training/synthetic_data/items_<retailer>.csv` | `build_live_cube.py` |
+| **`build_live_cube.py`** | **`data/processed/live_monthly_fingerprint.parquet` + `live_monthly_univariate.parquet`** | merge cells below → `monthly_*.parquet` |
+| Cubes from notebook **1** | `data/processed/monthly_*.parquet` | notebooks **2–5**, **`/forecast-text`**, **`scheduleServer`** |
 
-Scrapers emit **trend CSVs**, not cube-shaped fingerprints. Supply **`live_monthly_fingerprint.parquet`** yourself until a collector matches notebook **1**’s schema.
+The live cube schema mirrors notebook 1's exactly (`source='live'` is the only differing value), so `pd.concat([historical, live])` with dedup-on-(month, fingerprint, source) is the merge.
 
 ## Typical workflow here
 
 1. Toggle **`RUN_*`** (network / Playwright).
-2. **Combine** → **`DATA_DIR/trend_signals.csv`**
+2. **Build live cubes** → **`data/processed/live_monthly_*.parquet`**
 3. **Change detection** snapshot under **`data/processed/live_refresh_state.json`**
 4. Optional **merge** cells → patch **`monthly_*.parquet`**
 5. Open **`2_feature_processing.ipynb`** next.
 
 ## Contents
 
-1. Setup  
-2. Paths & toggles  
-3. Run scrapers  
-4. Combine → `trend_signals.csv`  
-5. Change detection  
-6. Merge optional live fingerprint parquet  
-7. Merge optional live univariate parquet  
+1. Setup
+2. Paths & toggles
+3. Run scrapers
+4. Build live cubes
+5. Change detection
+6. Merge optional live fingerprint parquet
+7. Merge optional live univariate parquet
 
 """
         )
@@ -88,9 +88,9 @@ from pathlib import Path
 
 import pandas as pd
 
-# Kernel cwd is often Notebooks/ — put trndly on PYTHONPATH
+# Kernel cwd is often notebooks/ — put trndly on PYTHONPATH
 _root = Path.cwd().resolve()
-if _root.name == "Notebooks":
+if _root.name in ("notebooks", "Notebooks"):
     _root = _root.parent
 elif not (_root / "pipelines").is_dir() and (_root / "trndly" / "pipelines").is_dir():
     _root = _root / "trndly"
@@ -99,25 +99,22 @@ if (_root / "pipelines").is_dir() and str(_root) not in sys.path:
 
 from pipelines.serving.text_forecast import FINGERPRINT_COLS
 from pipelines.training.paths import (
-    DATA_DIR,
+    LIVE_FINGERPRINT_PARQUET,
+    LIVE_UNIVARIATE_PARQUET,
     MONTHLY_FINGERPRINT_PARQUET,
     MONTHLY_UNIVARIATE_PARQUET,
     PROCESSED_DATA_DIR,
     PROJECT_ROOT,
-    TREND_SIGNALS_CSV,
 )
 
 COLLECTORS_DIR = PROJECT_ROOT / "pipelines" / "collectors"
 SYNTH_DATA_DIR = PROJECT_ROOT / "pipelines" / "training" / "synthetic_data"
 STATE_PATH = PROCESSED_DATA_DIR / "live_refresh_state.json"
 
-# Optional paths for cube-shaped live drops you maintain (same columns as notebook 1 outputs).
-LIVE_FINGERPRINT_PARQUET = PROCESSED_DATA_DIR / "live_monthly_fingerprint.parquet"
-LIVE_UNIVARIATE_PARQUET = PROCESSED_DATA_DIR / "live_monthly_univariate.parquet"
-
 print("PROJECT_ROOT:", PROJECT_ROOT)
 print("SYNTH_DATA_DIR:", SYNTH_DATA_DIR)
-print("TREND_SIGNALS_CSV:", TREND_SIGNALS_CSV)
+print("LIVE_FINGERPRINT_PARQUET:", LIVE_FINGERPRINT_PARQUET)
+print("LIVE_UNIVARIATE_PARQUET:", LIVE_UNIVARIATE_PARQUET)
 """
         )
     )
@@ -131,12 +128,9 @@ RUN_HOLLISTER = False
 RUN_AMERICAN_EAGLE = False
 RUN_UNIQLO = False
 
-# Google Trends → writes trend_signals.csv into synthetic_data by default.
-# Prefer letting combine merge per-retailer *_ files only; if True, write to a distinct file first.
-RUN_GOOGLE_TRENDS = False
-
-# After scrapers: rebuild canonical combined CSV consumed under pipelines/training/data/
-RUN_COMBINE_TREND_SIGNALS = True
+# After scrapers: rebuild live_monthly_fingerprint.parquet + live_monthly_univariate.parquet
+# under data/processed/, which scheduleServer + notebook 1b's merge cells consume.
+RUN_BUILD_LIVE_CUBE = True
 
 PYTHON = sys.executable
 
@@ -162,7 +156,7 @@ def run_scraper(path: Path, *, cwd: Path) -> int:
     return subprocess.call(cmd, cwd=str(cwd))
 
 print("Scraper toggles:", {name: on for name, on in SCRAPER_JOBS})
-print("RUN_GOOGLE_TRENDS:", RUN_GOOGLE_TRENDS, "| RUN_COMBINE_TREND_SIGNALS:", RUN_COMBINE_TREND_SIGNALS)
+print("RUN_BUILD_LIVE_CUBE:", RUN_BUILD_LIVE_CUBE)
 """
         )
     )
@@ -177,47 +171,34 @@ print("RUN_GOOGLE_TRENDS:", RUN_GOOGLE_TRENDS, "| RUN_COMBINE_TREND_SIGNALS:", R
     if rc != 0:
         raise RuntimeError(f"{script_name} exited with code {rc}")
 
-if RUN_GOOGLE_TRENDS:
-    gt_out = SYNTH_DATA_DIR / "trend_signals_google_refresh.csv"
-    SYNTH_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        PYTHON,
-        str(scraper_script("google_trends_collector.py")),
-        "--output-path",
-        str(gt_out),
-    ]
-    print("$", " ".join(cmd))
-    rc = subprocess.call(cmd, cwd=str(PROJECT_ROOT))
-    if rc != 0:
-        raise RuntimeError(f"google_trends_collector exited with code {rc}")
-
 print("Scraper stage done.")
 """
         )
     )
 
-    cells.append(md("## 4. Combine → `trend_signals.csv`\n\nWrites **`pipelines/training/data/trend_signals.csv`** so **`scheduleServer`** / **`hmn_seasonal_processor`** see updates without hunting under **`synthetic_data/`**.\n"))
+    cells.append(md("## 4. Build live cubes → `live_monthly_fingerprint.parquet` + `live_monthly_univariate.parquet`\n\nWrites the live counterparts of notebook 1's historical cubes under **`data/processed/`**. The merge cells below stitch them into the canonical cubes that **`scheduleServer`** / **`hmn_seasonal_processor`** consume.\n"))
     cells.append(
         code(
-            r"""if RUN_COMBINE_TREND_SIGNALS:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+            r"""if RUN_BUILD_LIVE_CUBE:
+    PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
     SYNTH_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    combine = COLLECTORS_DIR / "combine_trend_signals.py"
+    builder = COLLECTORS_DIR / "build_live_cube.py"
     cmd = [
         PYTHON,
-        str(combine),
+        str(builder),
         "--signals-dir",
         str(SYNTH_DATA_DIR),
-        "--output-path",
-        str(TREND_SIGNALS_CSV),
+        "--output-dir",
+        str(PROCESSED_DATA_DIR),
     ]
     print("$", " ".join(cmd))
     rc = subprocess.call(cmd, cwd=str(PROJECT_ROOT))
     if rc != 0:
-        raise RuntimeError(f"combine_trend_signals exited with code {rc}")
-    print("Wrote", TREND_SIGNALS_CSV)
+        raise RuntimeError(f"build_live_cube exited with code {rc}")
+    print("Wrote", LIVE_FINGERPRINT_PARQUET)
+    print("Wrote", LIVE_UNIVARIATE_PARQUET)
 else:
-    print("Skipped combine (RUN_COMBINE_TREND_SIGNALS=False)")
+    print("Skipped live cube build (RUN_BUILD_LIVE_CUBE=False)")
 """
         )
     )
@@ -238,10 +219,11 @@ def sha256_file(path: Path) -> str | None:
     return h.hexdigest()
 
 
-retailer_csvs = sorted(SYNTH_DATA_DIR.glob("trend_signals_*.csv"))
+retailer_csvs = sorted(SYNTH_DATA_DIR.glob("items_*.csv"))
 snapshot = {
     "updated_at": datetime.now(timezone.utc).isoformat(),
-    "trend_signals_sha256": sha256_file(TREND_SIGNALS_CSV),
+    "live_fingerprint_sha256": sha256_file(LIVE_FINGERPRINT_PARQUET),
+    "live_univariate_sha256":  sha256_file(LIVE_UNIVARIATE_PARQUET),
     "retailer_files": {
         str(p.relative_to(PROJECT_ROOT)): {
             "mtime_ns": p.stat().st_mtime_ns,
@@ -256,10 +238,13 @@ prev = {}
 if STATE_PATH.exists():
     prev = json.loads(STATE_PATH.read_text())
 
-changed = snapshot["trend_signals_sha256"] != prev.get("trend_signals_sha256")
+changed = (
+    snapshot["live_fingerprint_sha256"] != prev.get("live_fingerprint_sha256")
+    or snapshot["live_univariate_sha256"] != prev.get("live_univariate_sha256")
+)
 STATE_PATH.write_text(json.dumps(snapshot, indent=2))
 print("State written:", STATE_PATH)
-print("Trend CSV changed vs last notebook run:", changed)
+print("Live cubes changed vs last notebook run:", changed)
 if not changed and prev:
     print("(SHA256 matched previous snapshot.)")
 
@@ -332,7 +317,7 @@ else:
         md(
             r"""### Next steps
 
-- **Listing timeframe model:** rerun **`python pipelines/collectors/hmn_seasonal_processor.py`** after **`trend_signals.csv`** changes.
+- **Listing timeframe model:** rerun **`python pipelines/collectors/hmn_seasonal_processor.py`** after **`live_monthly_univariate.parquet`** changes.
 - **Forecast-from-text:** after cube merges here, run **`2_feature_processing.ipynb`** then **`3_*` / `4_*`**.
 
 """

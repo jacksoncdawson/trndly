@@ -37,16 +37,16 @@ from pipelines.training.feature_contract import (
     build_feature_frame,
     compute_feature_scores,
     load_seasonality_table,
-    load_trend_lookup,
+    load_trend_lookup_from_univariate,
     normalize_token,
 )
 from pipelines.training.paths import (
     FRONTEND_DIR,
+    LIVE_UNIVARIATE_PARQUET,
     LOOKUP_CSV,
     MONTHLY_FINGERPRINT_PARQUET,
     MONTHLY_UNIVARIATE_PARQUET,
     SEASONALITY_TABLE_CSV as DEFAULT_SEASONALITY_TABLE_PATH,
-    TREND_SIGNALS_CSV as DEFAULT_TREND_SIGNALS_PATH,
 )
 
 # ENV VARIABLES
@@ -68,7 +68,9 @@ def _resolve_configured_path(env_var: str, default: Path) -> Path:
     return configured if configured.is_absolute() else (SERVICE_DIR / configured).resolve()
 
 
-TREND_SIGNALS_PATH = _resolve_configured_path("TREND_SIGNALS_PATH", DEFAULT_TREND_SIGNALS_PATH)
+LIVE_UNIVARIATE_PATH = _resolve_configured_path(
+    "LIVE_UNIVARIATE_PATH", LIVE_UNIVARIATE_PARQUET
+)
 SEASONALITY_TABLE_PATH = _resolve_configured_path(
     "SEASONALITY_TABLE_PATH", DEFAULT_SEASONALITY_TABLE_PATH
 )
@@ -116,7 +118,7 @@ class SeasonalityState:
 
 
 MODEL_STATE = ModelState()
-TREND_STATE = TrendState(source_path=str(TREND_SIGNALS_PATH))
+TREND_STATE = TrendState(source_path=str(LIVE_UNIVARIATE_PATH))
 SEASONALITY_STATE = SeasonalityState(source_path=str(SEASONALITY_TABLE_PATH))
 
 FORECAST_DEPS: ForecastDeps | None = None
@@ -302,17 +304,19 @@ def reload_trend_data() -> TrendState:
     global TREND_STATE
 
     try:
-        lookup = load_trend_lookup(TREND_SIGNALS_PATH)
+        lookup = load_trend_lookup_from_univariate(
+            LIVE_UNIVARIATE_PATH, source="live", latest_month=True
+        )
         TREND_STATE = TrendState(
             lookup=lookup,
-            source_path=str(TREND_SIGNALS_PATH),
+            source_path=str(LIVE_UNIVARIATE_PATH),
         )
-        logger.info("Loaded trend signals from %s", TREND_SIGNALS_PATH)
+        logger.info("Loaded trend signals from %s", LIVE_UNIVARIATE_PATH)
         return TREND_STATE
     except Exception as exc:
-        logger.exception("Failed to load trend signals from %s", TREND_SIGNALS_PATH)
+        logger.exception("Failed to load trend signals from %s", LIVE_UNIVARIATE_PATH)
         TREND_STATE = TrendState(
-            source_path=str(TREND_SIGNALS_PATH),
+            source_path=str(LIVE_UNIVARIATE_PATH),
             error=str(exc),
         )
         return TREND_STATE
@@ -479,7 +483,7 @@ def health() -> HealthResponse:
         forecast_univariate_uri=MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
         tracking_uri=MLFLOW_TRACKING_URI,
         configured_model_uri=MLFLOW_MODEL_URI,
-        configured_trend_data_path=str(TREND_SIGNALS_PATH),
+        configured_trend_data_path=str(LIVE_UNIVARIATE_PATH),
         configured_seasonality_table_path=str(SEASONALITY_TABLE_PATH),
         active_model_uri=MODEL_STATE.model_uri,
         model_version=MODEL_STATE.model_version,

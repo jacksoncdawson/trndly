@@ -16,7 +16,7 @@ model = job.run(
         "TRAIN_DATA_URI": "gs://trndly-mlops-us/data/synthetic/train.csv",
         "VAL_DATA_URI": "gs://trndly-mlops-us/data/synthetic/val.csv",
         "TEST_DATA_URI": "gs://trndly-mlops-us/data/synthetic/test.csv",
-        "TREND_SIGNALS_PATH": "gs://trndly-mlops-us/data/synthetic/trend_signals.csv",
+        "LIVE_UNIVARIATE_PATH": "gs://trndly-mlops-us/data/processed/live_monthly_univariate.parquet",
     },
     service_account="trndly-vertex@ml-ops-491417.iam.gserviceaccount.com",
     base_output_dir="gs://trndly-mlops-us/training-jobs/v1",

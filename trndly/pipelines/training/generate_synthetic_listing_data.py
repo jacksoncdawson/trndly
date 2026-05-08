@@ -19,7 +19,6 @@ from pipelines.training.feature_contract import (  # noqa: E402
     FEATURE_VECTOR_COLUMNS,
     TARGET_COLUMN_DEFAULT,
     TIMEFRAMES,
-    build_trend_lookup,
     item_to_feature_row,
 )
 
@@ -111,26 +110,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def generate_trend_signals(seed: int) -> pd.DataFrame:
-    """
-    Generate a synthetic trend_signals.csv with a single `current` score
-    per (feature_type, feature_value). Scores are uniformly distributed
-    across 0–1 so the full range of the feature space is covered.
+def generate_trend_lookup(seed: int) -> dict[str, dict[str, float]]:
+    """Generate a synthetic flat trend lookup ``{feature_type: {value: score}}``.
+
+    Scores are uniform on [0.05, 0.95] so the full range of the feature
+    space is covered. Used in-memory for synthetic train/val/test
+    generation; not written to disk (the live cube is the canonical
+    runtime source).
     """
     rng = np.random.default_rng(seed)
-    rows: list[dict[str, Any]] = []
-
+    lookup: dict[str, dict[str, float]] = {}
     for feature_type in FEATURE_TYPES:
-        for feature_value in FEATURE_VALUES[feature_type]:
-            rows.append(
-                {
-                    "feature_type": feature_type,
-                    "feature_value": feature_value,
-                    "current": round(float(rng.uniform(0.05, 0.95)), 6),
-                }
-            )
-
-    return pd.DataFrame(rows)
+        lookup[feature_type] = {
+            value: round(float(rng.uniform(0.05, 0.95)), 6)
+            for value in FEATURE_VALUES[feature_type]
+        }
+    return lookup
 
 
 def _sample_item(rng: np.random.Generator, index: int) -> dict[str, str]:
@@ -222,8 +217,7 @@ def main() -> None:
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    trend_signals = generate_trend_signals(seed=args.seed)
-    lookup = build_trend_lookup(trend_signals)
+    lookup = generate_trend_lookup(seed=args.seed)
 
     rng = np.random.default_rng(args.seed + 17)
     train_frame = build_supervised_split(
@@ -253,20 +247,17 @@ def main() -> None:
 
     user_payloads = build_inference_payloads(size=args.inference_size, rng=rng)
 
-    trend_path = output_dir / "trend_signals.csv"
     train_path = output_dir / "train.csv"
     val_path = output_dir / "val.csv"
     test_path = output_dir / "test.csv"
     payloads_path = output_dir / "user_upload_items.json"
 
-    trend_signals.to_csv(trend_path, index=False)
     train_frame.to_csv(train_path, index=False)
     val_frame.to_csv(val_path, index=False)
     test_frame.to_csv(test_path, index=False)
     payloads_path.write_text(json.dumps(user_payloads, indent=2), encoding="utf-8")
 
     print("Synthetic data generated:")
-    print(f"- Trend signals: {trend_path}")
     print(f"- Train split: {train_path} ({len(train_frame)} rows)")
     print(f"- Validation split: {val_path} ({len(val_frame)} rows)")
     print(f"- Test split: {test_path} ({len(test_frame)} rows)")

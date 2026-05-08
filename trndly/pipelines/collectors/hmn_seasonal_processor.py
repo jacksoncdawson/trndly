@@ -68,10 +68,9 @@ from pipelines.training.feature_contract import (  # noqa: E402
     TARGET_COLUMN_DEFAULT,
     TIMEFRAMES,
     SeasonalityTable,
-    build_trend_lookup,
     item_to_feature_row,
     load_seasonality_table,
-    load_trend_signals_frame,
+    load_trend_lookup_from_univariate,
     normalize_token,
 )
 
@@ -182,11 +181,11 @@ VAL_FRAC = 0.15
 # --------------------------------------------------------------------------- #
 
 def parse_args() -> argparse.Namespace:
-    default_trend_signals = (
-        Path(__file__).resolve().parents[1]
-        / "training"
-        / "synthetic_data"
-        / "trend_signals.csv"
+    default_univariate_path = (
+        Path(__file__).resolve().parents[2]
+        / "data"
+        / "processed"
+        / "live_monthly_univariate.parquet"
     )
     default_output = (
         Path(__file__).resolve().parents[1]
@@ -210,9 +209,9 @@ def parse_args() -> argparse.Namespace:
         help="Path to the H&M transactions_train.csv file from the Kaggle dataset.",
     )
     parser.add_argument(
-        "--trend-signals-path",
-        default=str(default_trend_signals),
-        help="Path to the trend_signals.csv produced by google_trends_collector.py.",
+        "--live-univariate-path",
+        default=str(default_univariate_path),
+        help="Path to live_monthly_univariate.parquet produced by build_live_cube.py.",
     )
     parser.add_argument(
         "--output-dir",
@@ -406,7 +405,7 @@ def main() -> None:
 
     articles_path = Path(args.articles_path).expanduser().resolve()
     transactions_path = Path(args.transactions_path).expanduser().resolve()
-    trend_signals_path = Path(args.trend_signals_path).expanduser().resolve()
+    live_univariate_path = Path(args.live_univariate_path).expanduser().resolve()
     seasonality_path = Path(args.seasonality_table_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -414,7 +413,7 @@ def main() -> None:
     for path, label in [
         (articles_path, "articles.csv"),
         (transactions_path, "transactions_train.csv"),
-        (trend_signals_path, "trend_signals.csv"),
+        (live_univariate_path, "live_monthly_univariate.parquet"),
         (seasonality_path, "seasonality_table.csv"),
     ]:
         if not path.exists():
@@ -423,11 +422,11 @@ def main() -> None:
 
     print(
         f"H&M seasonal label generator\n"
-        f"  articles:      {articles_path}\n"
-        f"  transactions:  {transactions_path}\n"
-        f"  trend signals: {trend_signals_path}\n"
-        f"  seasonality:   {seasonality_path}\n"
-        f"  output:        {output_dir}"
+        f"  articles:        {articles_path}\n"
+        f"  transactions:    {transactions_path}\n"
+        f"  live univariate: {live_univariate_path}\n"
+        f"  seasonality:     {seasonality_path}\n"
+        f"  output:          {output_dir}"
     )
 
     print("\nLoading articles.csv...")
@@ -451,9 +450,10 @@ def main() -> None:
     peak_months = compute_peak_months(transactions, attrs)
     print(f"  {len(peak_months):,} unique (color, category, material) combinations")
 
-    print("Loading trend signals for current feature scores...")
-    trend_frame = load_trend_signals_frame(trend_signals_path)
-    lookup = build_trend_lookup(trend_frame)
+    print("Loading trend signals from live univariate cube...")
+    lookup = load_trend_lookup_from_univariate(
+        live_univariate_path, source="live", latest_month=True
+    )
 
     print("Loading seasonality curves...")
     seasonality_table = load_seasonality_table(seasonality_path)

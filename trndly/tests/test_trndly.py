@@ -29,19 +29,18 @@ from pipelines.training.feature_contract import (  # noqa: E402
     DEFAULT_MISSING_SCORE,
     FEATURE_VECTOR_COLUMNS,
     TIMEFRAMES,
-    TREND_SIGNAL_COLUMNS,
     build_feature_frame,
     load_seasonality_table,
-    load_trend_lookup,
+    load_trend_lookup_from_univariate,
     normalize_token,
     prepare_training_frame,
-    validate_trend_signals_frame,
 )
 from pipelines.training.paths import (  # noqa: E402
     DATA_DIR,
+    LIVE_UNIVARIATE_PARQUET,
+    LOOKUP_CSV,
     SEASONALITY_TABLE_CSV,
     TRAIN_CSV,
-    TREND_SIGNALS_CSV,
 )
 
 
@@ -50,9 +49,13 @@ from pipelines.training.paths import (  # noqa: E402
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="module")
 def trend_lookup():
-    if not TREND_SIGNALS_CSV.exists():
-        pytest.skip(f"Trend signals CSV missing at {TREND_SIGNALS_CSV}")
-    return load_trend_lookup(TREND_SIGNALS_CSV)
+    if not LIVE_UNIVARIATE_PARQUET.exists():
+        pytest.skip(f"Live univariate parquet missing at {LIVE_UNIVARIATE_PARQUET}")
+    if not LOOKUP_CSV.exists():
+        pytest.skip(f"lookup.csv missing at {LOOKUP_CSV}")
+    return load_trend_lookup_from_univariate(
+        LIVE_UNIVARIATE_PARQUET, source="live", latest_month=True
+    )
 
 
 @pytest.fixture(scope="module")
@@ -233,30 +236,224 @@ def test_normalize_token_trims_and_lowercases():
     assert normalize_token(42) == "42"
 
 
-def test_trend_signals_validation_rejects_bad_inputs():
-    """Test 9: empty frames raise, missing columns raise, and extra rows with
-    out-of-range scores are clipped into [0, 1]."""
-    with pytest.raises(ValueError):
-        validate_trend_signals_frame(pd.DataFrame())
+# ---------------------------------------------------------------------------
+# Lookup-csv consistency
+# ---------------------------------------------------------------------------
+def test_lookup_consistency_validator_passes():
+    """Every (name, id) pair in feature_lookups.py *_TO_ID dicts must exist in
+    data/processed/lookup.csv. Catches typos and drift."""
+    from pipelines.collectors.feature_lookups import _assert_lookup_csv_matches_dicts
 
-    incomplete = pd.DataFrame([{"feature_type": "color", "feature_value": "navy"}])
-    with pytest.raises(ValueError):
-        validate_trend_signals_frame(incomplete)
+    _assert_lookup_csv_matches_dicts()  # raises on drift
 
-    noisy = pd.DataFrame(
-        [
-            {
-                "feature_type": "color",
-                "feature_value": "navy",
-                "current": 5.0,      # above 1.0
-                "next_week": -0.3,   # below 0.0
-                "next_month": 0.4,
-                "three_months": 0.6,
-                "six_months": 0.9,
-            }
-        ]
+
+def test_lookup_consistency_validator_detects_drift():
+    """Negative test: injecting a bad pair must trigger ValueError."""
+    from pipelines.collectors import feature_lookups
+
+    saved = feature_lookups._LOOKUP_DICT_CONTRACTS
+    bad_dict = dict(feature_lookups.COLOR_MASTER_TO_ID)
+    bad_dict["unicorn"] = 999  # id=999 not in lookup.csv color_master
+    feature_lookups._LOOKUP_DICT_CONTRACTS = (("color_master", bad_dict),)
+    try:
+        with pytest.raises(ValueError, match="999"):
+            feature_lookups._assert_lookup_csv_matches_dicts()
+    finally:
+        feature_lookups._LOOKUP_DICT_CONTRACTS = saved
+
+
+def test_items_csv_id_validity():
+    """Every ID-column value in any items_*.csv must be a valid id within its
+    lookup.csv category. Catches scraper bugs that silently emit bad IDs."""
+    items_dir = PROJECT_ROOT / "pipelines" / "training" / "synthetic_data"
+    items_files = sorted(items_dir.glob("items_*.csv"))
+    if not items_files:
+        pytest.skip(f"No items_*.csv files in {items_dir}")
+
+    lookup_path = PROJECT_ROOT / "data" / "processed" / "lookup.csv"
+    if not lookup_path.exists():
+        pytest.skip(f"lookup.csv missing at {lookup_path}")
+    lookup = pd.read_csv(lookup_path)
+    valid_ids = {
+        cat: set(g["id"].astype(int)) for cat, g in lookup.groupby("category")
+    }
+
+    # Map items.csv column -> lookup.csv category
+    id_col_to_category = {
+        "color_master_id":         "color_master",
+        "color_spectrum_id":       "color_spectrum",
+        "gender_id":               "gender",
+        "product_type_id":         "product_type",
+        "product_group_id":        "product_group",
+        "material_id":             "material",
+        "graphical_appearance_id": "graphical_appearance",
+    }
+
+    # id=0 is a "no match" sentinel emitted by _combo_to_row's .get(..., 0)
+    # fallback. For color_master/color_spectrum/material/graphical_appearance
+    # lookup.csv has an explicit id=0 row ("Unknown") so 0 is valid by lookup.
+    # For product_type and product_group lookup.csv ids start at 1; the scraper
+    # still emits 0 to mean "no canonical match" — accept that as valid here.
+    SENTINEL_OK = {"product_type", "product_group"}
+
+    for items_path in items_files:
+        df = pd.read_csv(items_path)
+        for col, cat in id_col_to_category.items():
+            if col not in df.columns:
+                continue
+            seen = set(df[col].dropna().astype(int).unique())
+            allowed = valid_ids[cat] | ({0} if cat in SENTINEL_OK else set())
+            invalid = seen - allowed
+            assert not invalid, (
+                f"{items_path.name}:{col} has IDs not in lookup.csv[{cat}]: {sorted(invalid)}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Live cube schema + builder
+# ---------------------------------------------------------------------------
+def _toy_items_frame() -> pd.DataFrame:
+    """Tiny synthetic items frame used by cube-builder tests. Two months,
+    two retailers, mixed fingerprints — enough to exercise grouping and
+    share-sum invariants without disk I/O."""
+    return pd.DataFrame([
+        # March 2026 — 4 articles total
+        {"scraped_at": "2026-03-15T10:00:00Z", "style_id": "g1", "cc_id": "01",
+         "product_type_id": 1, "gender_id": 1, "color_master_id": 2,
+         "graphical_appearance_id": 1, "material_id": 3},
+        {"scraped_at": "2026-03-15T10:00:00Z", "style_id": "g1", "cc_id": "02",
+         "product_type_id": 1, "gender_id": 1, "color_master_id": 1,
+         "graphical_appearance_id": 1, "material_id": 3},
+        {"scraped_at": "2026-03-16T11:00:00Z", "style_id": "g2", "cc_id": "01",
+         "product_type_id": 4, "gender_id": 3, "color_master_id": 1,
+         "graphical_appearance_id": 11, "material_id": 1},
+        {"scraped_at": "2026-03-16T11:00:00Z", "style_id": "g3", "cc_id": "01",
+         "product_type_id": 4, "gender_id": 3, "color_master_id": 1,
+         "graphical_appearance_id": 11, "material_id": 1},
+        # April 2026 — 2 articles
+        {"scraped_at": "2026-04-01T09:00:00Z", "style_id": "g4", "cc_id": "01",
+         "product_type_id": 19, "gender_id": 1, "color_master_id": 6,
+         "graphical_appearance_id": 1, "material_id": 1},
+        {"scraped_at": "2026-04-01T09:00:00Z", "style_id": "g5", "cc_id": "01",
+         "product_type_id": 11, "gender_id": 1, "color_master_id": 1,
+         "graphical_appearance_id": 1, "material_id": 1},
+    ])
+
+
+def test_build_fingerprint_cube_shape_and_share_sum():
+    from pipelines.collectors.build_live_cube import build_fingerprint_cube
+    items = _toy_items_frame()
+    items["month"] = (
+        pd.to_datetime(items["scraped_at"], utc=True).dt.tz_convert(None)
+        .dt.to_period("M").dt.to_timestamp()
     )
-    cleaned = validate_trend_signals_frame(noisy)
-    assert list(cleaned.columns) == TREND_SIGNAL_COLUMNS
-    assert cleaned["current"].iloc[0] == pytest.approx(1.0)
-    assert cleaned["next_week"].iloc[0] == pytest.approx(0.0)
+    fp = build_fingerprint_cube(items)
+
+    # Schema contract
+    expected_cols = [
+        "month", "month_of_year", "source",
+        "product_type_id", "gender_id", "color_master_id",
+        "graphical_appearance_id", "material_id",
+        "n_articles", "share_articles", "avg_price",
+    ]
+    assert list(fp.columns) == expected_cols
+    assert str(fp["source"].dtype).startswith("category")
+    assert set(fp["source"].cat.categories) == {"historical", "live"}
+    assert (fp["source"] == "live").all()
+    # avg_price is NaN for live rows (price not scraped)
+    assert fp["avg_price"].isna().all()
+    # int dtypes for IDs and counts
+    assert fp["n_articles"].dtype == "int32"
+    for c in ["product_type_id", "gender_id", "color_master_id",
+              "graphical_appearance_id", "material_id", "month_of_year"]:
+        assert fp[c].dtype == "int8", f"{c} expected int8, got {fp[c].dtype}"
+
+    # Share-sum invariant per month
+    sums = fp.groupby("month", observed=True)["share_articles"].sum()
+    assert ((sums - 1.0).abs() < 1e-3).all(), sums.to_dict()
+
+
+def test_build_univariate_cube_shape_and_share_sum():
+    from pipelines.collectors.build_live_cube import build_univariate_cube
+    items = _toy_items_frame()
+    items["month"] = (
+        pd.to_datetime(items["scraped_at"], utc=True).dt.tz_convert(None)
+        .dt.to_period("M").dt.to_timestamp()
+    )
+    uv = build_univariate_cube(items)
+    expected_cols = [
+        "month", "month_of_year", "source", "dimension", "level_id",
+        "n_articles", "share_articles",
+    ]
+    assert list(uv.columns) == expected_cols
+
+    # 5 dims: product_type, gender, color_master, graphical_appearance, material
+    assert set(uv["dimension"].unique()) == {
+        "product_type", "gender", "color_master",
+        "graphical_appearance", "material",
+    }
+    # `dimension` Categorical must include all 7 historical categories so
+    # concat with historical preserves dtype
+    assert set(uv["dimension"].cat.categories) >= {
+        "product_type", "product_group", "graphical_appearance",
+        "color_master", "color_spectrum", "gender", "material",
+    }
+
+    # Per-(month, dimension) share sum invariant
+    sums = uv.groupby(["month", "dimension"], observed=True)["share_articles"].sum()
+    assert ((sums - 1.0).abs() < 1e-3).all(), sums.to_dict()
+
+
+def test_validate_live_fingerprint_frame_rejects_bad_inputs():
+    from pipelines.training.feature_contract import validate_live_fingerprint_frame
+    with pytest.raises(ValueError, match="empty"):
+        validate_live_fingerprint_frame(pd.DataFrame())
+
+    incomplete = pd.DataFrame([{"month": pd.Timestamp("2026-03-01"), "source": "live"}])
+    with pytest.raises(ValueError, match="missing columns"):
+        validate_live_fingerprint_frame(incomplete)
+
+
+def test_validate_live_univariate_frame_rejects_bad_inputs():
+    from pipelines.training.feature_contract import validate_live_univariate_frame
+    with pytest.raises(ValueError, match="empty"):
+        validate_live_univariate_frame(pd.DataFrame())
+
+
+def test_live_cube_concat_compatible_with_historical():
+    """Critical merge contract: pd.concat([historical, live]) must preserve
+    Categorical dtypes for `source` and `dimension`. If categories don't
+    align, pandas falls back to object dtype and silently breaks downstream
+    consumers that filter by source=='live' or dimension=='product_type'."""
+    from pipelines.collectors.build_live_cube import (
+        build_fingerprint_cube, build_univariate_cube,
+    )
+    items = _toy_items_frame()
+    items["month"] = (
+        pd.to_datetime(items["scraped_at"], utc=True).dt.tz_convert(None)
+        .dt.to_period("M").dt.to_timestamp()
+    )
+    live_fp = build_fingerprint_cube(items)
+    live_uv = build_univariate_cube(items)
+
+    # Synthesize a one-row "historical" frame matching cube schemas exactly
+    hist_fp = pd.DataFrame([{
+        "month": pd.Timestamp("2020-01-01"),
+        "month_of_year": 1,
+        "source": pd.Categorical(["historical"], categories=["historical", "live"])[0],
+        "product_type_id": 1, "gender_id": 1, "color_master_id": 1,
+        "graphical_appearance_id": 1, "material_id": 1,
+        "n_articles": 100, "share_articles": 1.0, "avg_price": 0.5,
+    }])
+    hist_fp["source"] = pd.Categorical(["historical"], categories=["historical", "live"])
+    hist_fp["n_articles"] = hist_fp["n_articles"].astype("int32")
+    hist_fp["share_articles"] = hist_fp["share_articles"].astype("float32")
+    hist_fp["avg_price"] = hist_fp["avg_price"].astype("float32")
+    for c in ["product_type_id", "gender_id", "color_master_id",
+              "graphical_appearance_id", "material_id", "month_of_year"]:
+        hist_fp[c] = hist_fp[c].astype("int8")
+
+    merged = pd.concat([hist_fp, live_fp], ignore_index=True)
+    assert str(merged["source"].dtype).startswith("category"), \
+        "source dtype lost through concat"
+    assert set(merged["source"].cat.categories) == {"historical", "live"}

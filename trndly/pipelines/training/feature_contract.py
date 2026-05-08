@@ -1,12 +1,19 @@
 """
 Training + inference contract for the listing timeframe classifier.
 
-Consumes rows shaped like ``trend_signals.csv`` (feature_type × feature_value × time-window scores),
-joins optional historical seasonality curves from ``seasonality_table.csv``, and emits the fixed-width
-numeric vector expected by ``RandomForestClassifier`` models logged via MLflow.
+Consumes the live univariate cube (``data/processed/live_monthly_univariate.parquet``,
+or the merged ``monthly_univariate.parquet``), joins optional historical seasonality
+curves from ``seasonality_table.csv``, and emits the fixed-width numeric vector
+expected by ``RandomForestClassifier`` models logged via MLflow.
 
-This module also exposes helpers reused by ``hmn_seasonal_processor.py`` (flat ``build_trend_lookup``)
-and ``scheduleServer.py`` (nested ``load_trend_lookup`` + ``build_feature_frame``).
+Public lookup helper: ``load_trend_lookup_from_univariate``. Returns a nested
+``{feature_type: {feature_value: {timeframe: score}}}`` dict where only
+``current`` carries real data; future timeframes resolve to ``DEFAULT_MISSING_SCORE``.
+The cube's ``dimension='product_type'`` is aliased to ``feature_type='category'``
+to preserve the trained model's feature column names.
+
+Schema validators for the live cubes live here too:
+``validate_live_fingerprint_frame`` and ``validate_live_univariate_frame``.
 """
 
 from __future__ import annotations
@@ -46,17 +53,10 @@ TARGET_COLUMN_DEFAULT: str = "best_timeframe"
 
 DEFAULT_MISSING_SCORE: float = 0.0
 
-TREND_SIGNAL_COLUMNS: list[str] = [
-    "feature_type",
-    "feature_value",
-    "current",
-    "next_week",
-    "next_month",
-    "three_months",
-    "six_months",
-]
-
-# Keys for ``feature_type`` in ``trend_signals*.csv`` rows (retail scrapers iterate these buckets).
+# Keys for ``feature_type`` exposed by load_trend_lookup_from_univariate.
+# These names are baked into the trained sklearn model's feature columns
+# (color_current, category_current, material_current); we alias dimensions
+# from the cube ('product_type' → 'category') rather than rename and retrain.
 FEATURE_TYPES: tuple[str, ...] = ("color", "category", "material")
 
 TrendLookup = dict[str, dict[str, dict[str, float]]]
@@ -95,55 +95,170 @@ def normalize_token(value: Any) -> str:
     return str(value).strip().lower()
 
 
-def validate_trend_signals_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    required = {"feature_type", "feature_value", "current"}
-    missing_cols = required - set(frame.columns)
+# ---------------------------------------------------------------------------
+# Live cube schema validators
+# ---------------------------------------------------------------------------
+
+# Schema contracts mirror notebook 1's monthly_fingerprint.parquet and
+# monthly_univariate.parquet exactly so a pd.concat([historical, live])
+# preserves dtypes. See build_live_cube.py for the producer.
+
+LIVE_FINGERPRINT_COLUMNS: list[str] = [
+    "month", "month_of_year", "source",
+    "product_type_id", "gender_id", "color_master_id",
+    "graphical_appearance_id", "material_id",
+    "n_articles", "share_articles", "avg_price",
+]
+
+LIVE_UNIVARIATE_COLUMNS: list[str] = [
+    "month", "month_of_year", "source",
+    "dimension", "level_id",
+    "n_articles", "share_articles",
+]
+
+_SHARE_TOLERANCE = 1e-3  # per-month share-sum tolerance for fingerprint cube
+_UNIVARIATE_SHARE_TOLERANCE = 1e-3  # per-(month, dimension) tolerance
+
+
+def validate_live_fingerprint_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Assert the live fingerprint cube matches the historical schema.
+
+    Checks: column presence + order, no nulls in required columns
+    (avg_price NaN is allowed), share_articles per-month sums to 1.0
+    within tolerance.
+    """
     if frame.empty:
-        raise ValueError("trend_signals frame is empty")
-    if missing_cols:
-        raise ValueError(f"trend_signals frame missing columns: {sorted(missing_cols)}")
+        raise ValueError("live fingerprint frame is empty")
+    missing = set(LIVE_FINGERPRINT_COLUMNS) - set(frame.columns)
+    if missing:
+        raise ValueError(f"live fingerprint frame missing columns: {sorted(missing)}")
+    out = frame[LIVE_FINGERPRINT_COLUMNS].copy()
 
-    cleaned = frame.copy()
-    for col in TIMEFRAMES:
-        if col not in cleaned.columns:
-            cleaned[col] = cleaned["current"]
+    required_non_null = [c for c in LIVE_FINGERPRINT_COLUMNS if c != "avg_price"]
+    null_counts = out[required_non_null].isna().sum()
+    bad = null_counts[null_counts > 0]
+    if not bad.empty:
+        raise ValueError(f"live fingerprint frame has nulls in: {bad.to_dict()}")
 
-    cleaned = cleaned[TREND_SIGNAL_COLUMNS].copy()
-    score_cols = [c for c in TIMEFRAMES]
-    cleaned[score_cols] = cleaned[score_cols].astype(float).clip(0.0, 1.0)
-    cleaned["feature_type"] = cleaned["feature_type"].astype(str).str.strip().str.lower()
-    cleaned["feature_value"] = cleaned["feature_value"].astype(str).map(normalize_token)
-    return cleaned
-
-
-def load_trend_signals_frame(path: str | Path) -> pd.DataFrame:
-    raw = pd.read_csv(path)
-    return validate_trend_signals_frame(raw)
-
-
-def build_trend_lookup(trend_frame: pd.DataFrame) -> FlatTrendLookup:
-    """Flatten ``current`` scores for ``item_to_feature_row`` inside ``hmn_seasonal_processor``."""
-
-    df = validate_trend_signals_frame(trend_frame)
-    lookup: FlatTrendLookup = {}
-    for _, row in df.iterrows():
-        ft = str(row["feature_type"])
-        fv = str(row["feature_value"])
-        lookup.setdefault(ft, {})[fv] = float(row["current"])
-    return lookup
+    sums = out.groupby("month", observed=True)["share_articles"].sum()
+    out_of_range = sums[(sums < 1.0 - _SHARE_TOLERANCE) | (sums > 1.0 + _SHARE_TOLERANCE)]
+    if not out_of_range.empty:
+        raise ValueError(
+            f"live fingerprint share_articles per-month sum out of range "
+            f"(expected ≈1.0): {out_of_range.to_dict()}"
+        )
+    return out
 
 
-def load_trend_lookup(path: str | Path) -> TrendLookup:
-    """Nested lookup used by FastAPI ``/options`` + inference utilities."""
+def validate_live_univariate_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Assert the live univariate cube matches the historical schema.
 
-    df = load_trend_signals_frame(path)
+    Checks: column presence + order, no nulls in required columns,
+    share_articles per-(month, dimension) sums to 1.0 within tolerance.
+    """
+    if frame.empty:
+        raise ValueError("live univariate frame is empty")
+    missing = set(LIVE_UNIVARIATE_COLUMNS) - set(frame.columns)
+    if missing:
+        raise ValueError(f"live univariate frame missing columns: {sorted(missing)}")
+    out = frame[LIVE_UNIVARIATE_COLUMNS].copy()
+
+    null_counts = out.isna().sum()
+    bad = null_counts[null_counts > 0]
+    if not bad.empty:
+        raise ValueError(f"live univariate frame has nulls in: {bad.to_dict()}")
+
+    sums = out.groupby(["month", "dimension"], observed=True)["share_articles"].sum()
+    out_of_range = sums[
+        (sums < 1.0 - _UNIVARIATE_SHARE_TOLERANCE)
+        | (sums > 1.0 + _UNIVARIATE_SHARE_TOLERANCE)
+    ]
+    if not out_of_range.empty:
+        raise ValueError(
+            f"live univariate share_articles per-(month,dim) sum out of range "
+            f"(expected ≈1.0): {out_of_range.to_dict()}"
+        )
+    return out
+
+
+# Map univariate cube `dimension` values to the feature_type names that the
+# trained sklearn model expects in its feature columns. The model's column
+# names ("color_current", "category_current", "material_current") are baked in;
+# we alias 'product_type' → 'category' rather than rename and retrain.
+_DIM_TO_FEATURE_TYPE: dict[str, str] = {
+    "color_master":  "color",
+    "product_type":  "category",
+    "material":      "material",
+}
+
+
+def load_trend_lookup_from_univariate(
+    parquet_path: str | Path,
+    *,
+    source: str = "live",
+    latest_month: bool = True,
+    lookup_csv_path: str | Path | None = None,
+) -> TrendLookup:
+    """Build a nested ``{feature_type: {feature_value: {timeframe: score}}}``
+    lookup from ``monthly_univariate.parquet`` (or the merged historical+live
+    cube). Reads the merged historical+live cube by default.
+
+    Filters by ``source`` (default ``'live'``) and the latest available
+    month within that source. Decodes ``level_id`` → name via
+    ``lookup.csv`` and lowercases — matching the old trend_signals.csv
+    feature_value convention.
+
+    Only ``current`` carries a real score; future timeframes fall back to
+    DEFAULT_MISSING_SCORE — matches the contract the old loader produced.
+    """
+    parquet_path = Path(parquet_path)
+    if lookup_csv_path is None:
+        # paths.LOOKUP_CSV resolves to data/processed/lookup.csv but we avoid a
+        # circular import by reading it lazily here.
+        from pipelines.training.paths import LOOKUP_CSV
+        lookup_csv_path = LOOKUP_CSV
+    lookup_csv_path = Path(lookup_csv_path)
+
+    if not parquet_path.exists():
+        raise FileNotFoundError(f"univariate cube not found: {parquet_path}")
+    if not lookup_csv_path.exists():
+        raise FileNotFoundError(f"lookup.csv not found: {lookup_csv_path}")
+
+    cube = pd.read_parquet(parquet_path)
+    if source is not None:
+        cube = cube[cube["source"].astype(str) == source]
+    if cube.empty:
+        return {}
+    if latest_month:
+        max_month = cube["month"].max()
+        cube = cube[cube["month"] == max_month]
+
+    # Decode level_id → canonical name
+    decoder = pd.read_csv(lookup_csv_path)
+    decoder = decoder.rename(columns={"category": "dimension", "id": "level_id", "name": "feature_value"})
+
+    cube = cube[["dimension", "level_id", "share_articles"]].merge(
+        decoder, on=["dimension", "level_id"], how="left"
+    )
+    # Sentinel level_ids (e.g., product_type=0) that don't exist in lookup.csv
+    # become NaN after the merge; drop them.
+    cube = cube.dropna(subset=["feature_value"])
+    cube["feature_value"] = cube["feature_value"].astype(str).map(normalize_token)
+    # lookup.csv has explicit "Unknown" rows for color_master / material / etc.
+    # at id=0 — these represent scrape failures, not real catalog values, so
+    # don't expose them as a queryable feature_value.
+    cube = cube[cube["feature_value"] != "unknown"]
+    # Map the cube's `dimension` to model-facing feature_type, dropping any
+    # dimension we don't expose (gender, graphical_appearance, etc.).
+    cube["feature_type"] = cube["dimension"].astype(str).map(_DIM_TO_FEATURE_TYPE)
+    cube = cube.dropna(subset=["feature_type"])
+
     nested: TrendLookup = {}
-    for _, row in df.iterrows():
-        ft = str(row["feature_type"])
-        fv = str(row["feature_value"])
+    for ft, fv, score in zip(cube["feature_type"], cube["feature_value"], cube["share_articles"]):
         bucket = nested.setdefault(ft, {}).setdefault(fv, {})
+        s = float(score)
         for tf in TIMEFRAMES:
-            bucket[tf] = float(row[tf])
+            bucket[tf] = s if tf == "current" else DEFAULT_MISSING_SCORE
     return nested
 
 
