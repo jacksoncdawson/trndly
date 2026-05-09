@@ -1,0 +1,250 @@
+/* =============================================================
+   trndly — Semantic Color & Typography Layer
+   Import AFTER tokens.css. Provides semantic vars and
+   pre-composed type styles you can apply directly.
+   ============================================================= */
+
+/* --- Font imports ------------------------------------------ */
+@import url('https://rsms.me/inter/inter.css');
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..800,0..100,0..1&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* NOTE: Inter is served from rsms.me as a variable font.
+   Fraunces is a variable font from Google Fonts — use
+   font-variation-settings: "SOFT" 50; for the characteristic
+   soft corners on headlines & big numbers.
+   JetBrains Mono for all monospaced metadata / labels.
+   If self-hosting, place files in fonts/ and update @font-face. */
+
+:root {
+
+  /* ----------------------------------------------------------
+     SEMANTIC FOREGROUND (fg) VARS
+     fg1 = primary content, fg2 = secondary, fg3 = tertiary
+     fg-inverse = text on dark/saturated surfaces
+     ---------------------------------------------------------- */
+  --fg1:        var(--color-text-primary);    /* #1a1a1a — headings, body */
+  --fg2:        var(--color-text-secondary);  /* #5a544a — captions, metadata */
+  --fg3:        var(--color-text-tertiary);   /* #8a8275 — hints, disabled */
+  --fg-inverse: var(--color-text-inverse);    /* #fbf6ee — on dark surfaces */
+
+  /* ----------------------------------------------------------
+     SEMANTIC BACKGROUND / SURFACE VARS
+     bg       = page base (warm cream)
+     surface  = card/panel (white)
+     surface-alt = nested card / hover state
+     surface-tint = tinted callout / sidebar
+     well     = input wells, "sunk into paper"
+     ---------------------------------------------------------- */
+  --bg:           var(--color-bg);           /* #fbf6ee */
+  --surface:      var(--color-surface-1);    /* #ffffff */
+  --surface-alt:  var(--color-surface-2);    /* #fdfaf3 */
+  --surface-tint: var(--color-surface-3);    /* #f5ede0 */
+  --well:         var(--color-surface-sunk); /* #f0e7d5 */
+
+  /* ----------------------------------------------------------
+     SEMANTIC BORDER VARS
+     border       = 2px black — brand signature
+     border-soft  = hairline divider on cream
+     ---------------------------------------------------------- */
+  --border:      var(--color-border);        /* #1a1a1a */
+  --border-soft: var(--color-border-soft);   /* #e6dcc8 */
+
+  /* ----------------------------------------------------------
+     SEMANTIC BRAND VARS
+     primary = deep forest green — CTAs, links, rising state
+     ---------------------------------------------------------- */
+  --brand:          var(--color-primary);       /* #2d5e3e */
+  --brand-hover:    var(--color-primary-hover); /* #234d31 */
+  --brand-soft:     var(--color-primary-soft);  /* #d8e7dc */
+  --brand-fg:       var(--color-primary-fg);    /* #fbf6ee */
+
+  /* ----------------------------------------------------------
+     TREND STATE VARS (reserved — never repurpose)
+     rising  = forest green  — buy / stock up
+     peak    = mustard       — sell now
+     falling = rust          — declining
+     flat    = warm grey     — stable
+     ---------------------------------------------------------- */
+  --trend-rising:       var(--color-trend-rising);       /* #2d5e3e */
+  --trend-rising-soft:  var(--color-trend-rising-soft);  /* #d8e7dc */
+  --trend-peak:         var(--color-trend-peak);         /* #e8b840 */
+  --trend-peak-soft:    var(--color-trend-peak-soft);    /* #f8ebc9 */
+  --trend-falling:      var(--color-trend-falling);      /* #c64a3a */
+  --trend-falling-soft: var(--color-trend-falling-soft); /* #f5d6d0 */
+  --trend-flat:         var(--color-trend-flat);         /* #8a8275 */
+  --trend-flat-soft:    var(--color-trend-flat-soft);    /* #ece2cf */
+
+  /* ----------------------------------------------------------
+     POP ACCENT VARS
+     For charts, category tags, callouts — NOT trend states
+     ---------------------------------------------------------- */
+  --pop-rust:    var(--color-pop-rust);    /* #d96941 */
+  --pop-mustard: var(--color-pop-mustard); /* #e8b840 */
+  --pop-coral:   var(--color-pop-coral);   /* #e87168 */
+  --pop-sky:     var(--color-pop-sky);     /* #6ba8c9 */
+  --pop-plum:    var(--color-pop-plum);    /* #8b5a8c */
+  --pop-sage:    var(--color-pop-sage);    /* #8fb085 */
+
+  --pop-rust-soft:    var(--color-pop-rust-soft);
+  --pop-mustard-soft: var(--color-pop-mustard-soft);
+  --pop-coral-soft:   var(--color-pop-coral-soft);
+  --pop-sky-soft:     var(--color-pop-sky-soft);
+  --pop-plum-soft:    var(--color-pop-plum-soft);
+  --pop-sage-soft:    var(--color-pop-sage-soft);
+
+  /* ----------------------------------------------------------
+     SEMANTIC FEEDBACK VARS
+     ---------------------------------------------------------- */
+  --success:    var(--color-success);     /* forest */
+  --success-bg: var(--color-success-bg);
+  --warning:    var(--color-warning);     /* mustard */
+  --warning-bg: var(--color-warning-bg);
+  --danger:     var(--color-danger);      /* rust */
+  --danger-bg:  var(--color-danger-bg);
+  --info:       var(--color-info);        /* sky */
+  --info-bg:    var(--color-info-bg);
+
+  /* ----------------------------------------------------------
+     TYPE ROLE VARS
+     Semantic aliases for the most common type patterns.
+     ---------------------------------------------------------- */
+
+  /* Families */
+  --serif-display: var(--font-display); /* Fraunces — headlines & numbers */
+  --sans:          var(--font-sans);    /* Inter — body & UI */
+  --mono:          var(--font-mono);    /* JetBrains Mono — metadata */
+
+  /* Semantic size roles */
+  --type-display: var(--text-3xl);  /* 48px — h1 / hero number */
+  --type-h1:      var(--text-3xl);  /* 48px */
+  --type-h2:      var(--text-2xl);  /* 36px */
+  --type-h3:      var(--text-xl);   /* 28px */
+  --type-h4:      var(--text-lg);   /* 22px */
+  --type-body:    var(--text-base); /* 16px */
+  --type-small:   var(--text-sm);   /* 15px */
+  --type-caption: var(--text-xs);   /* 13px */
+  --type-label:   var(--text-2xs);  /* 11px — caps labels */
+  --type-metric:  var(--text-4xl);  /* 64px — big dollar numbers */
+}
+
+/* ----------------------------------------------------------
+   PRE-COMPOSED TYPE STYLES
+   Apply as utility classes or copy into component styles.
+   ---------------------------------------------------------- */
+
+/* h1: Fraunces black, soft corners, tight leading */
+.t-h1 {
+  font-family: var(--serif-display);
+  font-size: var(--type-h1);
+  font-weight: var(--font-weight-black);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-tight);
+  font-variation-settings: "SOFT" 50;
+  color: var(--fg1);
+}
+
+/* h2 */
+.t-h2 {
+  font-family: var(--serif-display);
+  font-size: var(--type-h2);
+  font-weight: var(--font-weight-black);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-tight);
+  font-variation-settings: "SOFT" 50;
+  color: var(--fg1);
+}
+
+/* h3 */
+.t-h3 {
+  font-family: var(--serif-display);
+  font-size: var(--type-h3);
+  font-weight: var(--font-weight-black);
+  line-height: var(--leading-snug);
+  font-variation-settings: "SOFT" 50;
+  color: var(--fg1);
+}
+
+/* Big display metric (prices, returns) */
+.t-metric {
+  font-family: var(--serif-display);
+  font-size: var(--type-metric);
+  font-weight: var(--font-weight-black);
+  line-height: 1;
+  letter-spacing: var(--tracking-tight);
+  font-variation-settings: "SOFT" 50;
+  font-feature-settings: "tnum";
+  color: var(--fg1);
+}
+
+/* Body */
+.t-body {
+  font-family: var(--sans);
+  font-size: var(--type-body);
+  line-height: var(--leading-normal);
+  color: var(--fg1);
+}
+
+/* Secondary body — lede / descriptions */
+.t-lede {
+  font-family: var(--sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  color: var(--fg2);
+  max-width: 64ch;
+}
+
+/* Small / caption */
+.t-small {
+  font-family: var(--sans);
+  font-size: var(--type-small);
+  color: var(--fg2);
+  line-height: var(--leading-normal);
+}
+
+/* Caps label — "our recommendation", eyebrow text */
+.t-caps {
+  font-family: var(--sans);
+  font-size: var(--type-label);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  color: var(--fg3);
+}
+
+/* Eyebrow pill — black filled capsule */
+.t-eyebrow {
+  display: inline-block;
+  font-family: var(--sans);
+  font-size: var(--type-label);
+  font-weight: var(--font-weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  background: var(--fg1);
+  color: var(--fg-inverse);
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+}
+
+/* Mono metadata */
+.t-mono {
+  font-family: var(--mono);
+  font-size: var(--type-caption);
+  color: var(--fg3);
+  font-feature-settings: "tnum";
+}
+
+/* ----------------------------------------------------------
+   BASE RESETS — apply to <body> for trndly pages
+   ---------------------------------------------------------- */
+.trndly-base {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg1);
+  font-family: var(--sans);
+  font-size: var(--type-body);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01", "cv11", "tnum";
+}

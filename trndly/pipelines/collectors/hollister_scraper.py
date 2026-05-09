@@ -77,6 +77,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from pipelines.paths import items_csv_path_for  # noqa: E402
+
 from pipelines.collectors.feature_lookups import (  # noqa: E402
     COLOR_MASTER_TO_ID,
     GENDER_TO_ID,
@@ -123,9 +125,6 @@ HTTP_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-RETRYABLE_STATUSES = {403, 408, 425, 429, 500, 502, 503, 504}
-DEFAULT_MAX_ATTEMPTS = 5
-
 # Apollo state script-block marker. The Hollister page embeds the full
 # catalog cache as: window['APOLLO_STATE__catalog-mfe-web-service-CategoryPageFrontEnd-config'] = {...};
 APOLLO_STATE_PREFIX = "APOLLO_STATE__catalog-mfe-web-service-CategoryPageFrontEnd-config"
@@ -134,57 +133,20 @@ APOLLO_ASSIGN_RE = re.compile(rf"{re.escape(APOLLO_STATE_PREFIX)}[^=]*=\s*", re.
 # PDP fabric extraction.
 PDP_FABRIC_RE = re.compile(r'"fabricDetails":"((?:[^"\\]|\\.)*)"')
 
-CSV_FIELDNAMES = [
-    "scraped_at", "retailer",
-    "style_id", "cc_id", "web_product_type",
-    "title", "gender",
-    "color_raw", "product_type_raw", "material_raw", "graphical_appearance_raw",
-    "color_master_id", "color_spectrum_id", "gender_id",
-    "product_type_id", "product_group_id", "material_id", "graphical_appearance_id",
-]
+from functools import partial
 
+from pipelines.collectors._http_utils import (  # noqa: E402
+    CSV_FIELDNAMES,
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_RETRYABLE_STATUSES,
+    StreamingItemWriter,
+    request_with_retry,
+)
 
-# --------------------------------------------------------------------------- #
-# HTTP helper                                                                   #
-# --------------------------------------------------------------------------- #
-
-async def _request_with_retry(
-    client: httpx.AsyncClient,
-    url: str,
-    *,
-    params: dict | None = None,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-    label: str = "",
-    verbose: bool = True,
-) -> httpx.Response | None:
-    for attempt in range(1, max_attempts + 1):
-        try:
-            r = await client.get(url, params=params, follow_redirects=True)
-            if r.status_code == 200:
-                return r
-            if r.status_code in RETRYABLE_STATUSES:
-                wait = (2 ** (attempt - 1)) + random.uniform(0, 0.6)
-                if verbose:
-                    print(
-                        f"    [http] {label} got {r.status_code}, "
-                        f"retry {attempt}/{max_attempts} in {wait:.1f}s"
-                    )
-                await asyncio.sleep(wait)
-                continue
-            if verbose:
-                print(f"    [http] {label} non-retryable {r.status_code}: {r.text[:200]}")
-            return None
-        except (httpx.TimeoutException, httpx.RequestError) as exc:
-            wait = (2 ** (attempt - 1)) + random.uniform(0, 0.6)
-            if verbose:
-                print(
-                    f"    [http] {label} {type(exc).__name__}: "
-                    f"retry {attempt}/{max_attempts} in {wait:.1f}s"
-                )
-            await asyncio.sleep(wait)
-    if verbose:
-        print(f"    [http] {label} GAVE UP after {max_attempts} attempts")
-    return None
+# Hollister includes 403 because Akamai sometimes 403s under load and yields
+# on retry — request_with_retry's default set is transient (408/425/429/5xx).
+RETRYABLE_STATUSES = DEFAULT_RETRYABLE_STATUSES | {403}
+_request_with_retry = partial(request_with_retry, retryable_statuses=RETRYABLE_STATUSES)
 
 
 # --------------------------------------------------------------------------- #
@@ -535,55 +497,6 @@ def _combo_to_row(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Streaming CSV writer                                                          #
-# --------------------------------------------------------------------------- #
-
-class StreamingItemWriter:
-    def __init__(self, final_path: Path, resume: bool = False) -> None:
-        self.final_path   = final_path
-        self.partial_path = final_path.with_name(final_path.stem + "_partial.csv")
-        self._resume      = resume
-        self._existing: set[tuple[str, str, str]] = set()
-        self._handle      = None
-        self._writer      = None
-
-    def __enter__(self) -> "StreamingItemWriter":
-        if self._resume and self.partial_path.exists():
-            with self.partial_path.open("r", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    self._existing.add((
-                        row.get("style_id", ""),
-                        row.get("cc_id", ""),
-                        row.get("gender", ""),
-                    ))
-            print(f"  [resume] loaded {len(self._existing)} prior keys from {self.partial_path}")
-            self._handle = self.partial_path.open("a", newline="")
-            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
-        else:
-            if self.partial_path.exists():
-                self.partial_path.unlink()
-            self._handle = self.partial_path.open("w", newline="")
-            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
-            self._writer.writeheader()
-            self._handle.flush()
-        return self
-
-    def already_have(self, style_id: str, cc_id: str, gender: str) -> bool:
-        return (style_id, cc_id, gender) in self._existing
-
-    def write(self, row: dict) -> None:
-        self._writer.writerow(row)
-        self._handle.flush()
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self._handle is not None:
-            self._handle.close()
-        if exc_type is None:
-            os.replace(self.partial_path, self.final_path)
-
-
 def _read_existing_rows(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -648,8 +561,7 @@ KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
 # --------------------------------------------------------------------------- #
 
 def parse_args() -> argparse.Namespace:
-    _synth = Path(__file__).resolve().parents[1] / "training" / "synthetic_data"
-    default_items = _synth / "items_hollister.csv"
+    default_items = items_csv_path_for("hollister")
     parser = argparse.ArgumentParser(
         description="Scrape Hollister via SSR HTML + Apollo state. Writes "
                     "items_hollister.csv. build_live_cube.py aggregates "

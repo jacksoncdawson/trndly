@@ -2,7 +2,7 @@
 Build live counterparts to the historical fingerprint + univariate cubes.
 
 Each retail scraper writes a raw per-(style_id × cc_id) row file named
-`items_<retailer>.csv` in the synthetic_data directory — one row per
+`items_<retailer>.csv` in `data/raw/items/` — one row per
 "article" (style + color variant), matching H&M's article-level grain.
 This module unions all four files, derives a month from `scraped_at`,
 and writes per-snapshot-month parquets to `data/processed/`:
@@ -41,7 +41,7 @@ Usage
 
     # Override input set:
     python build_live_cube.py \\
-        --input pipelines/training/synthetic_data/items_gap.csv
+        --input data/raw/items/items_gap.csv
 
     # Custom output directory:
     python build_live_cube.py --output-dir /tmp/cube_test/
@@ -63,15 +63,14 @@ from pipelines.training.feature_contract import (  # noqa: E402
     validate_live_fingerprint_frame,
     validate_live_univariate_frame,
 )
-from pipelines.training.paths import (  # noqa: E402
-    PROCESSED_DATA_DIR,
+from pipelines.paths import (  # noqa: E402
+    PROCESSED_DIR,
+    RAW_ITEMS_DIR,
     live_fingerprint_path_for,
     live_univariate_path_for,
 )
 
-DEFAULT_SIGNALS_DIR = (
-    Path(__file__).resolve().parents[1] / "training" / "synthetic_data"
-)
+DEFAULT_SIGNALS_DIR = RAW_ITEMS_DIR
 ITEMS_FILE_GLOB = "items_*.csv"
 
 # Fingerprint dim columns, in the canonical order the historical cube uses.
@@ -143,6 +142,52 @@ def load_items(paths: list[Path]) -> pd.DataFrame:
         .dt.to_timestamp()
     )
     return items
+
+
+# --------------------------------------------------------------------------- #
+# Pre-aggregation: unisex collapsing                                            #
+# --------------------------------------------------------------------------- #
+
+def collapse_unisex(items: pd.DataFrame) -> pd.DataFrame:
+    """Collapse same-SKU-in-both-catalogs into single ``gender='unisex'`` rows.
+
+    A SKU is unisex (id=2) when the same ``(retailer, style_id, cc_id)``
+    tuple appears with both ``gender='women'`` AND ``gender='men'`` in
+    the unioned items frame. The ``women`` row wins as the canonical row;
+    the ``men`` row is dropped, and the kept row's ``gender`` /
+    ``gender_id`` are rewritten to ``unisex`` / 2.
+
+    Rows already tagged ``gender='unisex'`` (from a hypothetical retailer
+    that exposes a unisex catalog directly) pass through unchanged.
+
+    The dedup key intentionally includes ``retailer`` so two retailers
+    happening to share an SKU number do not collide.
+    """
+    sku_key = ["retailer", "style_id", "cc_id"]
+    genders_per_sku = (
+        items.groupby(sku_key, dropna=False)["gender"]
+        .agg(lambda s: frozenset(s.dropna().astype(str)))
+    )
+    unisex_pairs = genders_per_sku[
+        genders_per_sku == frozenset({"women", "men"})
+    ].index
+
+    if len(unisex_pairs) == 0:
+        return items
+
+    unisex_set = set(map(tuple, unisex_pairs))
+    key_tuples = list(zip(*(items[c] for c in sku_key)))
+    is_pair = pd.Series(
+        [k in unisex_set for k in key_tuples], index=items.index
+    )
+    is_men = is_pair & (items["gender"] == "men")
+    is_women_idx = items.index[is_pair & (items["gender"] == "women")]
+
+    kept = items[~is_men].copy()  # drops the "men" half of every unisex pair
+    kept.loc[kept.index.intersection(is_women_idx), "gender"] = "unisex"
+    kept.loc[kept.index.intersection(is_women_idx), "gender_id"] = 2
+
+    return kept.reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -281,10 +326,10 @@ def parse_args() -> argparse.Namespace:
         help=f"Directory to scan when --input is omitted (default: {DEFAULT_SIGNALS_DIR}).",
     )
     parser.add_argument(
-        "--output-dir", default=str(PROCESSED_DATA_DIR),
+        "--output-dir", default=str(PROCESSED_DIR),
         help=(
             "Where to write live_<role>_<YYYY-MM>.parquet files "
-            f"(default: {PROCESSED_DATA_DIR})."
+            f"(default: {PROCESSED_DIR})."
         ),
     )
     return parser.parse_args()
@@ -315,6 +360,15 @@ def main() -> None:
         f"\nLoaded {len(items):,} articles across {len(months)} month(s); "
         f"months={[pd.Timestamp(m).strftime('%Y-%m') for m in months]}"
     )
+
+    n_before = len(items)
+    items = collapse_unisex(items)
+    n_collapsed = n_before - len(items)
+    if n_collapsed:
+        print(
+            f"Collapsed {n_collapsed:,} (M+W)-pair rows into "
+            f"{n_collapsed} unisex rows ({n_before:,} → {len(items):,})."
+        )
 
     fingerprint = build_fingerprint_cube(items)
     univariate = build_univariate_cube(items)

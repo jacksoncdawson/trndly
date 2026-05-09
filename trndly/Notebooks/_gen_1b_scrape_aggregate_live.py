@@ -39,16 +39,16 @@ In the notebook folder this sorts **right after** [`1_aggregate_historical.ipynb
 1. **`1_aggregate_historical.ipynb`** — writes immutable `historical_*.parquet` + `lookup.csv`
 2. **`1b_scrape_aggregate_live.ipynb`** *(this notebook)* — refresh retailer **`items_*.csv`** → **`build_live_cube.py`** → emits **`live_<role>_<YYYY-MM>.parquet`** per snapshot month → merges historical + every live month into **`merged_*.parquet`**
 3. **`2_feature_processing.ipynb`** — reads merged cubes, builds `training_*.parquet`
-4. **`3_train_models.ipynb`** → **`4_hyperparameter_search.ipynb`** → **`5_forecast_from_text.ipynb`**
+4. **`3_train_models.ipynb`** → **`4_hyperparameter_search.ipynb`**
 
 ## Pipeline shape
 
 | Stage | Output | Used by |
 |------|--------|---------|
-| Retail scrapers (`pipelines/collectors/*_scraper.py`) | `pipelines/training/synthetic_data/items_<retailer>.csv` | `build_live_cube.py` |
+| Retail scrapers (`pipelines/collectors/*_scraper.py`) | `data/raw/items/items_<retailer>.csv` | `build_live_cube.py` |
 | **`build_live_cube.py`** | **`data/processed/live_<role>_<YYYY-MM>.parquet`** (one per snapshot month) | merge cells below |
 | Notebook **1** outputs | `data/processed/historical_*.parquet` (immutable) | merge cells below |
-| Merge cells (this notebook) | **`data/processed/merged_*.parquet`** (always rebuilt) | notebooks **2–5**, `/forecast-text`, `scheduleServer` |
+| Merge cells (this notebook) | **`data/processed/merged_*.parquet`** (always rebuilt) | notebooks **2–4**, `/forecast/*`, `scheduleServer` |
 
 The live cube schema mirrors notebook 1's exactly (`source='live'` is the only differing value), so `pd.concat([historical, live])` with dedup on `(month, fingerprint, source) keep='last'` is the merge. No `.bak` files: `historical_*` is immutable, `merged_*` is always rebuilt — losing it just means re-running this notebook.
 
@@ -95,15 +95,15 @@ elif not (_root / "pipelines").is_dir() and (_root / "trndly" / "pipelines").is_
 if (_root / "pipelines").is_dir() and str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from pipelines.serving.text_forecast import FINGERPRINT_COLS
-from pipelines.training.paths import (
+from pipelines.serving.forecast import FINGERPRINT_COLS
+from pipelines.paths import (
     HISTORICAL_FINGERPRINT_PARQUET,
     HISTORICAL_UNIVARIATE_PARQUET,
     LIVE_FINGERPRINT_GLOB,
     LIVE_UNIVARIATE_GLOB,
     MERGED_FINGERPRINT_PARQUET,
     MERGED_UNIVARIATE_PARQUET,
-    PROCESSED_DATA_DIR,
+    PROCESSED_DIR,
     PROJECT_ROOT,
     discover_live_fingerprint_parquets,
     discover_live_univariate_parquets,
@@ -111,7 +111,7 @@ from pipelines.training.paths import (
 
 COLLECTORS_DIR = PROJECT_ROOT / "pipelines" / "collectors"
 SYNTH_DATA_DIR = PROJECT_ROOT / "pipelines" / "training" / "synthetic_data"
-STATE_PATH = PROCESSED_DATA_DIR / "live_refresh_state.json"
+STATE_PATH = PROCESSED_DIR / "live_refresh_state.json"
 
 print("PROJECT_ROOT:", PROJECT_ROOT)
 print("SYNTH_DATA_DIR:", SYNTH_DATA_DIR)
@@ -180,11 +180,11 @@ print("Scraper stage done.")
         )
     )
 
-    cells.append(md("## 4. Build live cubes → `live_fingerprint_<YYYY-MM>.parquet` + `live_univariate_<YYYY-MM>.parquet`\n\nWrites the live counterparts of notebook 1's historical cubes under **`data/processed/`**. The merge cells below stitch them into the canonical cubes that **`scheduleServer`** / **`hmn_seasonal_processor`** consume.\n"))
+    cells.append(md("## 4. Build live cubes → `live_fingerprint_<YYYY-MM>.parquet` + `live_univariate_<YYYY-MM>.parquet`\n\nWrites the live counterparts of notebook 1's historical cubes under **`data/processed/`**. The merge cells below stitch them into the canonical cubes that **`scheduleServer`** consumes.\n"))
     cells.append(
         code(
             r"""if RUN_BUILD_LIVE_CUBE:
-    PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     SYNTH_DATA_DIR.mkdir(parents=True, exist_ok=True)
     builder = COLLECTORS_DIR / "build_live_cube.py"
     cmd = [
@@ -193,7 +193,7 @@ print("Scraper stage done.")
         "--signals-dir",
         str(SYNTH_DATA_DIR),
         "--output-dir",
-        str(PROCESSED_DATA_DIR),
+        str(PROCESSED_DIR),
     ]
     print("$", " ".join(cmd))
     rc = subprocess.call(cmd, cwd=str(PROJECT_ROOT))
@@ -214,7 +214,7 @@ else:
     cells.append(md("## 5. Change detection\n\nStores hashes/mtimes under **`data/processed/live_refresh_state.json`** so you can tell whether inputs drifted since the last run.\n"))
     cells.append(
         code(
-            r"""PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            r"""PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def sha256_file(path: Path) -> str | None:
@@ -339,7 +339,6 @@ else:
         md(
             r"""### Next steps
 
-- **Listing timeframe model:** rerun **`python pipelines/collectors/hmn_seasonal_processor.py`** after **`merged_univariate.parquet`** changes.
 - **Forecast-from-text:** after cube merges here, run **`2_feature_processing.ipynb`** then **`3_*` / `4_*`**.
 
 """

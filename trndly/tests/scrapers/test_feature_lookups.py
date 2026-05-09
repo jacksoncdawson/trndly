@@ -82,6 +82,22 @@ def test_extract_color_returns_none_when_no_match():
     ("University of Michigan Graphic Football Jersey", "T-shirt"),
     # Sweater family
     ("Featherweight Turtleneck", "Sweater"),
+    # Universe-expansion (2026-05): hat / footwear / sleepwear specifics
+    # win against generic "hat" / "boot" / loungewear keywords.
+    ("Wool Felt Hat", "Felt hat"),
+    ("Classic Fedora", "Felt hat"),
+    ("Straw Hat with Ribbon", "Straw hat"),
+    ("Panama Hat", "Straw hat"),
+    ("Wide-Brim Hat", "Hat/brim"),
+    ("Floppy Hat", "Hat/brim"),
+    ("Sun Hat", "Hat/brim"),
+    ("Suede Ankle Booties", "Bootie"),
+    ("Block-Heel Bootie", "Bootie"),
+    ("Velvet Headband", "Headband"),
+    ("Knot Hairband", "Headband"),
+    ("Silk Necktie", "Tie"),
+    ("Lace-Trim Nightgown", "Night gown"),
+    ("Cotton Night Gown", "Night gown"),
 ])
 def test_extract_product_type_keyword_priority(text, expected):
     assert fl.extract_product_type(text) == expected
@@ -105,7 +121,24 @@ def test_extract_product_type_returns_none_when_no_match():
     ("100% Cotton (25% Recycled Cotton Fiber)", None, "cotton"),
     # Direct keyword
     ("Linen-Blend Top", None, "linen"),
-    ("Cashmere Cardigan", None, "wool"),
+    # Universe-expansion (2026-05): each fabric resolves to its own bucket
+    # rather than collapsing into wool/silk/knit/cotton/polyester.
+    ("Cashmere Cardigan", None, "cashmere"),
+    ("Silk Chiffon Blouse", None, "chiffon"),     # chiffon beats silk in keyword order
+    ("Crepe Midi Dress", None, "crepe"),
+    ("Satin Slip Dress", None, "satin"),
+    ("Cotton Jersey Tee", None, "jersey"),         # jersey beats cotton order-wise
+    ("Velvet Bodysuit", None, "velvet"),
+    ("Nylon Windbreaker", None, "nylon"),
+    ("Fleece Pullover", None, "fleece"),
+    ("Suede Ankle Boots", None, "suede"),
+    ("Modal-Blend Tee", None, "modal"),
+    ("Corduroy Pants", None, "corduroy"),
+    ("Lace Trim Camisole", None, "lace"),
+    ("Faux Fur Coat", None, "faux fur"),
+    ("Sherpa-Lined Jacket", None, "fleece"),       # sherpa routes to fleece
+    # Imitation leather still routes to leather (HM-cat artifact unreachable)
+    ("Imitation Leather Jacket", None, "leather"),
     # Pants need an explicit denim hint to fall to denim
     ("5-Pocket Selvedge Pants", "pants", "denim"),
     # Pants without a hint return None (not a category default)
@@ -115,6 +148,26 @@ def test_extract_product_type_returns_none_when_no_match():
 ])
 def test_extract_material_resolution_order(text, inferred_category, expected):
     assert fl.extract_material(text, inferred_category=inferred_category) == expected
+
+
+@pytest.mark.parametrize("bucket,expected_id", [
+    # Spot-check the expanded MATERIAL_TO_ID covers retailer-realistic fabrics.
+    ("cashmere", 27),
+    ("chiffon", 16),
+    ("jersey", 2),
+    ("velvet", 30),
+    ("satin", 14),
+    ("nylon", 28),
+    ("fleece", 22),
+    ("suede", 29),
+    ("modal", 23),
+    ("corduroy", 25),
+    ("lace", 4),
+    ("tencel", 34),
+    ("viscose", 5),
+])
+def test_material_bucket_to_id_coverage(bucket, expected_id):
+    assert fl.MATERIAL_TO_ID[bucket] == expected_id
 
 
 # --------------------------------------------------------------------------- #
@@ -160,6 +213,15 @@ def test_extract_color_spectrum_id(color_label, expected_spectrum):
     ("Bra", 5),       # Underwear
     ("Cap", 6),       # Accessories — NEW
     ("Umbrella", 6),  # NEW
+    # Universe-expansion (2026-05): new product types must route to the
+    # correct product_group so the cube's group-level rollups stay coherent.
+    ("Hat/brim", 6),
+    ("Felt hat", 6),
+    ("Straw hat", 6),
+    ("Headband", 6),
+    ("Tie", 6),
+    ("Bootie", 7),
+    ("Night gown", 9),
     (None, 0),
     ("xxxx", 0),
 ])

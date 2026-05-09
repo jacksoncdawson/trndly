@@ -5,11 +5,14 @@ Two layers:
   1. Substring keyword maps — tuples of (keyword, bucket). Order matters:
      longest / most specific phrases must appear before their substrings.
   2. ID dicts — map bucket names to integer IDs from the canonical
-     trndly/EDA/data/lookup.csv (H&M-derived reference). Used by every
-     retailer scraper to produce a unified items table that joins cleanly
-     with historical fingerprint cubes.
+     trndly/data/reference/lookup.csv (H&M-derived reference). Used by
+     every retailer scraper to produce a unified items table that joins
+     cleanly with historical fingerprint cubes.
 
-If you change an ID, audit every retailer scraper and the H&M reference data.
+The full universe / source / reachability story lives in
+``trndly/data/reference/SCHEMA.md``. If you change an ID or expand the
+``_DELIBERATELY_UNREACHABLE_LOOKUP_IDS`` allow-list below, refresh that
+doc so the audit table stays accurate.
 """
 
 from __future__ import annotations
@@ -336,6 +339,9 @@ CATEGORY_KEYWORDS: list[tuple[str, str]] = [
 ]
 
 # MATERIAL — checked against product title (and detail-page text where available).
+# Bucket strings match canonical lookup.csv names. The collapse this used to do
+# (jersey/velvet/cashmere→knit/wool, satin/chiffon→silk, viscose/modal→cotton)
+# was widened in 2026-05 to expose the full lookup material universe.
 MATERIAL_KEYWORDS: list[tuple[str, str]] = [
     ("denim", "denim"),
     ("jean", "denim"),
@@ -343,49 +349,53 @@ MATERIAL_KEYWORDS: list[tuple[str, str]] = [
     ("cutoff", "denim"),
     ("linen-blend", "linen"),
     ("linen", "linen"),
-    ("chiffon", "silk"),
-    ("crepe", "silk"),
-    ("georgette", "silk"),
+    ("chiffon", "chiffon"),
+    ("georgette", "chiffon"),     # finer chiffon-like
+    ("crepe", "crepe"),
     ("silk", "silk"),
-    ("satin", "silk"),
-    ("cashmere", "wool"),
-    ("shearling", "wool"),
-    ("sherpa", "wool"),
-    ("faux fur", "wool"),
+    ("satin", "satin"),
+    ("lace", "lace"),
+    ("cashmere", "cashmere"),
+    ("shearling", "shearling"),
+    ("sherpa", "fleece"),         # sherpa lining is fleece-family
+    ("faux fur", "faux fur"),
     ("wool", "wool"),
-    ("fleece", "wool"),
+    ("fleece", "fleece"),
+    # imitation leather / imitation suede are H&M-catalog buckets; retailers
+    # surface only "faux"/"vegan" leather → keep them in the leather bucket
+    # so we don't fragment the live signal.
     ("imitation leather", "leather"),
     ("imitation suede", "leather"),
     ("faux leather", "leather"),
     ("vegan leather", "leather"),
-    ("suede", "leather"),
+    ("suede", "suede"),
     ("leather", "leather"),
     ("rib-knit", "knit"),
     ("ribbed", "knit"),
-    ("jersey", "knit"),
-    ("velvet", "knit"),
-    ("velour", "knit"),
+    ("jersey", "jersey"),
+    ("velvet", "velvet"),
+    ("velour", "velour"),
     ("knit", "knit"),
     ("crochet", "knit"),
     ("waffle", "knit"),
-    ("nylon", "polyester"),
-    ("acrylic", "polyester"),
-    ("tulle", "polyester"),
-    ("mesh", "polyester"),
+    ("nylon", "nylon"),
+    ("acrylic", "acrylic"),
+    ("tulle", "tulle"),
+    ("mesh", "mesh"),
     ("spandex", "polyester"),
     ("elastane", "polyester"),
     ("polyester", "polyester"),
     ("recycled", "polyester"),
     ("poplin", "cotton"),
-    ("twill", "cotton"),
+    ("twill", "twill"),
     ("terry", "cotton"),
-    ("corduroy", "cotton"),
-    ("canvas", "cotton"),
-    ("tencel", "cotton"),
-    ("lyocell", "cotton"),
-    ("modal", "cotton"),
-    ("viscose", "cotton"),
-    ("rayon", "cotton"),
+    ("corduroy", "corduroy"),
+    ("canvas", "canvas"),
+    ("tencel", "tencel"),
+    ("lyocell", "lyocell"),
+    ("modal", "modal"),
+    ("viscose", "viscose"),
+    ("rayon", "viscose"),         # rayon is a viscose synonym
     ("cotton", "cotton"),
 ]
 
@@ -471,6 +481,9 @@ PRODUCT_TYPE_KEYWORDS: list[tuple[str, str]] = [
     # Title-friendly multi-word phrases (continued)
     ("wireless bra", "Bra"),  # Uniqlo "Square Neck Wireless Bra | Striped" etc.
     ("cozy robe", "Robe"),    # bare "robe" would match "wardrobe"
+    ("night gown", "Night gown"),
+    ("nightgown", "Night gown"),
+    ("nightdress", "Night gown"),
 
     # Title-friendly singletons
     ("loungewear", "Pyjama bottom"),
@@ -548,6 +561,9 @@ PRODUCT_TYPE_KEYWORDS: list[tuple[str, str]] = [
     ("top", "Top"),
     ("flip flop", "Flip flop"),
     ("sneaker", "Sneakers"),
+    # bootie/booties beat "boot" → Boots; ankle-high silhouette is its own ID.
+    ("bootie", "Bootie"),
+    ("booties", "Bootie"),
     ("boot", "Boots"),
     ("sandal", "Sandals"),
     ("pump", "Pumps"),
@@ -573,8 +589,25 @@ PRODUCT_TYPE_KEYWORDS: list[tuple[str, str]] = [
     ("belt", "Belt"),
     ("beanie", "Beanie"),
     ("bucket hat", "Bucket hat"),
+    # Hat-family specifics — must come BEFORE the generic "hat" → Hat/beanie.
+    # Matches hold for both compound titles ("Wide-Brim Felt Hat") and bare
+    # silhouette names ("Fedora", "Panama").
+    ("felt hat", "Felt hat"),
+    ("fedora", "Felt hat"),
+    ("straw hat", "Straw hat"),
+    ("panama hat", "Straw hat"),
+    ("wide-brim hat", "Hat/brim"),
+    ("wide brim hat", "Hat/brim"),
+    ("floppy hat", "Hat/brim"),
+    ("sun hat", "Hat/brim"),
     ("cap", "Cap"),  # baseball cap, twill cap, UV protection cap
     ("hat", "Hat/beanie"),
+    # Headband / hairband — Headband(93) is the canonical lookup name.
+    ("headband", "Headband"),
+    ("hairband", "Headband"),
+    # "necktie" only — bare "tie" substring-matches too many false positives
+    # (tie-dye, tie-front, untied) so we never match the generic word.
+    ("necktie", "Tie"),
     ("scarves", "Scarf"),  # irregular plural — "scarf" doesn't substring-match
     ("scarf", "Scarf"),
     ("umbrella", "Umbrella"),
@@ -669,8 +702,18 @@ GRAPHICAL_APPEARANCE_TO_ID: dict[str, int] = {
 }
 
 MATERIAL_TO_ID: dict[str, int] = {
-    "cotton": 1, "knit": 6, "denim": 3, "linen": 12, "silk": 26,
-    "wool": 9, "polyester": 15, "leather": 18,
+    "cotton": 1, "jersey": 2, "denim": 3, "lace": 4, "viscose": 5,
+    "knit": 6, "crepe": 8, "wool": 9, "twill": 10, "linen": 12,
+    "mesh": 13, "satin": 14, "polyester": 15, "chiffon": 16,
+    "faux fur": 17, "leather": 18, "velour": 19, "lyocell": 21,
+    "fleece": 22, "modal": 23, "canvas": 24, "corduroy": 25,
+    "silk": 26, "cashmere": 27, "nylon": 28, "suede": 29,
+    "velvet": 30, "shearling": 31, "tulle": 32, "acrylic": 33,
+    "tencel": 34,
+    # Deliberately unreachable from live extractors (see
+    # _DELIBERATELY_UNREACHABLE_LOOKUP_IDS): id 7 (metal — jewelry hardware),
+    # id 11 (imitation leather), id 20 (imitation suede). Retailers surface
+    # "faux"/"vegan" leather only, which we keep in the leather bucket.
 }
 
 PRODUCT_TYPE_TO_ID: dict[str, int] = {
@@ -685,12 +728,16 @@ PRODUCT_TYPE_TO_ID: dict[str, int] = {
     "Dungarees": 54, "Gloves": 55, "Heels": 68, "Watch": 70, "Wallet": 73,
     "Beanie": 74, "Eyeglasses": 95, "Bracelet": 63, "Flip flop": 59,
     "Slippers": 60, "Other shoe": 58,
-    # Intimates / swim / sleepwear (IDs from data/processed/lookup.csv)
+    # Intimates / swim / sleepwear (IDs from data/reference/lookup.csv)
     "Bra": 8, "Bikini top": 9, "Swimwear bottom": 10, "Underwear bottom": 12,
     "Swimsuit": 21, "Pyjama set": 28, "Pyjama bottom": 36, "Underwear body": 38,
     "Robe": 52, "Underwear set": 61, "Swimwear set": 62,
     # Coverage extensions surfaced by cross-retailer audit
     "Umbrella": 81, "Bucket hat": 83, "Cap": 88,
+    # Universe-coverage round (2026-05): hat/headwear/footwear variants and
+    # sleepwear/accessory IDs that live retailers actually advertise.
+    "Night gown": 43, "Hat/brim": 57, "Tie": 72, "Felt hat": 85,
+    "Straw hat": 87, "Bootie": 92, "Headband": 93,
 }
 
 # 1=Garment Upper body, 2=Garment Lower body, 3=Garment Full body,
@@ -704,16 +751,17 @@ PRODUCT_TYPE_TO_GROUP_ID: dict[str, int] = {
     "Dress": 3, "Jumpsuit/Playsuit": 3, "Bodysuit": 3,
     "Bag": 6, "Belt": 6, "Scarf": 6, "Hat/beanie": 6, "Beanie": 6,
     "Bucket hat": 6, "Cap": 6, "Umbrella": 6,
+    "Hat/brim": 6, "Felt hat": 6, "Straw hat": 6, "Headband": 6, "Tie": 6,
     "Gloves": 6, "Sunglasses": 6, "Eyeglasses": 6, "Watch": 6,
     "Wallet": 6, "Bracelet": 6, "Necklace": 6, "Earring": 6, "Ring": 6,
     "Boots": 7, "Sneakers": 7, "Sandals": 7, "Flat shoe": 7,
     "Ballerinas": 7, "Slippers": 7, "Flip flop": 7, "Wedge": 7,
-    "Heels": 7, "Pumps": 7, "Other shoe": 7,
+    "Heels": 7, "Pumps": 7, "Other shoe": 7, "Bootie": 7,
     "Socks": 8,
     # Intimates / swim / sleepwear
     "Bra": 5, "Underwear bottom": 5, "Underwear body": 5, "Underwear set": 5,
     "Bikini top": 4, "Swimwear bottom": 4, "Swimsuit": 4, "Swimwear set": 4,
-    "Pyjama set": 9, "Pyjama bottom": 9, "Robe": 9,
+    "Pyjama set": 9, "Pyjama bottom": 9, "Robe": 9, "Night gown": 9,
 }
 
 # --------------------------------------------------------------------------- #
@@ -873,32 +921,66 @@ _LOOKUP_DICT_CONTRACTS: tuple[tuple[str, dict[str, int]], ...] = (
     ("product_type",         PRODUCT_TYPE_TO_ID),
 )
 
+# Lookup IDs that the live extractors will *never* assign, by design.
+# Membership here suppresses the reverse-direction unreachable warning. Adding
+# a new ID without justification means we're hiding a real coverage gap — only
+# add IDs that fall into one of these categories:
+#   - H&M-catalog artifacts retailers don't surface (imitation leather/suede)
+#   - duplicates / near-duplicates of an already-mapped ID (singular vs.
+#     plural, peaked-cap vs. cap, alice band vs. headband)
+#   - non-apparel (Waterbottle, Giftbox)
+#   - ultra-niche items no live retailer in scope sells (Dog Wear, Costumes)
+#   - a separate, larger ticket (Unisex gender — see TODO.md "Pinned").
+_DELIBERATELY_UNREACHABLE_LOOKUP_IDS: dict[str, set[int]] = {
+    # gender id=2 (Unisex) was previously deferred; build_live_cube.py
+    # now collapses same-SKU-in-both-catalogs pairs into unisex rows
+    # (see ``collapse_unisex``), so the live cube reaches it.
+    "material": {
+        7,   # metal (jewelry hardware, not a garment fabric)
+        11,  # imitation leather (HM-catalog bucket; we keep faux/vegan in `leather`)
+        20,  # imitation suede (HM-catalog bucket; same reasoning)
+    },
+    "product_type": {
+        25,  # Underwear Tights — overlaps with Leggings/Tights (15)
+        37,  # Other accessories — catch-all
+        40,  # Hair/alice band — duplicate of Headband (93)
+        42,  # Heeled sandals — overlaps with Sandals (32) / Heels (68)
+        45,  # Hair ties — H&M-catalog only
+        48,  # Hair string — H&M-catalog only
+        50,  # Hair clip — H&M-catalog only
+        56,  # Cap/peaked — overlaps with Cap (88)
+        64,  # Earrings (plural duplicate of Earring=26)
+        65,  # Underdress — niche
+        66,  # Costumes — H&M-catalog only
+        67,  # Outdoor Waistcoat — H&M-catalog only
+        69,  # Outdoor trousers — H&M-catalog only
+        71,  # Nipple covers — niche
+        75,  # Tailored Waistcoat — H&M-catalog only
+        76,  # Dog Wear — H&M-catalog only
+        77,  # Pyjama jumpsuit/playsuit — niche
+        78,  # Hairband — duplicate of Headband (93)
+        79,  # Underwear corset — niche
+        80,  # Waterbottle — non-apparel
+        82,  # Braces (suspenders) — niche
+        84,  # Bra extender — accessory niche
+        86,  # Garment Set — catch-all
+        89,  # Flat shoes (plural duplicate of Flat shoe=44)
+        90,  # Alice band — duplicate of Headband
+        91,  # Long John — niche thermals
+        94,  # Giftbox — non-apparel
+    },
+    # color_master, color_spectrum, graphical_appearance, product_group all
+    # have full coverage; the empty allow-list is the implicit invariant.
+}
 
-def _assert_lookup_csv_matches_dicts(lookup_csv_path: str | None = None) -> None:
-    """Assert every (name, id) pair in our hand-written *_TO_ID dicts is
-    present in data/processed/lookup.csv. Synonyms (multiple keys → same id)
-    are allowed if the canonical name for that id exists in lookup.csv. The
-    reverse direction (lookup.csv entries not in dicts) is intentionally NOT
-    enforced — incomplete keyword coverage is fine; drift is not.
 
-    No-ops silently if lookup.csv is absent (fresh-checkout safe; the
-    serving and notebook code already use the same guard pattern).
+def _parse_lookup_csv(
+    lookup_csv_path: "Path",
+) -> tuple[dict[str, set[int]], dict[str, set[tuple[str, int]]]]:
+    """Parse lookup.csv into (valid_ids_per_cat, valid_pairs_per_cat).
 
-    Raises ValueError on drift, with a diff-style message.
+    Done without pandas so this stays an import-time dependency-free check.
     """
-    import os
-    from pathlib import Path
-
-    if lookup_csv_path is None:
-        # data/processed/lookup.csv, resolved relative to this file
-        here = Path(__file__).resolve()
-        # pipelines/collectors/feature_lookups.py -> trndly/data/processed/lookup.csv
-        lookup_csv_path = here.parents[2] / "data" / "processed" / "lookup.csv"
-    lookup_csv_path = Path(lookup_csv_path)
-    if not lookup_csv_path.exists():
-        return
-
-    # Parse without pandas to avoid an import-time pandas dependency.
     valid_ids_per_cat: dict[str, set[int]] = {}
     valid_pairs_per_cat: dict[str, set[tuple[str, int]]] = {}
     with open(lookup_csv_path, encoding="utf-8") as fh:
@@ -917,6 +999,33 @@ def _assert_lookup_csv_matches_dicts(lookup_csv_path: str | None = None) -> None
                 continue
             valid_ids_per_cat.setdefault(category, set()).add(id_int)
             valid_pairs_per_cat.setdefault(category, set()).add((name.lower(), id_int))
+    return valid_ids_per_cat, valid_pairs_per_cat
+
+
+def _assert_lookup_csv_matches_dicts(lookup_csv_path: str | None = None) -> None:
+    """Assert every (name, id) pair in our hand-written *_TO_ID dicts is
+    present in data/reference/lookup.csv. Synonyms (multiple keys → same id)
+    are allowed if the canonical name for that id exists in lookup.csv.
+
+    The reverse direction — lookup IDs not reachable via any dict — is checked
+    by ``_warn_unreachable_lookup_ids`` (a separate, non-fatal warning so that
+    documenting deliberately-unreachable IDs doesn't break imports).
+
+    No-ops silently if lookup.csv is absent (fresh-checkout safe; the
+    serving and notebook code already use the same guard pattern).
+
+    Raises ValueError on drift, with a diff-style message.
+    """
+    from pathlib import Path
+
+    if lookup_csv_path is None:
+        from pipelines.paths import LOOKUP_CSV
+        lookup_csv_path = LOOKUP_CSV
+    lookup_csv_path = Path(lookup_csv_path)
+    if not lookup_csv_path.exists():
+        return
+
+    valid_ids_per_cat, valid_pairs_per_cat = _parse_lookup_csv(lookup_csv_path)
 
     drift: list[str] = []
     for category, dct in _LOOKUP_DICT_CONTRACTS:
@@ -942,10 +1051,76 @@ def _assert_lookup_csv_matches_dicts(lookup_csv_path: str | None = None) -> None
 
     if drift:
         raise ValueError(
-            "feature_lookups.py drift vs data/processed/lookup.csv:\n"
+            f"feature_lookups.py drift vs {lookup_csv_path}:\n"
             + "\n".join(drift)
             + "\nFix the dict, or update lookup.csv if the canonical universe changed."
         )
 
 
+def _compute_unreachable_lookup_ids(
+    lookup_csv_path: str | None = None,
+) -> dict[str, set[int]]:
+    """Return ``{category: ids}`` where ``ids`` are lookup.csv IDs that
+    cannot be produced by any *_TO_ID dict and are NOT in
+    ``_DELIBERATELY_UNREACHABLE_LOOKUP_IDS``. ID 0 (Unknown sentinel) is
+    always considered reachable since every scraper falls back to it.
+
+    Returns an empty dict if every dimension is fully covered.
+    Returns ``None`` if lookup.csv is absent (fresh-checkout safe).
+    """
+    from pathlib import Path
+
+    if lookup_csv_path is None:
+        from pipelines.paths import LOOKUP_CSV
+        lookup_csv_path = LOOKUP_CSV
+    lookup_csv_path = Path(lookup_csv_path)
+    if not lookup_csv_path.exists():
+        return {}
+
+    valid_ids_per_cat, _ = _parse_lookup_csv(lookup_csv_path)
+
+    unreachable: dict[str, set[int]] = {}
+    for category, dct in _LOOKUP_DICT_CONTRACTS:
+        lookup_ids = valid_ids_per_cat.get(category, set())
+        reachable_ids = set(dct.values()) | {0}  # Unknown sentinel
+        allowed = _DELIBERATELY_UNREACHABLE_LOOKUP_IDS.get(category, set())
+        gap = lookup_ids - reachable_ids - allowed
+        if gap:
+            unreachable[category] = gap
+    return unreachable
+
+
+class UnreachableLookupIDWarning(UserWarning):
+    """A lookup.csv ID is in neither a *_TO_ID dict nor the allow-list."""
+
+
+def _warn_unreachable_lookup_ids(lookup_csv_path: str | None = None) -> None:
+    """Emit a UserWarning for any lookup.csv ID not reachable from any dict
+    and not on the ``_DELIBERATELY_UNREACHABLE_LOOKUP_IDS`` allow-list.
+
+    Soft (warning, not raise) so that adding a new lookup ID later doesn't
+    break every importer until a keyword/dict entry is added. CI / tests can
+    convert this to a hard error via ``warnings.simplefilter('error')`` for
+    the ``UnreachableLookupIDWarning`` category.
+    """
+    import warnings
+
+    unreachable = _compute_unreachable_lookup_ids(lookup_csv_path)
+    if not unreachable:
+        return
+    lines = [
+        f"  [{cat}] unreachable: {sorted(ids)}"
+        for cat, ids in sorted(unreachable.items())
+    ]
+    warnings.warn(
+        "feature_lookups.py: lookup.csv IDs not reachable from any *_TO_ID "
+        "dict (and not in _DELIBERATELY_UNREACHABLE_LOOKUP_IDS). Add keyword "
+        "coverage or document the reason in the allow-list:\n"
+        + "\n".join(lines),
+        category=UnreachableLookupIDWarning,
+        stacklevel=2,
+    )
+
+
 _assert_lookup_csv_matches_dicts()
+_warn_unreachable_lookup_ids()

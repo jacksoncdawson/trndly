@@ -92,6 +92,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from pipelines.paths import items_csv_path_for  # noqa: E402
+
 from pipelines.collectors.feature_lookups import (  # noqa: E402
     COLOR_MASTER_TO_ID,
     GENDER_TO_ID,
@@ -159,14 +161,13 @@ DEFAULT_MAX_ATTEMPTS = 5
 # AE recon found ~37% 403s at concurrency 8; recommend 3-4. Default is 3.
 DEFAULT_CONCURRENCY = 3
 
-CSV_FIELDNAMES = [
-    "scraped_at", "retailer",
-    "style_id", "cc_id", "web_product_type",
-    "title", "gender",
-    "color_raw", "product_type_raw", "material_raw", "graphical_appearance_raw",
-    "color_master_id", "color_spectrum_id", "gender_id",
-    "product_type_id", "product_group_id", "material_id", "graphical_appearance_id",
-]
+from pipelines.collectors._http_utils import (  # noqa: E402
+    CSV_FIELDNAMES,
+    StreamingItemWriter,
+)
+# AE keeps its own _request_with_retry — the 1.5**attempt backoff is a
+# deliberate Akamai-stickiness tuning that differs from the shared
+# 2**(attempt-1) schedule. Don't unify without a recon run.
 
 
 # --------------------------------------------------------------------------- #
@@ -569,55 +570,6 @@ def _combo_to_row(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Streaming CSV writer                                                          #
-# --------------------------------------------------------------------------- #
-
-class StreamingItemWriter:
-    def __init__(self, final_path: Path, resume: bool = False) -> None:
-        self.final_path   = final_path
-        self.partial_path = final_path.with_name(final_path.stem + "_partial.csv")
-        self._resume      = resume
-        self._existing: set[tuple[str, str, str]] = set()
-        self._handle      = None
-        self._writer      = None
-
-    def __enter__(self) -> "StreamingItemWriter":
-        if self._resume and self.partial_path.exists():
-            with self.partial_path.open("r", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    self._existing.add((
-                        row.get("style_id", ""),
-                        row.get("cc_id", ""),
-                        row.get("gender", ""),
-                    ))
-            print(f"  [resume] loaded {len(self._existing)} prior keys from {self.partial_path}")
-            self._handle = self.partial_path.open("a", newline="")
-            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
-        else:
-            if self.partial_path.exists():
-                self.partial_path.unlink()
-            self._handle = self.partial_path.open("w", newline="")
-            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
-            self._writer.writeheader()
-            self._handle.flush()
-        return self
-
-    def already_have(self, style_id: str, cc_id: str, gender: str) -> bool:
-        return (style_id, cc_id, gender) in self._existing
-
-    def write(self, row: dict) -> None:
-        self._writer.writerow(row)
-        self._handle.flush()
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self._handle is not None:
-            self._handle.close()
-        if exc_type is None:
-            os.replace(self.partial_path, self.final_path)
-
-
 def _read_existing_rows(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -684,8 +636,7 @@ KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
 # --------------------------------------------------------------------------- #
 
 def parse_args() -> argparse.Namespace:
-    _synth = Path(__file__).resolve().parents[1] / "training" / "synthetic_data"
-    default_items = _synth / "items_american_eagle.csv"
+    default_items = items_csv_path_for("american_eagle")
     parser = argparse.ArgumentParser(
         description="Scrape American Eagle via the internal listing API "
                     "(Playwright bootstrap for JWT + Akamai cookies, then "

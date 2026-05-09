@@ -138,6 +138,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from pipelines.paths import items_csv_path_for  # noqa: E402
+
 from pipelines.collectors.feature_lookups import (  # noqa: E402
     COLOR_MASTER_TO_ID,
     GENDER_TO_ID,
@@ -192,66 +194,18 @@ API_HEADERS = {
     "Referer":         "https://www.gap.com/",
 }
 
-RETRYABLE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
-DEFAULT_MAX_ATTEMPTS = 5
-
-# Output schema. style_id / cc_id / web_product_type are additive provenance
-# fields; the rest match the original H&M-cube-compatible shape.
-CSV_FIELDNAMES = [
-    "scraped_at", "retailer",
-    "style_id", "cc_id", "web_product_type",
-    "title", "gender",
-    "color_raw", "product_type_raw", "material_raw", "graphical_appearance_raw",
-    "color_master_id", "color_spectrum_id", "gender_id",
-    "product_type_id", "product_group_id", "material_id", "graphical_appearance_id",
-]
+from pipelines.collectors._http_utils import (  # noqa: E402
+    CSV_FIELDNAMES,
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_RETRYABLE_STATUSES as RETRYABLE_STATUSES,
+    StreamingItemWriter,
+    request_with_retry as _request_with_retry,
+)
 
 
 # --------------------------------------------------------------------------- #
 # API client                                                                    #
 # --------------------------------------------------------------------------- #
-
-async def _request_with_retry(
-    client: httpx.AsyncClient,
-    url: str,
-    *,
-    params: dict | None = None,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-    label: str = "",
-    verbose: bool = True,
-) -> httpx.Response | None:
-    """GET with exponential-backoff retry on 429/5xx and network errors.
-    Returns the Response on success, None when retries are exhausted.
-    Used by both the listing API and PDP fetchers.
-    """
-    for attempt in range(1, max_attempts + 1):
-        try:
-            r = await client.get(url, params=params, follow_redirects=True)
-            if r.status_code == 200:
-                return r
-            if r.status_code in RETRYABLE_STATUSES:
-                wait = (2 ** (attempt - 1)) + random.uniform(0, 0.6)
-                if verbose:
-                    print(
-                        f"    [http] {label} got {r.status_code}, "
-                        f"retry {attempt}/{max_attempts} in {wait:.1f}s"
-                    )
-                await asyncio.sleep(wait)
-                continue
-            if verbose:
-                print(f"    [http] {label} non-retryable {r.status_code}: {r.text[:200]}")
-            return None
-        except (httpx.TimeoutException, httpx.RequestError) as exc:
-            wait = (2 ** (attempt - 1)) + random.uniform(0, 0.6)
-            if verbose:
-                print(
-                    f"    [http] {label} {type(exc).__name__}: "
-                    f"retry {attempt}/{max_attempts} in {wait:.1f}s"
-                )
-            await asyncio.sleep(wait)
-    if verbose:
-        print(f"    [http] {label} GAVE UP after {max_attempts} attempts")
-    return None
 
 
 async def _fetch_listing_page(
@@ -519,67 +473,6 @@ def _combo_to_row(
     }
 
 
-# --------------------------------------------------------------------------- #
-# Streaming CSV writer with checkpoint/resume                                   #
-# --------------------------------------------------------------------------- #
-
-class StreamingItemWriter:
-    """Append rows to items_gap_partial.csv as they're produced; on close,
-    atomically rename to the final path. If an existing partial is found and
-    `resume` is True, its (style_id, cc_id) keys are loaded so duplicate work
-    is skipped without re-reading on every append.
-    """
-
-    def __init__(self, final_path: Path, resume: bool = False) -> None:
-        self.final_path   = final_path
-        self.partial_path = final_path.with_name(final_path.stem + "_partial.csv")
-        self._resume      = resume
-        # Key includes gender because the same (style_id, cc_id) can legitimately
-        # appear in both the men's and women's catalogs for unisex items.
-        self._existing: set[tuple[str, str, str]] = set()
-        self._handle      = None
-        self._writer      = None
-
-    def __enter__(self) -> "StreamingItemWriter":
-        if self._resume and self.partial_path.exists():
-            with self.partial_path.open("r", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    self._existing.add((
-                        row.get("style_id", ""),
-                        row.get("cc_id", ""),
-                        row.get("gender", ""),
-                    ))
-            print(f"  [resume] loaded {len(self._existing)} prior keys from {self.partial_path}")
-            self._handle = self.partial_path.open("a", newline="")
-            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
-        else:
-            # fresh run — clobber any stale partial
-            if self.partial_path.exists():
-                self.partial_path.unlink()
-            self._handle = self.partial_path.open("w", newline="")
-            self._writer = csv.DictWriter(self._handle, fieldnames=CSV_FIELDNAMES)
-            self._writer.writeheader()
-            self._handle.flush()
-        return self
-
-    def already_have(self, style_id: str, cc_id: str, gender: str) -> bool:
-        return (style_id, cc_id, gender) in self._existing
-
-    def write(self, row: dict) -> None:
-        self._writer.writerow(row)
-        # flush periodically? csv.DictWriter buffers; flush per-call is cheap
-        # for ~5K rows and the durability is worth it.
-        self._handle.flush()
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self._handle is not None:
-            self._handle.close()
-        if exc_type is None:
-            os.replace(self.partial_path, self.final_path)
-        # On exception, leave the partial file in place for inspection / resume.
-
-
 def _read_existing_rows(path: Path) -> list[dict]:
     """Re-read whatever's been written for end-of-run summary stats."""
     if not path.exists():
@@ -653,8 +546,7 @@ KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
 # --------------------------------------------------------------------------- #
 
 def parse_args() -> argparse.Namespace:
-    _synth = Path(__file__).resolve().parents[1] / "training" / "synthetic_data"
-    default_items = _synth / "items_gap.csv"
+    default_items = items_csv_path_for("gap")
     parser = argparse.ArgumentParser(
         description="Scrape Gap via the internal listing API. Writes "
                     "items_gap.csv (one row per product-color variant). "

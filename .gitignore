@@ -33,5 +33,12 @@ env/
 .idea/
 
 # Data
+# Ignore all data/ contents by default, then re-include data/raw/items/ for
+# the committed scrape outputs. Large/regenerated subdirs stay ignored.
 **/data/
+!**/data/
+**/data/processed/
+**/data/models/
+**/data/reference/
+**/data/raw/kaggle/
 .env

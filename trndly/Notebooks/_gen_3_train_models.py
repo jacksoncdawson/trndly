@@ -63,8 +63,8 @@ A persistence (carry-forward) baseline `ŷ_h = share_t` is reported alongside ev
 
 ## Outputs
 
-- `trndly/data/processed/univariate_model.joblib` (NEW)
-- `trndly/data/processed/fingerprint_model.joblib` (NEW)
+- `trndly/data/models/univariate_model.joblib` (NEW)
+- `trndly/data/models/fingerprint_model.joblib` (NEW)
 - `trndly/data/processed/model_training_run.json` (NEW) — run metadata + metrics
 
 ## Splits
@@ -539,8 +539,8 @@ Both models are loadable with `joblib.load(...)` and predict 2D arrays of shape 
 import joblib
 import pandas as pd
 
-uni_model = joblib.load("trndly/data/processed/univariate_model.joblib")
-fp_model  = joblib.load("trndly/data/processed/fingerprint_model.joblib")
+uni_model = joblib.load("trndly/data/models/univariate_model.joblib")
+fp_model  = joblib.load("trndly/data/models/fingerprint_model.joblib")
 
 # X_uni: DataFrame with columns = feature_cols from manifest (univariate)
 # X_fp:  DataFrame with columns = feature_cols from manifest (fingerprint)

@@ -94,7 +94,7 @@ The existing `champion` alias used by serving is **never** auto-overwritten — 
 - No automatic `champion` alias flip. Promotion requires human review (UI or one-line `MlflowClient` call).
 - No randomized / Bayesian search. With 14 anchor months a 12-cell grid is already saturating; switch to `RandomizedSearchCV` or Optuna only after live data extends the time axis.
 - No data version logging. When `aggregate_live.ipynb` lands, add `mlflow.log_input(...)` against a parquet hash so each run pins its training data.
-- No on-cloud submission. `scripts/submit_vertex_training.py` owns Vertex; this notebook is the local / reproducible reference sweep.
+- No on-cloud submission. This notebook is the local / reproducible reference sweep; cloud sweep wiring is a follow-up.
 """
         )
     )

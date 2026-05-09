@@ -1,0 +1,233 @@
+/* =============================================================
+   trndly — Design Tokens
+   Source of truth for colors, typography, spacing, motion.
+   Light, warm-cream, playful-but-considered. Mobile-first.
+   ============================================================= */
+
+:root {
+  /* ------------------------------------------------------------
+     COLOR — Surfaces (warm cream paper)
+     Backgrounds step from the warmest cream up to whitest card.
+     Cards sit ON the page (they're slightly LIGHTER than the bg)
+     to feel like pinned notes on warm paper.
+     ------------------------------------------------------------ */
+  --color-bg:            #fbf6ee;  /* warm cream — the page */
+  --color-surface-1:     #ffffff;  /* primary card surface */
+  --color-surface-2:     #fdfaf3;  /* nested / hover card */
+  --color-surface-3:     #f5ede0;  /* tinted callout / sidebar */
+  --color-surface-sunk:  #f0e7d5;  /* inputs, "into the paper" wells */
+
+  --color-border:        #1a1a1a;  /* PRIMARY: bold black outlines */
+  --color-border-soft:   #e6dcc8;  /* hairline divider on cream */
+  --color-border-strong: #1a1a1a;  /* same as primary; alias */
+  --color-divider:       #ece2cf;
+
+  /* ------------------------------------------------------------
+     COLOR — Text
+     Off-black instead of pure black — softer on cream.
+     ------------------------------------------------------------ */
+  --color-text-primary:   #1a1a1a;  /* headings, body */
+  --color-text-secondary: #5a544a;  /* warm grey-brown */
+  --color-text-tertiary:  #8a8275;  /* metadata, hints */
+  --color-text-inverse:   #fbf6ee;  /* on dark/saturated surfaces */
+
+  /* ------------------------------------------------------------
+     COLOR — Brand & Pop accents
+     A small cast of saturated-but-earthy colors. They POP on
+     cream because of contrast, not neon. Each has a job.
+     ------------------------------------------------------------ */
+  --color-primary:        #2d5e3e;  /* deep forest — primary brand */
+  --color-primary-hover:  #234d31;
+  --color-primary-soft:   #d8e7dc;  /* tinted bg */
+  --color-primary-fg:     #fbf6ee;
+
+  /* The pop palette — used for charts, callouts, category tags */
+  --color-pop-rust:    #d96941;  /* burnt orange — "rising" */
+  --color-pop-mustard: #e8b840;  /* mustard yellow — "peak" */
+  --color-pop-coral:   #e87168;  /* coral pink — "falling" */
+  --color-pop-sky:     #6ba8c9;  /* dusty sky blue */
+  --color-pop-plum:    #8b5a8c;  /* dusty plum */
+  --color-pop-sage:    #8fb085;  /* sage green */
+
+  /* Tinted bg variants (cream-mixed) for backgrounds of pop colors */
+  --color-pop-rust-soft:    #f5dccd;
+  --color-pop-mustard-soft: #f8ebc9;
+  --color-pop-coral-soft:   #f8dcd8;
+  --color-pop-sky-soft:     #d9e6ed;
+  --color-pop-plum-soft:    #e3d3e4;
+  --color-pop-sage-soft:    #dde7d6;
+
+  /* ------------------------------------------------------------
+     COLOR — Semantic
+     Mapped onto the pop palette so the system stays unified.
+     ------------------------------------------------------------ */
+  --color-success: #2d5e3e;        /* primary forest */
+  --color-warning: #e8b840;        /* mustard */
+  --color-danger:  #c64a3a;        /* deeper rust for alerts */
+  --color-info:    #6ba8c9;        /* sky */
+
+  --color-success-bg: #d8e7dc;
+  --color-warning-bg: #f8ebc9;
+  --color-danger-bg:  #f5d6d0;
+  --color-info-bg:    #d9e6ed;
+
+  /* ------------------------------------------------------------
+     COLOR — Trend states (semantic for the product domain)
+     This is unique to trndly: every feature has a trend state,
+     and we use the same three colors for it everywhere.
+     ------------------------------------------------------------ */
+  --color-trend-rising:  #2d5e3e;  /* forest — buy now, popularity climbing */
+  --color-trend-peak:    #e8b840;  /* mustard — sell now, at peak */
+  --color-trend-falling: #c64a3a;  /* rust — declining */
+  --color-trend-flat:    #8a8275;  /* warm grey — stable */
+
+  --color-trend-rising-soft:  #d8e7dc;
+  --color-trend-peak-soft:    #f8ebc9;
+  --color-trend-falling-soft: #f5d6d0;
+  --color-trend-flat-soft:    #ece2cf;
+
+  /* ------------------------------------------------------------
+     COLOR — Data Visualization
+     Ordered for chart series. Pop colors first, with built-in
+     spacing on the color wheel for accessibility.
+     ------------------------------------------------------------ */
+  --chart-1: #2d5e3e;  /* forest */
+  --chart-2: #d96941;  /* rust */
+  --chart-3: #e8b840;  /* mustard */
+  --chart-4: #6ba8c9;  /* sky */
+  --chart-5: #8b5a8c;  /* plum */
+  --chart-6: #8fb085;  /* sage */
+
+  /* Past / present / future — used heavily in trndly charts */
+  --chart-past:    #b5ad9c;  /* warm muted grey — "what happened" */
+  --chart-present: #1a1a1a;  /* the now line, bold */
+  --chart-future:  #2d5e3e;  /* forest — "predicted" */
+
+  /* ------------------------------------------------------------
+     TYPOGRAPHY
+     Two families: a friendly geometric sans (Inter for now,
+     swappable for Söhne/General Sans), and a chunky display
+     for headlines and big numbers. Tabular lining figures
+     enabled by default for chart axes and metrics.
+     ------------------------------------------------------------ */
+  --font-sans:    "Inter", "InterVariable", -apple-system, BlinkMacSystemFont,
+                  "Segoe UI", Roboto, sans-serif;
+  --font-display: "Fraunces", "Inter", "InterVariable", Georgia, serif;
+  --font-mono:    "JetBrains Mono", "IBM Plex Mono", "SF Mono",
+                  ui-monospace, Menlo, Consolas, monospace;
+
+  /* Type scale — 1.250 major third, anchored at 16px body */
+  --text-2xs: 0.6875rem;  /* 11 — tags */
+  --text-xs:  0.8125rem;  /* 13 — captions */
+  --text-sm:  0.9375rem;  /* 15 — secondary body */
+  --text-base:1rem;       /* 16 — body */
+  --text-md:  1.125rem;   /* 18 — emphasized body */
+  --text-lg:  1.375rem;   /* 22 — small heading */
+  --text-xl:  1.75rem;    /* 28 — h3 */
+  --text-2xl: 2.25rem;    /* 36 — h2 */
+  --text-3xl: 3rem;       /* 48 — h1 */
+  --text-4xl: 4rem;       /* 64 — display number */
+
+  /* Weights */
+  --font-weight-regular:  400;
+  --font-weight-medium:   500;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+  --font-weight-black:    800;  /* for big metric numbers */
+
+  /* Line heights */
+  --leading-tight:   1.1;
+  --leading-snug:    1.25;
+  --leading-normal:  1.5;
+  --leading-relaxed: 1.7;
+
+  /* Letter spacing */
+  --tracking-tight:  -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide:   0.04em;
+  --tracking-caps:   0.08em;
+
+  /* ------------------------------------------------------------
+     SPACING — 4px base
+     ------------------------------------------------------------ */
+  --space-0: 0;
+  --space-1: 0.25rem;  /* 4  */
+  --space-2: 0.5rem;   /* 8  */
+  --space-3: 0.75rem;  /* 12 */
+  --space-4: 1rem;     /* 16 */
+  --space-5: 1.5rem;   /* 24 */
+  --space-6: 2rem;     /* 32 */
+  --space-7: 3rem;     /* 48 */
+  --space-8: 4rem;     /* 64 */
+  --space-9: 6rem;     /* 96 */
+
+  /* ------------------------------------------------------------
+     RADII — generous, rounded, inviting
+     The signature: cards have notable curvature. Pills are full.
+     ------------------------------------------------------------ */
+  --radius-xs:   4px;
+  --radius-sm:   8px;
+  --radius-md:   12px;
+  --radius-lg:   16px;
+  --radius-xl:   24px;
+  --radius-2xl:  32px;
+  --radius-full: 9999px;
+
+  /* ------------------------------------------------------------
+     BORDERS — bold black outlines are part of the brand
+     2px is the default. Cards, buttons, badges all carry weight.
+     ------------------------------------------------------------ */
+  --border-width-1: 1px;
+  --border-width-2: 2px;
+  --border-width-3: 3px;
+
+  /* ------------------------------------------------------------
+     ELEVATION — offset "stamp" shadows on cream
+     Hard, slightly-offset shadows feel like risograph or
+     printed paper. No fancy blur stacks.
+     ------------------------------------------------------------ */
+  --shadow-xs:    1px 1px 0 0 var(--color-border);
+  --shadow-sm:    2px 2px 0 0 var(--color-border);
+  --shadow-md:    4px 4px 0 0 var(--color-border);
+  --shadow-lg:    6px 6px 0 0 var(--color-border);
+
+  /* Soft fallback shadows for cases where stamp is too loud */
+  --shadow-soft-sm: 0 2px 6px rgba(26,26,26,0.06);
+  --shadow-soft-md: 0 8px 20px rgba(26,26,26,0.08);
+
+  /* ------------------------------------------------------------
+     MOTION
+     Slightly springy on enter, snappy exit. Playful but quick.
+     ------------------------------------------------------------ */
+  --duration-instant: 80ms;
+  --duration-fast:    160ms;
+  --duration-base:    240ms;
+  --duration-slow:    400ms;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring:   cubic-bezier(0.34, 1.4, 0.64, 1);  /* light overshoot */
+  --ease-exit:     cubic-bezier(0.4, 0, 1, 1);
+
+  /* ------------------------------------------------------------
+     LAYOUT — mobile-first widths
+     ------------------------------------------------------------ */
+  --container-xs:  380px;
+  --container-sm:  640px;
+  --container-md:  840px;
+  --container-lg:  1080px;
+  --container-xl:  1320px;
+  --container-full:100%;
+
+  --z-base:    0;
+  --z-raised:  10;
+  --z-sticky:  100;
+  --z-overlay: 1000;
+  --z-modal:   1100;
+  --z-toast:   1200;
+
+  /* ------------------------------------------------------------
+     FOCUS RING — primary forest, generous on cream
+     ------------------------------------------------------------ */
+  --focus-ring: 0 0 0 3px var(--color-primary-soft),
+                0 0 0 5px var(--color-primary);
+}

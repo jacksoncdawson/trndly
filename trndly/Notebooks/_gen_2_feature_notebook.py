@@ -237,7 +237,7 @@ fp.head(3)
             r"""fp_raw, fp_stats = build_calendar_strict_rows(
     fp,
     key_cols=FINGERPRINT_COLS,
-    extra_at_t={"avg_price_t": "avg_price"},
+    extra_at_t=None,
 )
 print("Part B calendar-strict stats:", fp_stats)
 
@@ -248,7 +248,7 @@ fp_train["sample_weight"] = np.sqrt(np.maximum(fp_train["n_articles"].astype(flo
 fp_train = assign_split_group(fp_train, "anchor_month")
 
 FINGERPRINT_META = ["anchor_month", *FINGERPRINT_COLS, "source", "split_group", "sample_weight", "n_articles"]
-FINGERPRINT_FEATURE_COLS = ["month_of_year", "share_t", "avg_price_t"] + [
+FINGERPRINT_FEATURE_COLS = ["month_of_year", "share_t"] + [
     f"share_lag{i}" for i in range(1, LAG_PAST_MONTHS + 1)
 ]
 FINGERPRINT_TARGET_COLS = [f"y_h{h}" for h in HORIZONS]
@@ -333,8 +333,10 @@ assert dup_fp == 0, f"fingerprint duplicate keys: {dup_fp}"
 
 for h in HORIZONS:
     assert fp_train[f"y_h{h}"].notna().all(), f"fp y_h{h} has nulls"
-assert fp_train["avg_price_t"].notna().all(), "avg_price_t has nulls on kept rows"
-assert np.isfinite(fp_train["avg_price_t"]).all(), "avg_price_t non-finite"
+# avg_price_t was dropped from FINGERPRINT_FEATURE_COLS — the feature
+# wasn't carrying its weight and the live cube emits NaN price (price
+# isn't scraped), which would silently bias predictions on live anchors
+# once live accumulates ≥4 contiguous months of history.
 for sg in ["train", "val", "holdout"]:
     assert (fp_train["split_group"] == sg).any(), f"fingerprint missing split {sg}"
 
@@ -387,11 +389,11 @@ print(f"rows: {len(fp_train):,}  |  columns: {len(fp_train.columns)}  |  memory 
 print(f"anchor_month: {fp_train['anchor_month'].min()} .. {fp_train['anchor_month'].max()}  |  unique anchors: {fp_train['anchor_month'].nunique()}")
 print("\nrows per split_group:")
 print(fp_train["split_group"].value_counts().sort_index())
-print("\nnumeric summary (features + targets + weight + avg_price_t):")
+print("\nnumeric summary (features + targets + weight):")
 _num_f = FINGERPRINT_FEATURE_COLS + FINGERPRINT_TARGET_COLS + ["sample_weight", "n_articles"]
 print(fp_train[_num_f].describe(percentiles=[0.05, 0.5, 0.95]).T.round(6))
 
-_disp_f = ["anchor_month", "product_type_id", "gender_id", "color_master_id", "split_group", "share_t", "avg_price_t", "y_h1", "y_h6"]
+_disp_f = ["anchor_month", "product_type_id", "gender_id", "color_master_id", "split_group", "share_t", "y_h1", "y_h6"]
 print("\n--- sample: first 3 rows ---")
 print(fp_train[_disp_f].head(3).to_string())
 print("\n--- sample: random 3 rows (seed=42) ---")
@@ -471,7 +473,7 @@ if len(fp_counts):
 
     tfeat = "`, `".join(["month_of_year", "share_t"] + [f"share_lag{i}" for i in range(1, 4)])
     ttarg = "`, `".join([f"y_h{h}" for h in range(1, 7)])
-    ffeat = "`, `".join(["month_of_year", "share_t", "avg_price_t"] + [f"share_lag{i}" for i in range(1, 4)])
+    ffeat = "`, `".join(["month_of_year", "share_t"] + [f"share_lag{i}" for i in range(1, 4)])
     ftarg = ttarg
 
     cells.append(

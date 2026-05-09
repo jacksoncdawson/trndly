@@ -1,26 +1,35 @@
-"""Natural-language → fingerprint/univariate inference helpers.
+"""Forecast inference helpers for the trndly serving layer.
 
-Resolve free-text queries against ``lookup.csv`` + ``merged_fingerprint.parquet``,
-then call MLflow-loaded sklearn/pyfunc forecast models produced by notebooks ``3_*`` / ``4_*``.
+Two explicit modes, each driven by user-supplied IDs (no text resolution):
+
+  - ``forecast_fingerprint(dimensions, deps)`` — caller supplies all five
+    fingerprint IDs (``product_type_id``, ``gender_id``, ``color_master_id``,
+    ``graphical_appearance_id``, ``material_id``); returns the
+    horizon-1..6 share forecast averaged across matching cube rows.
+  - ``forecast_univariate(dimension, level_id, deps)`` — caller supplies
+    one ``(dimension, level_id)`` pair; returns the horizon-1..6 share
+    forecast for that single series.
+
+Models are loaded from the MLflow registry first, falling back to local
+``*.joblib`` artifacts produced by notebook ``3_*``.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import DateOffset
 
-from pipelines.training.paths import (
-    LOOKUP_CSV,
+from pipelines.paths import (
+    FINGERPRINT_MODEL_JOBLIB,
     MERGED_FINGERPRINT_PARQUET,
-    PROCESSED_DATA_DIR,
     TRAINING_RUN_JSON,
+    UNIVARIATE_MODEL_JOBLIB,
 )
 
 FINGERPRINT_COLS = [
@@ -31,7 +40,7 @@ FINGERPRINT_COLS = [
     "material_id",
 ]
 
-LOOKUP_CATEGORIES = {
+UNIVARIATE_DIMENSIONS = {
     "product_type",
     "product_group",
     "graphical_appearance",
@@ -41,24 +50,7 @@ LOOKUP_CATEGORIES = {
     "material",
 }
 
-SYNONYMS: dict[str, str] = {
-    "pants": "trousers",
-    "jeans": "denim",
-    "tee": "t-shirt",
-    "tshirt": "t-shirt",
-    "trouser": "trousers",
-}
-
-COMPOSITE_PHRASES: list[tuple[str, str, str]] = [
-    ("all over pattern", "graphical_appearance", "All over pattern"),
-    ("colour blocking", "graphical_appearance", "Colour blocking"),
-    ("solid color", "graphical_appearance", "Solid"),
-]
-
-
-def load_lookup_csv(path: str | Path | None = None) -> pd.DataFrame:
-    p = Path(path or LOOKUP_CSV)
-    return pd.read_csv(p)
+HORIZONS = [f"y_h{h}" for h in range(1, 7)]
 
 
 def load_feature_contract(path: str | Path | None = None) -> dict[str, Any]:
@@ -78,89 +70,34 @@ def month_shift(ts: pd.Timestamp, k: int) -> pd.Timestamp:
     return ts + DateOffset(months=k)
 
 
-def build_lookup_name_index(lookup: pd.DataFrame) -> dict[str, list[tuple[str, int]]]:
-    idx: dict[str, list[tuple[str, int]]] = {}
-    for _, row in lookup.iterrows():
-        cat = str(row["category"])
-        if cat not in LOOKUP_CATEGORIES:
-            continue
-        key = str(row["name"]).strip().lower()
-        idx.setdefault(key, []).append((cat, int(row["id"])))
-    return idx
+# --------------------------------------------------------------------------- #
+# Cube slicing                                                                  #
+# --------------------------------------------------------------------------- #
 
-
-def tokenize(query: str) -> list[str]:
-    return [t for t in re.findall(r"[a-z0-9]+", query.lower()) if t]
-
-
-def resolve_query_to_dimensions(query: str, lookup: pd.DataFrame) -> dict[str, int]:
-    """Map text tokens to at most one id per lookup ``category``."""
-
-    idx = build_lookup_name_index(lookup)
-    resolved: dict[str, int] = {}
-    q = query.lower().strip()
-
-    for phrase, cat, canonical_name in COMPOSITE_PHRASES:
-        if phrase in q:
-            hit = lookup[(lookup["category"] == cat) & (lookup["name"] == canonical_name)]
-            if not hit.empty:
-                resolved[cat] = int(hit.iloc[0]["id"])
-
-    tokens = tokenize(query)
-    tokens = [SYNONYMS.get(t, t) for t in tokens]
-
-    for tok in tokens:
-        hits = idx.get(tok)
-        if not hits:
-            continue
-        for cat, lid in hits:
-            if cat not in resolved:
-                resolved[cat] = lid
-
-    return resolved
-
-
-def fingerprint_subset_mask(cube: pd.DataFrame, resolved: dict[str, int]) -> pd.Series:
+def _fingerprint_mask(cube: pd.DataFrame, dimensions: dict[str, int]) -> pd.Series:
     mask = pd.Series(True, index=cube.index)
-    for cat, lid in resolved.items():
-        if cat == "product_group":
-            continue
-        col = f"{cat}_id"
+    for col, lid in dimensions.items():
         if col not in cube.columns:
             continue
         mask &= cube[col] == lid
     return mask
 
 
-def dimension_key_for_fallback(resolved: dict[str, int]) -> tuple[str, int] | None:
-    priority = (
-        "product_type",
-        "product_group",
-        "material",
-        "color_master",
-        "graphical_appearance",
-        "color_spectrum",
-        "gender",
-    )
-    for cat in priority:
-        if cat in resolved:
-            return cat, int(resolved[cat])
-    return None
-
-
 def build_fingerprint_inference_rows(
     cube: pd.DataFrame,
     *,
     anchor_month: pd.Timestamp,
-    resolved_partial: dict[str, int],
+    dimensions: dict[str, int],
 ) -> tuple[pd.DataFrame, list[tuple[Any, ...]]]:
-    """Return feature matrix rows for every fingerprint matching ``resolved_partial`` at ``anchor_month``."""
+    """Return feature matrix rows for every fingerprint matching ``dimensions``
+    at ``anchor_month``. Each row needs t-3..t-1 lags present in the cube.
+    """
 
     cube = cube.copy()
     cube["month"] = pd.to_datetime(cube["month"]).dt.as_unit("ns")
 
     mask_anchor = cube["month"] == anchor_month
-    mask_fp = fingerprint_subset_mask(cube, resolved_partial)
+    mask_fp = _fingerprint_mask(cube, dimensions)
     slice_anchor = cube.loc[mask_anchor & mask_fp].drop_duplicates(subset=FINGERPRINT_COLS)
 
     feature_cols_expected = load_feature_contract()["fingerprint_feature_cols"]
@@ -170,14 +107,13 @@ def build_fingerprint_inference_rows(
 
     for _, fp_row in slice_anchor.iterrows():
         key_tuple = tuple(int(fp_row[c]) for c in FINGERPRINT_COLS)
-        sub = cube[np.logical_and.reduce([cube[c] == fp_row[c] for c in FINGERPRINT_COLS])].sort_values(
-            "month"
-        )
+        sub = cube[
+            np.logical_and.reduce([cube[c] == fp_row[c] for c in FINGERPRINT_COLS])
+        ].sort_values("month")
         idx = sub.set_index("month")
         if anchor_month not in idx.index:
             continue
         share = idx["share_articles"]
-        price = idx["avg_price"]
 
         need_prev = [month_shift(anchor_month, -k) for k in range(1, 4)]
         if not all(m in share.index for m in need_prev):
@@ -187,7 +123,6 @@ def build_fingerprint_inference_rows(
             {
                 "month_of_year": float(idx.loc[anchor_month, "month_of_year"]),
                 "share_t": float(share.loc[anchor_month]),
-                "avg_price_t": float(price.loc[anchor_month]),
                 "share_lag1": float(share.loc[need_prev[0]]),
                 "share_lag2": float(share.loc[need_prev[1]]),
                 "share_lag3": float(share.loc[need_prev[2]]),
@@ -209,7 +144,7 @@ def build_univariate_inference_row(
     dimension: str,
     level_id: int,
 ) -> pd.Series | None:
-    """Pull one calendar-strict row from ``merged_univariate.parquet``-style long cube."""
+    """Pull one calendar-strict row from the merged univariate cube."""
 
     sub = cube_long[
         (cube_long["dimension"] == dimension)
@@ -240,13 +175,16 @@ def build_univariate_inference_row(
     )[fc]
 
 
+# --------------------------------------------------------------------------- #
+# Model loading                                                                 #
+# --------------------------------------------------------------------------- #
+
 @dataclass
 class ForecastDeps:
     fingerprint_model: Any
     univariate_model: Any | None
     cube_fp: pd.DataFrame
     cube_uni: pd.DataFrame | None
-    lookup: pd.DataFrame
 
 
 def load_forecast_pair(
@@ -274,8 +212,8 @@ def load_forecast_pair(
         except Exception as exc:
             last_exc = exc
 
-    fp_path = PROCESSED_DATA_DIR / "fingerprint_model.joblib"
-    uni_path = PROCESSED_DATA_DIR / "univariate_model.joblib"
+    fp_path = FINGERPRINT_MODEL_JOBLIB
+    uni_path = UNIVARIATE_MODEL_JOBLIB
     if fp_path.exists():
         fp_model = joblib.load(fp_path)
         uni_model = (
@@ -296,9 +234,13 @@ def load_forecast_pair(
     raise err
 
 
-def _prediction_frame(X: pd.DataFrame) -> pd.DataFrame:
-    """Coerce numeric columns to float32 so MLflow pyfunc input schemas match pandas defaults."""
+# --------------------------------------------------------------------------- #
+# Inference utilities                                                           #
+# --------------------------------------------------------------------------- #
 
+def _prediction_frame(X: pd.DataFrame) -> pd.DataFrame:
+    """Coerce numeric columns to float32 so MLflow pyfunc input schemas match
+    pandas defaults."""
     out = X.copy()
     for col in out.columns:
         if np.issubdtype(out[col].dtype, np.number):
@@ -316,61 +258,102 @@ def pick_anchor_month(user_month: int | None, cube: pd.DataFrame) -> pd.Timestam
     return pd.Timestamp(candidates.max())
 
 
-def forecast_from_text(
-    query: str,
+# --------------------------------------------------------------------------- #
+# Public entrypoints                                                            #
+# --------------------------------------------------------------------------- #
+
+def forecast_fingerprint(
+    dimensions: dict[str, int],
     deps: ForecastDeps,
     *,
-    reference_month_of_year: int | None = None,
+    reference_month: int | None = None,
 ) -> dict[str, Any]:
-    """Main entrypoint used by FastAPI + notebook 5."""
+    """Predict the next 6 months of catalog share for a fingerprint.
 
-    resolved = resolve_query_to_dimensions(query, deps.lookup)
+    ``dimensions`` must include all five fingerprint id columns
+    (``product_type_id``, ``gender_id``, ``color_master_id``,
+    ``graphical_appearance_id``, ``material_id``). If multiple cube rows
+    match (e.g., one per source), predictions are averaged across them.
+    """
 
-    anchor = pick_anchor_month(reference_month_of_year, deps.cube_fp)
+    missing = [c for c in FINGERPRINT_COLS if c not in dimensions]
+    if missing:
+        raise ValueError(f"missing fingerprint dimensions: {missing}")
+    extras = set(dimensions) - set(FINGERPRINT_COLS)
+    if extras:
+        raise ValueError(f"unexpected dimensions: {sorted(extras)}")
 
-    X_fp, fp_keys = build_fingerprint_inference_rows(
-        deps.cube_fp, anchor_month=anchor, resolved_partial=resolved
+    anchor = pick_anchor_month(reference_month, deps.cube_fp)
+    X, keys = build_fingerprint_inference_rows(
+        deps.cube_fp, anchor_month=anchor, dimensions=dimensions
     )
 
-    horizons = [f"y_h{h}" for h in range(1, 7)]
     out: dict[str, Any] = {
-        "query": query.strip(),
-        "resolved_dimensions": resolved,
+        "dimensions": {k: int(v) for k, v in dimensions.items()},
         "anchor_month": anchor.isoformat(),
-        "reference_month_of_year_used": int(deps.cube_fp.loc[deps.cube_fp["month"] == anchor, "month_of_year"].iloc[0]),
-        "mode": None,
-        "fingerprint_matches": len(fp_keys),
-        "fingerprint_keys_sample": [list(k) for k in fp_keys[:5]],
+        "reference_month_of_year_used": int(
+            deps.cube_fp.loc[deps.cube_fp["month"] == anchor, "month_of_year"].iloc[0]
+        ),
+        "fingerprint_matches": len(keys),
+        "fingerprint_keys_sample": [list(k) for k in keys[:5]],
+        "horizons": HORIZONS,
         "forecast": None,
-        "horizons": horizons,
     }
 
-    if not X_fp.empty:
-        raw = deps.fingerprint_model.predict(_prediction_frame(X_fp))
-        arr = np.asarray(raw, dtype=float)
-        mean_forecast = arr.mean(axis=0).tolist()
-        out["mode"] = "fingerprint"
-        out["forecast"] = dict(zip(horizons, mean_forecast))
+    if X.empty:
+        out["error"] = (
+            "No cube coverage at the anchor month for this fingerprint, or "
+            "insufficient lag history (need t-3..t)."
+        )
         return out
 
-    if deps.univariate_model is not None and deps.cube_uni is not None:
-        fb = dimension_key_for_fallback(resolved)
-        if fb:
-            dim, lid = fb
-            row = build_univariate_inference_row(
-                deps.cube_uni, anchor_month=anchor, dimension=dim, level_id=lid
-            )
-            if row is not None:
-                raw = deps.univariate_model.predict(_prediction_frame(row.to_frame().T))
-                out["mode"] = f"univariate:{dim}"
-                out["forecast"] = dict(zip(horizons, np.asarray(raw, dtype=float).ravel().tolist()))
-                out["fallback_dimension"] = dim
-                out["fallback_level_id"] = lid
-                return out
+    raw = deps.fingerprint_model.predict(_prediction_frame(X))
+    arr = np.asarray(raw, dtype=float)
+    mean_forecast = arr.mean(axis=0).tolist()
+    out["forecast"] = dict(zip(HORIZONS, mean_forecast))
+    return out
 
-    out["mode"] = "unresolved"
-    out["error"] = (
-        "Could not resolve tokens to lookup IDs with cube coverage at the anchor month, "
-        "or insufficient history for lags. Try adding product type / material / color tokens."
+
+def forecast_univariate(
+    dimension: str,
+    level_id: int,
+    deps: ForecastDeps,
+    *,
+    reference_month: int | None = None,
+) -> dict[str, Any]:
+    """Predict the next 6 months of catalog share for one
+    ``(dimension, level_id)`` series."""
+
+    if dimension not in UNIVARIATE_DIMENSIONS:
+        raise ValueError(
+            f"unknown dimension {dimension!r}; expected one of {sorted(UNIVARIATE_DIMENSIONS)}"
+        )
+
+    if deps.univariate_model is None:
+        raise RuntimeError("univariate model is not loaded")
+    if deps.cube_uni is None:
+        raise RuntimeError("univariate cube is not loaded")
+
+    anchor = pick_anchor_month(reference_month, deps.cube_uni)
+    row = build_univariate_inference_row(
+        deps.cube_uni, anchor_month=anchor, dimension=dimension, level_id=int(level_id)
     )
+
+    out: dict[str, Any] = {
+        "dimension": dimension,
+        "level_id": int(level_id),
+        "anchor_month": anchor.isoformat(),
+        "horizons": HORIZONS,
+        "forecast": None,
+    }
+
+    if row is None:
+        out["error"] = (
+            f"No cube coverage for ({dimension}, level_id={level_id}) at the "
+            "anchor month, or insufficient lag history (need t-3..t)."
+        )
+        return out
+
+    raw = deps.univariate_model.predict(_prediction_frame(row.to_frame().T))
+    out["forecast"] = dict(zip(HORIZONS, np.asarray(raw, dtype=float).ravel().tolist()))
     return out
