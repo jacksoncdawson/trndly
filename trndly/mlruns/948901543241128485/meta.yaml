@@ -1,8 +1,0 @@
-artifact_location: file:///Users/vivianjohnson/Desktop/MLOps-Project/trndly/mlruns/948901543241128485
-creation_time: 1777569018344
-experiment_id: '948901543241128485'
-last_update_time: 1777569018344
-lifecycle_stage: active
-name: trndly-trend-forecasters
-trace_location: null
-workspace: default

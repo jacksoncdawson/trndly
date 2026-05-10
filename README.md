@@ -36,6 +36,7 @@ in `trndly/`.
 ```
 
 Two RandomForest regressors:
+
 - **Univariate** — one row per `(dimension, level_id)`. Powers trend exploration.
 - **Fingerprint** — one row per 5-D `(product_type, gender, color_master, graphical_appearance, material)`. Powers per-item recommendations.
 
@@ -43,8 +44,8 @@ Two RandomForest regressors:
 
 ```bash
 cd trndly                                                  # the inner package dir
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+python -m venv .venv
+./scripts/setup_venv.sh                                    # pip install + playwright install chromium
 
 # One-time bootstrap from the H&M Kaggle dump (places it in data/raw/kaggle/)
 .venv/bin/python notebooks/_run_notebook.py notebooks/0_clean_historical.ipynb
@@ -67,16 +68,19 @@ Then open `http://localhost:8000/ui/` for the React app or
 
 `python -m pipelines.monthly run` drives six stages end-to-end:
 
-| Stage | What it does | Output |
-|---|---|---|
-| `scrape` | Subprocess each retailer scraper + `build_live_cube` | `data/raw/items/`, `data/processed/live_*_<YYYY-MM>.parquet` |
-| `aggregate` | Concat historical + live cubes with dedup | `data/processed/merged_*.parquet` |
-| `features` | Calendar-strict windowing (lags + 6 targets) | `data/processed/training_*.parquet` |
-| `train` | Fit RandomForest, log to MLflow, persist joblibs | `data/models/*.joblib`, `model_training_run.json` |
-| `evaluate` | Compare candidate vs incumbent WMAE; auto-promote | `data/models/champion_metrics.json` (on promotion) |
-| `predict` | Score the universe, classify state, write parquet | `data/predictions/predictions_*_<YYYY-MM>.parquet` |
+
+| Stage       | What it does                                         | Output                                                       |
+| ----------- | ---------------------------------------------------- | ------------------------------------------------------------ |
+| `scrape`    | Subprocess each retailer scraper + `build_live_cube` | `data/raw/items/`, `data/processed/live_*_<YYYY-MM>.parquet` |
+| `aggregate` | Concat historical + live cubes with dedup            | `data/processed/merged_*.parquet`                            |
+| `features`  | Calendar-strict windowing (lags + 6 targets)         | `data/processed/training_*.parquet`                          |
+| `train`     | Fit RandomForest, log to MLflow, persist joblibs     | `data/models/*.joblib`, `model_training_run.json`            |
+| `evaluate`  | Compare candidate vs incumbent WMAE; auto-promote    | `data/models/champion_metrics.json` (on promotion)           |
+| `predict`   | Score the universe, classify state, write parquet    | `data/predictions/predictions_*_<YYYY-MM>.parquet`           |
+
 
 Stages are also runnable individually:
+
 ```bash
 python -m pipelines.monthly aggregate
 python -m pipelines.monthly evaluate
@@ -91,13 +95,15 @@ full operator runbook (prereqs, debugging, common failures).
 
 All routes are `GET`; no POST triggers a model call.
 
-| Route | Behavior |
-|---|---|
-| `GET /options` | Dropdown vocabularies, `[{name, id}]` per category |
-| `GET /trends` | Univariate predictions. Filters: `?dimension=&state=` |
+
+| Route                                                                                                          | Behavior                                               |
+| -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `GET /options`                                                                                                 | Dropdown vocabularies, `[{name, id}]` per category     |
+| `GET /trends`                                                                                                  | Univariate predictions. Filters: `?dimension=&state=`  |
 | `GET /forecast/fingerprint?product_type_id=&gender_id=&color_master_id=&graphical_appearance_id=&material_id=` | One fingerprint forecast (404 if no precomputed match) |
-| `GET /health` | Bundle status + anchor month |
-| `/ui/*` | Static React app |
+| `GET /health`                                                                                                  | Bundle status + anchor month                           |
+| `/ui/*`                                                                                                        | Static React app                                       |
+
 
 Full request/response shapes in [trndly/docs/api.md](trndly/docs/api.md).
 
@@ -130,8 +136,10 @@ Live retailer smoke checks are gated behind `pytest -m live`.
 **Shipped:** monthly batch architecture (manual cadence), precomputed predictions, read-only FastAPI service, React frontend wired to API via SWR.
 
 **Future** (out of scope for current MVP):
+
 - Storage migration: local parquet → GCS / BigQuery
 - Cloud cadence: manual CLI → Cloud Scheduler + Vertex Custom Container job
 - Frontend hosting split: Firebase Hosting (static) + Cloud Run (API)
 - Auth: Firebase Auth + per-user inventory in Firestore
 - Container split: separate images for collectors / monthly tick / API
+

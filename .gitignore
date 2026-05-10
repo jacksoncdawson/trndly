@@ -42,3 +42,7 @@ env/
 **/data/reference/
 **/data/raw/kaggle/
 .env
+
+# MLflow
+**/mlflow.db
+**/mlruns/
