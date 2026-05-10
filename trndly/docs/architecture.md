@@ -5,13 +5,12 @@ apparel resellers list and source inventory at the right time. Two
 RandomForest regressors produce 6-horizon catalog-share forecasts:
 
 - **Univariate model** — one row per `(dimension, level_id)`. Trains on
-  per-feature time series (every color, every material, every product
-  type, etc.) at the cube grain. Used for trend exploration ("which
-  colors will be rising in 6 months?").
+per-feature time series (every color, every material, every product
+type, etc.) at the cube grain. Used for trend exploration ("which
+colors will be rising in 6 months?").
 - **Fingerprint model** — one row per 5-D fingerprint
-  `(product_type_id, gender_id, color_master_id, graphical_appearance_id,
-  material_id)`. Used for per-item recommendations ("when should I list
-  this specific blazer?").
+`(product_type_id, gender_id, color_master_id, graphical_appearance_id, material_id)`. Used for per-item recommendations ("when should I list
+this specific blazer?").
 
 This document describes the **shipped** architecture. A `Future` section
 at the bottom captures the GCP target we're working toward.
@@ -24,7 +23,7 @@ at the bottom captures the GCP target we're working toward.
                 ┌──────────────────────────────────────────────┐
                 │  pipelines/collectors/                       │
                 │    {gap,uniqlo,american_eagle,hollister}_    │
-                │    scraper.py                                │
+                │  scraper.py                                │
                 │      └─► data/raw/items/items_<retailer>.csv │
                 │  build_live_cube.py                          │
                 │      └─► data/processed/live_*_<YYYY-MM>.parquet
@@ -114,16 +113,19 @@ trndly/
 
 Stages in order:
 
-| # | Stage | Inputs | Outputs |
-|---|---|---|---|
-| 1 | `scrape` | retailer APIs | `data/raw/items/items_*.csv`, `data/processed/live_*_<YYYY-MM>.parquet` |
-| 2 | `aggregate` | historical + live cubes | `data/processed/merged_*.parquet` |
-| 3 | `features` | merged cubes | `data/processed/training_*.parquet`, `training_run.json` |
-| 4 | `train` | training tables | `data/models/*.joblib`, `model_training_run.json` |
-| 5 | `evaluate` | candidate manifest + `champion_metrics.json` | promotion decision; updates `champion_metrics.json` if candidate wins |
-| 6 | `predict` | champion joblibs + merged cubes + `lookup.csv` | `data/predictions/predictions_*_<YYYY-MM>.parquet` (with state classification baked in) |
+
+| #   | Stage       | Inputs                                         | Outputs                                                                                 |
+| --- | ----------- | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 1   | `scrape`    | retailer APIs                                  | `data/raw/items/items_*.csv`, `data/processed/live_*_<YYYY-MM>.parquet`                 |
+| 2   | `aggregate` | historical + live cubes                        | `data/processed/merged_*.parquet`                                                       |
+| 3   | `features`  | merged cubes                                   | `data/processed/training_*.parquet`, `training_run.json`                                |
+| 4   | `train`     | training tables                                | `data/models/*.joblib`, `model_training_run.json`                                       |
+| 5   | `evaluate`  | candidate manifest + `champion_metrics.json`   | promotion decision; updates `champion_metrics.json` if candidate wins                   |
+| 6   | `predict`   | champion joblibs + merged cubes + `lookup.csv` | `data/predictions/predictions_*_<YYYY-MM>.parquet` (with state classification baked in) |
+
 
 Stages can be invoked individually:
+
 ```bash
 python -m pipelines.monthly aggregate
 python -m pipelines.monthly run --skip-scrape   # use existing items_*.csv
@@ -137,6 +139,7 @@ chain. Cloud Scheduler / Vertex AI wiring is in the `Future` section.
 `champion_metrics.json`). On a tie, candidate wins.
 
 **Trend state classification** (`pipelines/monthly/state.py`):
+
 - `peak`: argmax(y_h0..h6) ≤ 1 AND series declines by horizon 6
 - `rising`: y_h6 > 1.15 × y_h0
 - `falling`: y_h6 < 0.85 × y_h0
@@ -150,7 +153,8 @@ Numbers are placeholders flagged for tuning on real data.
 
 Two parquets per monthly tick. Schema validators in `pipelines/contracts.py`.
 
-**`predictions_univariate_<YYYY-MM>.parquet`** — 13 columns:
+`**predictions_univariate_<YYYY-MM>.parquet`** — 13 columns:
+
 ```
 anchor_month, model_version,
 dimension, level_id, level_name,
@@ -158,7 +162,8 @@ y_h1, y_h2, y_h3, y_h4, y_h5, y_h6,
 state, stat
 ```
 
-**`predictions_fingerprint_<YYYY-MM>.parquet`** — 20 columns:
+`**predictions_fingerprint_<YYYY-MM>.parquet**` — 20 columns:
+
 ```
 anchor_month, model_version,
 product_type_id, gender_id, color_master_id, graphical_appearance_id, material_id,
@@ -177,14 +182,16 @@ parquet only contains rows for which a forecast was producible.
 `backend/services/scheduleServer.py`. All routes are GET; no POST request
 triggers a model call.
 
-| Route | Behavior |
-|---|---|
-| `GET /` | redirect → `/ui/` |
-| `GET /health` | bundle status: `predictions_loaded`, `predictions_anchor_month`, row counts |
-| `GET /options` | dropdown vocabularies, `[{name, id}]` per category (`colors`, `categories`, `materials`, `appearances`, `genders`) |
-| `GET /trends` | every univariate prediction row. Optional filters `?dimension=&state=` |
-| `GET /forecast/fingerprint` | one fingerprint forecast. Query: 5 `*_id` ints. 404 if no precomputed match |
-| `/ui/*` | static React app (`trndly/frontend/`) |
+
+| Route                       | Behavior                                                                                                           |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `GET /`                     | redirect → `/ui/`                                                                                                  |
+| `GET /health`               | bundle status: `predictions_loaded`, `predictions_anchor_month`, row counts                                        |
+| `GET /options`              | dropdown vocabularies, `[{name, id}]` per category (`colors`, `categories`, `materials`, `appearances`, `genders`) |
+| `GET /trends`               | every univariate prediction row. Optional filters `?dimension=&state=`                                             |
+| `GET /forecast/fingerprint` | one fingerprint forecast. Query: 5 `*_id` ints. 404 if no precomputed match                                        |
+| `/ui/*`                     | static React app (`trndly/frontend/`)                                                                              |
+
 
 Swagger UI at `/docs`. OpenAPI JSON at `/openapi.json`.
 
@@ -199,6 +206,7 @@ refresh.
 Stack: **React 18** + **JSX-via-Babel** (no build step) + **SWR**.
 
 `frontend/dataProvider.js` provides a single `useData()` hook exposing:
+
 - `inventory`, `signals`, `addItem` — session-scoped local state
 - `trends` — `GET /trends` via SWR, with `data.js` mocks as fallback
 - `options` / `lookupIds` — `GET /options` via SWR, with mocks as fallback
@@ -211,16 +219,18 @@ care that the data now comes from a real API.
 
 ## Testing
 
-| Layer | Where | Notes |
-|---|---|---|
-| Schema validators | `pipelines/contracts.py` | Called inside producers + tests |
-| Path-existence | `tests/test_paths.py` | Parametric over every `Path` constant |
-| Lookup consistency | `tests/test_trndly.py` | feature_lookups dicts vs lookup.csv |
-| Items CSV ID validity | `tests/test_trndly.py` | scraper outputs vs lookup.csv |
-| Live cube validators | `tests/test_trndly.py` | concat-compatibility with historical |
-| Tick unit tests | `tests/monthly/` | state classifier, evaluate logic, predict E2E |
-| Scrapers | `tests/scrapers/` | Mock-based; some require `pytest-asyncio`/`pytest-httpx` |
-| API endpoints | (manual / curl) | Smoke covered in `monthly_tick.md` |
+
+| Layer                 | Where                    | Notes                                                    |
+| --------------------- | ------------------------ | -------------------------------------------------------- |
+| Schema validators     | `pipelines/contracts.py` | Called inside producers + tests                          |
+| Path-existence        | `tests/test_paths.py`    | Parametric over every `Path` constant                    |
+| Lookup consistency    | `tests/test_trndly.py`   | feature_lookups dicts vs lookup.csv                      |
+| Items CSV ID validity | `tests/test_trndly.py`   | scraper outputs vs lookup.csv                            |
+| Live cube validators  | `tests/test_trndly.py`   | concat-compatibility with historical                     |
+| Tick unit tests       | `tests/monthly/`         | state classifier, evaluate logic, predict E2E            |
+| Scrapers              | `tests/scrapers/`        | Mock-based; some require `pytest-asyncio`/`pytest-httpx` |
+| API endpoints         | (manual / curl)          | Smoke covered in `monthly_tick.md`                       |
+
 
 ---
 
@@ -235,6 +245,7 @@ architecture is designed to swap each piece in without restructuring.
 (e.g., `fsspec`-resolved paths or a `gs://`-aware helper) without touching
 consumer code. `gcsfs` is already a transitive dependency. Target bucket
 layout (per existing infra):
+
 - `gs://trndly-mlops-us/data/predictions/<YYYY-MM>/`
 - `gs://trndly-mlops-us/data/processed/`
 - `gs://trndly-mlops-us/mlflow/`
@@ -265,6 +276,7 @@ Inventory becomes per-user (Firestore-backed instead of session state).
 ### Containers: single Dockerfile → multi-image
 
 `trndly/Dockerfile` is a starting point. Split into:
+
 - `trndly-collectors`: scrapers + `build_live_cube` (Cloud Run Job)
 - `trndly-monthly`: full tick, runs on Vertex (Cloud Run Job)
 - `trndly-api`: FastAPI service (Cloud Run Service)
