@@ -59,7 +59,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from pipelines.training.feature_contract import (  # noqa: E402
+from pipelines.contracts import (  # noqa: E402
     validate_live_fingerprint_frame,
     validate_live_univariate_frame,
 )
@@ -308,7 +308,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Aggregate per-retailer items_*.csv files into the live "
-            "fingerprint + univariate cubes consumed by notebook 1b. "
+            "fingerprint + univariate cubes consumed by pipelines.monthly.aggregate. "
             "Writes one parquet per snapshot month: "
             "live_fingerprint_<YYYY-MM>.parquet + live_univariate_<YYYY-MM>.parquet."
         )

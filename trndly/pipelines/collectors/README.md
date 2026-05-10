@@ -6,7 +6,7 @@ Eagle** that produce raw per-(product × color) rows in
 every items file and builds two parquets — a 5-D fingerprint cube and a
 long-format univariate cube — under `data/processed/`. Schemas mirror the
 historical cubes from `notebooks/1_aggregate_historical.ipynb` so
-`notebook 1b` can `pd.concat` historical + live rows into a single merged
+`pipelines.monthly.aggregate` can `pd.concat` historical + live rows into a single merged
 universe.
 
 ## Architecture
@@ -22,7 +22,7 @@ hollister_scraper.py ┘           ▼
                                  └─► data/processed/live_univariate_<YYYY-MM>.parquet
                                                   │
                                                   ▼
-                                  notebooks/1b_scrape_aggregate_live.ipynb
+                                  pipelines.monthly.aggregate (was notebook 1b)
                                   (read historical_*.parquet + glob(live_*_*.parquet);
                                    pd.concat with dedup on (month, fingerprint, source))
                                                   │
@@ -31,7 +31,7 @@ hollister_scraper.py ┘           ▼
                                   data/processed/merged_univariate.parquet
                                                   │
                                                   ▼
-                       hmn_seasonal_processor.py / scheduleServer / Notebooks 2–5
+                       pipelines.monthly.* / scheduleServer
 ```
 
 Each scraper:
@@ -111,7 +111,7 @@ live), `level_id` (int8), `n_articles` (int32), `share_articles`
 
 Both schemas are byte-compatible with `notebooks/1_aggregate_historical.ipynb`'s
 `historical_*.parquet` outputs — `source` is the only differing value.
-Notebook 1b does
+`pipelines.monthly.aggregate` does
 `pd.concat([historical, *live_globbed]).drop_duplicates(subset=['month', *fp_cols, 'source'], keep='last')`
 to produce `merged_*.parquet`.
 
@@ -131,7 +131,7 @@ to produce `merged_*.parquet`.
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
 | [build_live_cube.py](build_live_cube.py)               | Aggregate every `items_*.csv` into per-month `live_<role>_<YYYY-MM>.parquet` files                                          |
 | [feature_lookups.py](feature_lookups.py)               | Shared keyword maps + ID dicts for `extract_color`, `extract_material`, etc. Validates against `lookup.csv` at import time. |
-| [hmn_seasonal_processor.py](hmn_seasonal_processor.py) | H&M historical → train/val/test labels (consumes `merged_univariate.parquet`)                                               |
+
 
 
 The `_deferred/` directory holds modules that are functionally complete
@@ -168,7 +168,7 @@ python american_eagle_scraper.py
 python gap_scraper.py --max-products-per-page 5 --no-enrich-pdp
 
 # All four sequentially, then build live cubes
-bash run_all.sh
+python -m pipelines.monthly.scrape
 ```
 
 After all scrapers have written their `items_<retailer>.csv`:
@@ -179,7 +179,7 @@ python build_live_cube.py
 
 Outputs: `data/processed/live_fingerprint_<YYYY-MM>.parquet` +
 `data/processed/live_univariate_<YYYY-MM>.parquet` (one parquet per
-snapshot month). Run `notebooks/1b_scrape_aggregate_live.ipynb` to
+snapshot month). Run `python -m pipelines.monthly aggregate` to
 glob those + read `historical_*.parquet` and write the always-rebuilt
 `merged_*.parquet`.
 
@@ -188,7 +188,7 @@ glob those + read `historical_*.parquet` and write the always-rebuilt
 
 | Flag                        | Default                               | Purpose                                                   |
 | --------------------------- | ------------------------------------- | --------------------------------------------------------- |
-| `--items-path PATH`         | `synthetic_data/items_<retailer>.csv` | per-color row CSV                                         |
+| `--items-path PATH`         | `data/raw/items/items_<retailer>.csv` | per-color row CSV                                         |
 | `--concurrency N`           | `6` (Gap/Uniqlo/Hollister), `3` (AE)  | concurrent API/PDP fetches                                |
 | `--max-products-per-page N` | none                                  | cap rows per target (smoke test)                          |
 | `--resume`                  | off                                   | continue from `items_<retailer>_partial.csv` if it exists |
@@ -239,7 +239,7 @@ renames to the final path on clean exit. With `--resume`, prior
 the next invocation.
 - **Live cube semantics: snapshot, not running tally.** Within-month
 re-runs replace prior `(month, fingerprint, source='live')` rows in
-the merged universe (notebook 1b's `keep='last'` enforces this). Items
+the merged universe (the `keep='last'` dedup in pipelines.monthly.aggregate enforces this). Items
 dropped from the catalog between runs are dropped from the cube.
 
 ## Known limitations

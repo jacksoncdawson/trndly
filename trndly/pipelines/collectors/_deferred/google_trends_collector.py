@@ -33,7 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from pipelines.training.feature_contract import (  # noqa: E402
+from pipelines.contracts import (  # noqa: E402
     DEFAULT_MISSING_SCORE,
     validate_trend_signals_frame,
 )

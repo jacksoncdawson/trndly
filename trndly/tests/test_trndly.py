@@ -274,7 +274,7 @@ def test_build_univariate_cube_shape_and_share_sum():
 
 
 def test_validate_live_fingerprint_frame_rejects_bad_inputs():
-    from pipelines.training.feature_contract import validate_live_fingerprint_frame
+    from pipelines.contracts import validate_live_fingerprint_frame
     with pytest.raises(ValueError, match="empty"):
         validate_live_fingerprint_frame(pd.DataFrame())
 
@@ -284,7 +284,7 @@ def test_validate_live_fingerprint_frame_rejects_bad_inputs():
 
 
 def test_validate_live_univariate_frame_rejects_bad_inputs():
-    from pipelines.training.feature_contract import validate_live_univariate_frame
+    from pipelines.contracts import validate_live_univariate_frame
     with pytest.raises(ValueError, match="empty"):
         validate_live_univariate_frame(pd.DataFrame())
 

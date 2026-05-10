@@ -109,7 +109,7 @@ from pipelines.collectors.feature_lookups import (  # noqa: E402
     extract_product_type,
     has_explicit_material_keyword,
 )
-from pipelines.training.feature_contract import (  # noqa: E402
+from pipelines.contracts import (  # noqa: E402
     FEATURE_TYPES,
 )
 

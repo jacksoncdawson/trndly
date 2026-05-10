@@ -32,7 +32,7 @@ def main() -> None:
         md(
             r"""# Hyperparameter search — MLflow-tracked sweep for both forecasters
 
-Sweep `RandomForestRegressor` hyperparameters for the **univariate** and **fingerprint** models from [`3_train_models.ipynb`](3_train_models.ipynb), logging every configuration to MLflow so the team can browse runs in the UI and promote the best version.
+Sweep `RandomForestRegressor` hyperparameters for the **univariate** and **fingerprint** models from `pipelines.monthly.train`, logging every configuration to MLflow so the team can browse runs in the UI and promote the best version.
 
 | Part | Training table | Registered model | Sweep size |
 |------|----------------|------------------|------------|
@@ -73,7 +73,7 @@ The existing `champion` alias used by serving is **never** auto-overwritten — 
 ## Convention
 
 - Sweep grid is small (12 configs each) — the data is also small, so we use a **full grid** rather than randomized search. Edit `UNIVARIATE_GRID` / `FINGERPRINT_GRID` in section 1 to expand.
-- The model NEVER sees `anchor_month`, `source`, `split_group`, `sample_weight`, or `n_articles` (same contract as `3_*`). `sample_weight` is passed to `.fit(...)` and to weighted metrics.
+- The model NEVER sees `anchor_month`, `source`, `split_group`, `sample_weight`, or `n_articles` (same contract as `pipelines.monthly.train`). `sample_weight` is passed to `.fit(...)` and to weighted metrics.
 - The persistence baseline (`ŷ_h = share_t`) is logged under metric prefix `baseline_*` for every run so a single MLflow chart shows lift vs. the no-model baseline at a glance.
 
 ## Contents
@@ -93,7 +93,7 @@ The existing `champion` alias used by serving is **never** auto-overwritten — 
 
 - No automatic `champion` alias flip. Promotion requires human review (UI or one-line `MlflowClient` call).
 - No randomized / Bayesian search. With 14 anchor months a 12-cell grid is already saturating; switch to `RandomizedSearchCV` or Optuna only after live data extends the time axis.
-- No data version logging. When `aggregate_live.ipynb` lands, add `mlflow.log_input(...)` against a parquet hash so each run pins its training data.
+- No data version logging. When `pipelines.monthly.aggregate` lands, add `mlflow.log_input(...)` against a parquet hash so each run pins its training data.
 - No on-cloud submission. This notebook is the local / reproducible reference sweep; cloud sweep wiring is a follow-up.
 """
         )
@@ -127,7 +127,7 @@ IN_FINGERPRINT = f"{DATA_DIR}/training_fingerprint.parquet"
 IN_CONTRACT = f"{DATA_DIR}/training_run.json"
 OUT_MANIFEST = f"{DATA_DIR}/hparam_search_run.json"
 
-# MLflow defaults match scripts/run_mlflow_experiment.sh + scheduleServer.py.
+# MLflow defaults match scheduleServer.py.
 # `file:../mlruns` lands runs under trndly/mlruns/, alongside the existing entries.
 TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "file:../mlruns")
 EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT_NAME", "trndly-trend-forecasters")

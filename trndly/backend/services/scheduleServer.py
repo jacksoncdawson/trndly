@@ -1,9 +1,29 @@
+"""trndly forecast service — read-only API over the predictions parquet.
+
+The monthly tick (``python -m pipelines.monthly run``) writes two parquets:
+
+    data/predictions/predictions_univariate_<YYYY-MM>.parquet
+    data/predictions/predictions_fingerprint_<YYYY-MM>.parquet
+
+This service loads the most recent of each at startup and exposes them via
+three GET routes:
+
+    GET /options                  — dropdown vocabularies (name + id per category)
+    GET /trends                   — every (dimension, level) row from univariate
+    GET /forecast/fingerprint     — single row matching the 5-D fingerprint
+    GET /health                   — liveness + bundle status
+
+There are no live model calls in the request path. To refresh the bundle,
+restart the container (or re-run the tick + redeploy).
+"""
+
 from __future__ import annotations
 
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -12,7 +32,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel
 
 # Add project root to sys.path
 SERVICE_DIR = Path(__file__).resolve().parent
@@ -21,33 +41,20 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 
-# Local imports
-from pipelines.serving.forecast import (
-    FINGERPRINT_COLS,
-    UNIVARIATE_DIMENSIONS,
-    ForecastDeps,
-    forecast_fingerprint,
-    forecast_univariate,
-    load_forecast_pair,
+from pipelines.contracts import (
+    validate_predictions_fingerprint_frame,
+    validate_predictions_univariate_frame,
 )
 from pipelines.paths import (
     FRONTEND_DIR,
     LOOKUP_CSV,
-    MERGED_FINGERPRINT_PARQUET,
-    MERGED_UNIVARIATE_PARQUET,
+    latest_predictions_fingerprint_parquet,
+    latest_predictions_univariate_parquet,
 )
 
 # ENV VARIABLES
 ENV_PATH = SERVICE_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
-
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
-MLFLOW_FORECAST_MODEL_URI = os.getenv(
-    "MLFLOW_FORECAST_MODEL_URI", "models:/trndly_fingerprint@candidate"
-)
-MLFLOW_UNIVARIATE_FORECAST_MODEL_URI = os.getenv(
-    "MLFLOW_UNIVARIATE_FORECAST_MODEL_URI", "models:/trndly_univariate@candidate"
-)
 
 
 logger = logging.getLogger(__name__)
@@ -55,15 +62,22 @@ logger = logging.getLogger(__name__)
 
 # --- STATE ---
 
-FORECAST_DEPS: ForecastDeps | None = None
-FORECAST_LOAD_ERROR: str | None = None
+@dataclass
+class PredictionsBundle:
+    univariate: pd.DataFrame
+    fingerprint: pd.DataFrame
+    anchor_month: str   # ISO date string from the parquets
+
+
+BUNDLE: PredictionsBundle | None = None
+BUNDLE_LOAD_ERROR: str | None = None
 
 
 # --- FASTAPI APP ---
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    reload_forecast_bundle()
+    reload_predictions_bundle()
     yield
 
 
@@ -73,122 +87,120 @@ app = FastAPI(
 )
 
 
-class RootResponse(BaseModel):
-    message: str
-
+# --- SCHEMAS ---
 
 class HealthResponse(BaseModel):
     status: str
-    forecast_catalog_loaded: bool = False
-    forecast_catalog_error: Optional[str] = None
-    forecast_model_uri: Optional[str] = None
-    forecast_univariate_uri: Optional[str] = None
-    tracking_uri: Optional[str]
+    predictions_loaded: bool
+    predictions_anchor_month: Optional[str] = None
+    predictions_univariate_rows: Optional[int] = None
+    predictions_fingerprint_rows: Optional[int] = None
+    error: Optional[str] = None
+
+
+class CategoryOption(BaseModel):
+    name: str
+    id: int
 
 
 class OptionsResponse(BaseModel):
-    colors: list[str]
-    categories: list[str]
-    materials: list[str]
+    colors: list[CategoryOption]         # color_master
+    categories: list[CategoryOption]     # product_type
+    materials: list[CategoryOption]
+    appearances: list[CategoryOption]    # graphical_appearance
+    genders: list[CategoryOption]
 
 
-class FingerprintForecastRequest(BaseModel):
-    """All five fingerprint IDs must be supplied. ``reference_month`` (1-12)
-    selects the cube anchor month; default = latest available."""
-
-    product_type_id: int = Field(ge=0)
-    gender_id: int = Field(ge=0)
-    color_master_id: int = Field(ge=0)
-    graphical_appearance_id: int = Field(ge=0)
-    material_id: int = Field(ge=0)
-    reference_month: Optional[int] = Field(default=None, ge=1, le=12)
-
-    def dimensions(self) -> dict[str, int]:
-        return {col: getattr(self, col) for col in FINGERPRINT_COLS}
+class TrendRow(BaseModel):
+    dimension: str
+    level_id: int
+    level_name: str
+    y_h1: float
+    y_h2: float
+    y_h3: float
+    y_h4: float
+    y_h5: float
+    y_h6: float
+    state: str
+    stat: str
 
 
 class FingerprintForecastResponse(BaseModel):
-    dimensions: dict[str, int]
-    anchor_month: str
-    reference_month_of_year_used: int
-    fingerprint_matches: int
-    fingerprint_keys_sample: list[list[int]]
-    forecast: dict[str, float]
-    horizons: list[str]
+    product_type_id: int
+    gender_id: int
+    color_master_id: int
+    graphical_appearance_id: int
+    material_id: int
+    product_type_name: str
+    gender_name: str
+    color_master_name: str
+    graphical_appearance_name: str
+    material_name: str
+    y_h1: float
+    y_h2: float
+    y_h3: float
+    y_h4: float
+    y_h5: float
+    y_h6: float
+    state: str
+    stat: str
 
 
-class UnivariateForecastRequest(BaseModel):
-    dimension: str = Field(min_length=1)
-    level_id: int = Field(ge=0)
-    reference_month: Optional[int] = Field(default=None, ge=1, le=12)
+# --- LOADER ---
 
-    @field_validator("dimension")
-    @classmethod
-    def validate_dimension(cls, value: str) -> str:
-        v = value.strip()
-        if v not in UNIVARIATE_DIMENSIONS:
-            raise ValueError(
-                f"unknown dimension {v!r}; expected one of {sorted(UNIVARIATE_DIMENSIONS)}"
-            )
-        return v
-
-
-class UnivariateForecastResponse(BaseModel):
-    dimension: str
-    level_id: int
-    anchor_month: str
-    forecast: dict[str, float]
-    horizons: list[str]
-
-
-def reload_forecast_bundle() -> None:
-    """Load parquet cubes + forecast models (MLflow registry or local ``*.joblib``)."""
-
-    global FORECAST_DEPS, FORECAST_LOAD_ERROR
-
-    FORECAST_DEPS = None
-    FORECAST_LOAD_ERROR = None
-
+def reload_predictions_bundle() -> None:
+    """Load the latest predictions parquets into BUNDLE."""
+    global BUNDLE, BUNDLE_LOAD_ERROR
+    BUNDLE = None
+    BUNDLE_LOAD_ERROR = None
     try:
-        if not MERGED_FINGERPRINT_PARQUET.exists():
-            FORECAST_LOAD_ERROR = f"missing fingerprint cube at {MERGED_FINGERPRINT_PARQUET}"
+        uv_path = latest_predictions_univariate_parquet()
+        fp_path = latest_predictions_fingerprint_parquet()
+        if uv_path is None:
+            BUNDLE_LOAD_ERROR = (
+                "no predictions_univariate_*.parquet found; "
+                "run `python -m pipelines.monthly run`"
+            )
             return
-        if not LOOKUP_CSV.exists():
-            FORECAST_LOAD_ERROR = f"missing lookup table at {LOOKUP_CSV}"
+        if fp_path is None:
+            BUNDLE_LOAD_ERROR = (
+                "no predictions_fingerprint_*.parquet found; "
+                "run `python -m pipelines.monthly run`"
+            )
             return
-        cube_uni = None
-        if MERGED_UNIVARIATE_PARQUET.exists():
-            try:
-                cube_uni = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
-                cube_uni["month"] = pd.to_datetime(cube_uni["month"]).dt.as_unit("ns")
-            except Exception:
-                logger.exception("Optional univariate cube load skipped.")
 
-        cube_fp = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
-        cube_fp["month"] = pd.to_datetime(cube_fp["month"]).dt.as_unit("ns")
+        uv = pd.read_parquet(uv_path)
+        fp = pd.read_parquet(fp_path)
+        # Validate via contract — raises on schema drift.
+        uv = validate_predictions_univariate_frame(uv)
+        fp = validate_predictions_fingerprint_frame(fp)
 
-        fp_model, uni_model, model_src = load_forecast_pair(
-            tracking_uri=MLFLOW_TRACKING_URI,
-            fingerprint_uri=MLFLOW_FORECAST_MODEL_URI,
-            univariate_uri=MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
-            load_univariate=cube_uni is not None,
+        # Both parquets carry an anchor_month column; report whichever's most recent.
+        anchors = sorted(
+            [pd.Timestamp(uv["anchor_month"].iloc[0]),
+             pd.Timestamp(fp["anchor_month"].iloc[0])]
         )
+        anchor_month = anchors[-1].strftime("%Y-%m")
 
-        FORECAST_DEPS = ForecastDeps(
-            fingerprint_model=fp_model,
-            univariate_model=uni_model,
-            cube_fp=cube_fp,
-            cube_uni=cube_uni,
+        BUNDLE = PredictionsBundle(
+            univariate=uv, fingerprint=fp, anchor_month=anchor_month
         )
         logger.info(
-            "Forecast bundle ready (models=%s, fp_uri=%s, uni_uri=%s).",
-            model_src,
-            MLFLOW_FORECAST_MODEL_URI,
-            MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
+            "predictions bundle ready (univariate=%d rows, fingerprint=%d rows, anchor=%s)",
+            len(uv), len(fp), anchor_month,
         )
     except Exception as exc:
-        FORECAST_LOAD_ERROR = str(exc)
-        logger.exception("reload_forecast_bundle failed")
+        BUNDLE_LOAD_ERROR = str(exc)
+        logger.exception("reload_predictions_bundle failed")
+
+
+def _require_bundle() -> PredictionsBundle:
+    if BUNDLE is None:
+        detail = BUNDLE_LOAD_ERROR or "predictions bundle not loaded"
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail
+        )
+    return BUNDLE
 
 
 # --- ROUTES ---
@@ -198,12 +210,28 @@ def root() -> RedirectResponse:
     return RedirectResponse(url="/ui/")
 
 
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    if BUNDLE is None:
+        return HealthResponse(
+            status="degraded",
+            predictions_loaded=False,
+            error=BUNDLE_LOAD_ERROR,
+        )
+    return HealthResponse(
+        status="healthy",
+        predictions_loaded=True,
+        predictions_anchor_month=BUNDLE.anchor_month,
+        predictions_univariate_rows=int(len(BUNDLE.univariate)),
+        predictions_fingerprint_rows=int(len(BUNDLE.fingerprint)),
+    )
+
+
 @app.get("/options", response_model=OptionsResponse)
 def options() -> OptionsResponse:
-    """
-    Return the vocabularies the UI should use for dropdowns. Sourced
-    directly from ``lookup.csv`` so the UI stays in sync with the
-    canonical ID universe automatically.
+    """Vocabularies for the UI dropdowns. Sourced directly from
+    ``lookup.csv`` so the UI stays in sync with the canonical ID universe.
+    Each entry is ``{name, id}`` so the frontend can POST IDs back.
     """
     if not LOOKUP_CSV.exists():
         raise HTTPException(
@@ -212,92 +240,111 @@ def options() -> OptionsResponse:
         )
     lk = pd.read_csv(LOOKUP_CSV)
 
-    def names_for(category: str) -> list[str]:
+    def opts_for(category: str) -> list[CategoryOption]:
         rows = lk[lk["category"] == category]
-        return sorted(rows["name"].astype(str).str.lower().tolist())
+        return [
+            CategoryOption(name=str(r["name"]), id=int(r["id"]))
+            for _, r in rows.sort_values("name").iterrows()
+        ]
 
     return OptionsResponse(
-        colors=names_for("color_master"),
-        categories=names_for("product_type"),
-        materials=names_for("material"),
+        colors=opts_for("color_master"),
+        categories=opts_for("product_type"),
+        materials=opts_for("material"),
+        appearances=opts_for("graphical_appearance"),
+        genders=opts_for("gender"),
     )
 
 
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    current_status = "healthy" if FORECAST_DEPS is not None else "degraded"
-    return HealthResponse(
-        status=current_status,
-        forecast_catalog_loaded=FORECAST_DEPS is not None,
-        forecast_catalog_error=FORECAST_LOAD_ERROR,
-        forecast_model_uri=MLFLOW_FORECAST_MODEL_URI,
-        forecast_univariate_uri=MLFLOW_UNIVARIATE_FORECAST_MODEL_URI,
-        tracking_uri=MLFLOW_TRACKING_URI,
-    )
+@app.get("/trends", response_model=list[TrendRow])
+def trends(
+    dimension: str | None = None,
+    state: str | None = None,
+) -> list[TrendRow]:
+    """Univariate predictions. Optional filters: ``?dimension=color_master&state=rising``."""
+    bundle = _require_bundle()
+    df = bundle.univariate
+    if dimension is not None:
+        df = df[df["dimension"] == dimension]
+    if state is not None:
+        df = df[df["state"] == state]
+    return [
+        TrendRow(
+            dimension=str(row["dimension"]),
+            level_id=int(row["level_id"]),
+            level_name=str(row["level_name"]),
+            y_h1=float(row["y_h1"]),
+            y_h2=float(row["y_h2"]),
+            y_h3=float(row["y_h3"]),
+            y_h4=float(row["y_h4"]),
+            y_h5=float(row["y_h5"]),
+            y_h6=float(row["y_h6"]),
+            state=str(row["state"]),
+            stat=str(row["stat"]),
+        )
+        for _, row in df.iterrows()
+    ]
 
 
-def _require_forecast_deps() -> ForecastDeps:
-    if FORECAST_DEPS is None:
-        detail = FORECAST_LOAD_ERROR or "Forecast bundle is not loaded."
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
-    return FORECAST_DEPS
-
-
-@app.post("/forecast/fingerprint", response_model=FingerprintForecastResponse)
-def forecast_fingerprint_route(
-    payload: FingerprintForecastRequest,
+@app.get("/forecast/fingerprint", response_model=FingerprintForecastResponse)
+def forecast_fingerprint(
+    product_type_id: int,
+    gender_id: int,
+    color_master_id: int,
+    graphical_appearance_id: int,
+    material_id: int,
 ) -> FingerprintForecastResponse:
-    """Predict the next 6 months of catalog share for a fully-specified
-    5-D fingerprint."""
-
-    deps = _require_forecast_deps()
-    raw = forecast_fingerprint(
-        payload.dimensions(), deps, reference_month=payload.reference_month
+    """Single-fingerprint forecast lookup. 404 if no precomputed match."""
+    bundle = _require_bundle()
+    df = bundle.fingerprint
+    mask = (
+        (df["product_type_id"] == product_type_id)
+        & (df["gender_id"] == gender_id)
+        & (df["color_master_id"] == color_master_id)
+        & (df["graphical_appearance_id"] == graphical_appearance_id)
+        & (df["material_id"] == material_id)
     )
-    if raw.get("forecast") is None:
+    hit = df[mask]
+    if hit.empty:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=raw.get("error", "Unable to forecast from fingerprint."),
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "no precomputed forecast for fingerprint "
+                f"product_type_id={product_type_id} gender_id={gender_id} "
+                f"color_master_id={color_master_id} "
+                f"graphical_appearance_id={graphical_appearance_id} "
+                f"material_id={material_id}"
+            ),
         )
-    raw.pop("error", None)
-    return FingerprintForecastResponse(**raw)
-
-
-@app.post("/forecast/univariate", response_model=UnivariateForecastResponse)
-def forecast_univariate_route(
-    payload: UnivariateForecastRequest,
-) -> UnivariateForecastResponse:
-    """Predict the next 6 months of catalog share for one
-    ``(dimension, level_id)`` series."""
-
-    deps = _require_forecast_deps()
-    if deps.univariate_model is None or deps.cube_uni is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Univariate model or cube is not loaded.",
-        )
-    raw = forecast_univariate(
-        payload.dimension,
-        payload.level_id,
-        deps,
-        reference_month=payload.reference_month,
+    row = hit.iloc[0]
+    return FingerprintForecastResponse(
+        product_type_id=int(row["product_type_id"]),
+        gender_id=int(row["gender_id"]),
+        color_master_id=int(row["color_master_id"]),
+        graphical_appearance_id=int(row["graphical_appearance_id"]),
+        material_id=int(row["material_id"]),
+        product_type_name=str(row["product_type_name"]),
+        gender_name=str(row["gender_name"]),
+        color_master_name=str(row["color_master_name"]),
+        graphical_appearance_name=str(row["graphical_appearance_name"]),
+        material_name=str(row["material_name"]),
+        y_h1=float(row["y_h1"]),
+        y_h2=float(row["y_h2"]),
+        y_h3=float(row["y_h3"]),
+        y_h4=float(row["y_h4"]),
+        y_h5=float(row["y_h5"]),
+        y_h6=float(row["y_h6"]),
+        state=str(row["state"]),
+        stat=str(row["stat"]),
     )
-    if raw.get("forecast") is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=raw.get("error", "Unable to forecast from (dimension, level_id)."),
-        )
-    raw.pop("error", None)
-    return UnivariateForecastResponse(**raw)
 
 
 # --------------------------------------------------------------------------- #
 # Static UI                                                                     #
 # --------------------------------------------------------------------------- #
-# A minimal demo page (vanilla HTML/CSS/JS, no build step) lives in
-# trndly/frontend/ (a sibling of backend/, path sourced from paths.py).
-# Mounted at /ui so everything stays same-origin with /options and /forecast/* —
-# no CORS setup required.
+# A React demo page (no build step — JSX-via-Babel script tag) lives in
+# trndly/frontend/. Mounted at /ui so everything stays same-origin with /options
+# /trends, and /forecast/* — no CORS setup required.
 if FRONTEND_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="ui")
 else:

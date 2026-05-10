@@ -111,3 +111,74 @@ def validate_live_univariate_frame(frame: pd.DataFrame) -> pd.DataFrame:
             f"(expected ≈1.0): {out_of_range.to_dict()}"
         )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Predictions parquet schema validators                                        #
+# --------------------------------------------------------------------------- #
+
+# Written by ``pipelines/monthly/predict.py``; read by the FastAPI service.
+
+VALID_TREND_STATES: Final[frozenset[str]] = frozenset(
+    {"rising", "peak", "flat", "falling"}
+)
+
+PREDICTIONS_UNIVARIATE_COLUMNS: list[str] = [
+    "anchor_month", "model_version",
+    "dimension", "level_id", "level_name",
+    "y_h1", "y_h2", "y_h3", "y_h4", "y_h5", "y_h6",
+    "state", "stat",
+]
+
+PREDICTIONS_FINGERPRINT_COLUMNS: list[str] = [
+    "anchor_month", "model_version",
+    "product_type_id", "gender_id", "color_master_id",
+    "graphical_appearance_id", "material_id",
+    "product_type_name", "gender_name", "color_master_name",
+    "graphical_appearance_name", "material_name",
+    "y_h1", "y_h2", "y_h3", "y_h4", "y_h5", "y_h6",
+    "state", "stat",
+]
+
+
+def _validate_predictions_common(
+    frame: pd.DataFrame, expected_columns: list[str], label: str
+) -> pd.DataFrame:
+    """Shared checks for both predictions tables: column presence + order,
+    no nulls in any column, state ∈ VALID_TREND_STATES, stat is non-empty."""
+    if frame.empty:
+        raise ValueError(f"{label} predictions frame is empty")
+    missing = set(expected_columns) - set(frame.columns)
+    if missing:
+        raise ValueError(f"{label} predictions frame missing columns: {sorted(missing)}")
+    out = frame[expected_columns].copy()
+
+    null_counts = out.isna().sum()
+    bad = null_counts[null_counts > 0]
+    if not bad.empty:
+        raise ValueError(f"{label} predictions frame has nulls in: {bad.to_dict()}")
+
+    bad_states = set(out["state"].astype(str).unique()) - VALID_TREND_STATES
+    if bad_states:
+        raise ValueError(
+            f"{label} predictions frame has unknown state values: {sorted(bad_states)}; "
+            f"expected subset of {sorted(VALID_TREND_STATES)}"
+        )
+    if (out["stat"].astype(str).str.len() == 0).any():
+        raise ValueError(f"{label} predictions frame has empty stat strings")
+
+    return out
+
+
+def validate_predictions_univariate_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Assert the univariate predictions parquet matches its schema."""
+    return _validate_predictions_common(
+        frame, PREDICTIONS_UNIVARIATE_COLUMNS, label="univariate"
+    )
+
+
+def validate_predictions_fingerprint_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Assert the fingerprint predictions parquet matches its schema."""
+    return _validate_predictions_common(
+        frame, PREDICTIONS_FINGERPRINT_COLUMNS, label="fingerprint"
+    )

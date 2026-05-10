@@ -8,7 +8,9 @@ function ScreenTrends() {
   const [activeCategory, setActiveCategory] = React.useState('all');
   const [activeState, setActiveState] = React.useState('all');
 
-  const display = TREND_DATA.filter(t => {
+  // Trends come from the API via dataProvider (with mock fallback while loading).
+  const { trends } = useData();
+  const display = trends.filter(t => {
     const catMatch = activeCategory === 'all' || t.category === activeCategory;
     const stateMatch = activeState === 'all' || t.state === activeState;
     return catMatch && stateMatch;

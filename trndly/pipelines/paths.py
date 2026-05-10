@@ -10,9 +10,10 @@ DIRECTORY LAYOUT
 <PROJECT_ROOT>/                                ← trndly/
   pipelines/
     paths.py                                   ← this file
+    contracts.py                               ← live cube + predictions schema validators
     collectors/                                ← COLLECTORS_DIR
-    training/                                  ← TRAINING_DIR
-      feature_contract.py
+    monthly/                                   ← scrape → aggregate → features → train → ...
+    serving/
   data/                                        ← DATA_DIR
     raw/                                       ← RAW_DIR
       kaggle/                                  ← RAW_KAGGLE_DIR
@@ -29,25 +30,30 @@ DIRECTORY LAYOUT
       historical_univariate.parquet            ← HISTORICAL_UNIVARIATE_PARQUET (notebook 1, immutable)
       live_fingerprint_<YYYY-MM>.parquet       ← matches LIVE_FINGERPRINT_GLOB (per-snapshot-month)
       live_univariate_<YYYY-MM>.parquet        ← matches LIVE_UNIVARIATE_GLOB
-      merged_fingerprint.parquet               ← MERGED_FINGERPRINT_PARQUET (notebook 1b)
-      merged_univariate.parquet                ← MERGED_UNIVARIATE_PARQUET (notebook 1b)
-      training_fingerprint.parquet             ← TRAINING_FINGERPRINT_PARQUET (notebook 2)
+      merged_fingerprint.parquet               ← MERGED_FINGERPRINT_PARQUET (pipelines.monthly.aggregate)
+      merged_univariate.parquet                ← MERGED_UNIVARIATE_PARQUET (pipelines.monthly.aggregate)
+      training_fingerprint.parquet             ← TRAINING_FINGERPRINT_PARQUET (pipelines.monthly.features)
       training_univariate.parquet              ← TRAINING_UNIVARIATE_PARQUET
       training_run.json                        ← TRAINING_RUN_JSON
     models/                                    ← MODELS_DIR
       fingerprint_model.joblib                 ← FINGERPRINT_MODEL_JOBLIB
       univariate_model.joblib                  ← UNIVARIATE_MODEL_JOBLIB
       model_training_run.json                  ← MODEL_TRAINING_RUN_JSON
+      champion_metrics.json                    ← evaluate.py promotion record
+    predictions/                               ← PREDICTIONS_DIR
+      predictions_univariate_<YYYY-MM>.parquet  ← matches PREDICTIONS_UNIVARIATE_GLOB
+      predictions_fingerprint_<YYYY-MM>.parquet ← matches PREDICTIONS_FINGERPRINT_GLOB
   backend/
   frontend/                                    ← FRONTEND_DIR
   tests/
 
 Cube pipeline stages (left to right):
-  notebook 1   →  historical_*           (immutable raw cube)
-  build_live_cube
-              →  live_*_<YYYY-MM>        (one parquet per snapshot month)
-  notebook 1b  →  merged_*               (always rebuilt: historical + glob(live_*))
-  notebook 2   →  training_*             (lags + targets + splits + weights)
+  notebook 1                          →  historical_*       (immutable raw cube)
+  build_live_cube                     →  live_*_<YYYY-MM>   (one parquet per snapshot month)
+  pipelines.monthly.aggregate         →  merged_*           (always rebuilt: historical + glob(live_*))
+  pipelines.monthly.features          →  training_*         (lags + targets + splits + weights)
+  pipelines.monthly.train             →  data/models/*.joblib
+  pipelines.monthly.predict           →  data/predictions/*.parquet
 """
 
 from __future__ import annotations
@@ -66,7 +72,6 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 
 PIPELINES_DIR: Path = PROJECT_ROOT / "pipelines"
 COLLECTORS_DIR: Path = PIPELINES_DIR / "collectors"
-TRAINING_DIR: Path = PIPELINES_DIR / "training"
 
 # Static demo UI, served by the FastAPI app at /ui (see scheduleServer.py).
 FRONTEND_DIR: Path = PROJECT_ROOT / "frontend"
@@ -96,6 +101,10 @@ FINGERPRINT_MODEL_JOBLIB: Path = MODELS_DIR / "fingerprint_model.joblib"
 UNIVARIATE_MODEL_JOBLIB: Path = MODELS_DIR / "univariate_model.joblib"
 MODEL_TRAINING_RUN_JSON: Path = MODELS_DIR / "model_training_run.json"
 
+PREDICTIONS_DIR: Path = DATA_DIR / "predictions"
+PREDICTIONS_UNIVARIATE_GLOB: str = "predictions_univariate_*.parquet"
+PREDICTIONS_FINGERPRINT_GLOB: str = "predictions_fingerprint_*.parquet"
+
 # --------------------------------------------------------------------------- #
 # Cube outputs (data/processed/ — gitignored batch artifacts)                  #
 # --------------------------------------------------------------------------- #
@@ -109,11 +118,11 @@ HISTORICAL_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "historical_univariate.par
 LIVE_FINGERPRINT_GLOB: str = "live_fingerprint_*.parquet"
 LIVE_UNIVARIATE_GLOB: str = "live_univariate_*.parquet"
 
-# Stage 3: notebook 1b output — always rebuilt from historical + glob(live_*).
+# Stage 3: pipelines.monthly.aggregate output — rebuilt from historical + glob(live_*).
 MERGED_FINGERPRINT_PARQUET: Path = PROCESSED_DIR / "merged_fingerprint.parquet"
 MERGED_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "merged_univariate.parquet"
 
-# Stage 4: notebook 2 output — lag/target/split/weight prepped for training.
+# Stage 4: pipelines.monthly.features output — lag/target/split/weight prepped for training.
 TRAINING_FINGERPRINT_PARQUET: Path = PROCESSED_DIR / "training_fingerprint.parquet"
 TRAINING_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "training_univariate.parquet"
 TRAINING_RUN_JSON: Path = PROCESSED_DIR / "training_run.json"
@@ -159,6 +168,42 @@ def discover_live_univariate_parquets() -> list[Path]:
     return sorted(PROCESSED_DIR.glob(LIVE_UNIVARIATE_GLOB))
 
 
+def predictions_univariate_path_for(month) -> Path:
+    """Path for the per-month univariate predictions parquet, e.g. for May 2026:
+    ``data/predictions/predictions_univariate_2026-05.parquet``."""
+    return PREDICTIONS_DIR / f"predictions_univariate_{_format_month(month)}.parquet"
+
+
+def predictions_fingerprint_path_for(month) -> Path:
+    """Path for the per-month fingerprint predictions parquet, e.g. for May 2026:
+    ``data/predictions/predictions_fingerprint_2026-05.parquet``."""
+    return PREDICTIONS_DIR / f"predictions_fingerprint_{_format_month(month)}.parquet"
+
+
+def discover_predictions_univariate_parquets() -> list[Path]:
+    """Return every ``predictions_univariate_<YYYY-MM>.parquet`` in PREDICTIONS_DIR,
+    sorted by month."""
+    return sorted(PREDICTIONS_DIR.glob(PREDICTIONS_UNIVARIATE_GLOB))
+
+
+def discover_predictions_fingerprint_parquets() -> list[Path]:
+    """Return every ``predictions_fingerprint_<YYYY-MM>.parquet`` in PREDICTIONS_DIR,
+    sorted by month."""
+    return sorted(PREDICTIONS_DIR.glob(PREDICTIONS_FINGERPRINT_GLOB))
+
+
+def latest_predictions_univariate_parquet() -> Path | None:
+    """Return the most-recent ``predictions_univariate_*.parquet`` (or None)."""
+    paths = discover_predictions_univariate_parquets()
+    return paths[-1] if paths else None
+
+
+def latest_predictions_fingerprint_parquet() -> Path | None:
+    """Return the most-recent ``predictions_fingerprint_*.parquet`` (or None)."""
+    paths = discover_predictions_fingerprint_parquets()
+    return paths[-1] if paths else None
+
+
 def ensure_data_dirs() -> None:
     """
     Create every writable subdirectory of DATA_DIR if it doesn't exist.
@@ -171,5 +216,6 @@ def ensure_data_dirs() -> None:
         REFERENCE_DIR,
         PROCESSED_DIR,
         MODELS_DIR,
+        PREDICTIONS_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)

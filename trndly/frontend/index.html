@@ -18,6 +18,8 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<!-- SWR — caching + revalidation for /options + /trends fetches (per docs/rationale.md) -->
+<script src="https://unpkg.com/swr@2.2.5/dist/index.umd.js"></script>
 
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -51,14 +53,17 @@
      serve the previous build. Bump `v` (or use a timestamp) when you want
      to force a fresh load during development. -->
 
-<!-- Shared mock data -->
-<script src="data.js?v=9"></script>
+<!-- Shared mock data (used as SWR fallback while the API is loading) -->
+<script src="data.js?v=10"></script>
+
+<!-- API adapter: fetches /options + /trends and reshapes to the frontend's contract -->
+<script src="api.js?v=10"></script>
 
 <!-- Demo auth (window.AuthProvider, window.useAuth) -->
-<script type="text/babel" src="auth.js?v=9"></script>
+<script type="text/babel" src="auth.js?v=10"></script>
 
 <!-- Session-scoped data store (window.DataProvider, window.useData) -->
-<script type="text/babel" src="dataProvider.js?v=9"></script>
+<script type="text/babel" src="dataProvider.js?v=10"></script>
 
 <!-- Components — order matters: leaves first, then composites -->
 <script type="text/babel" src="components/Tag.jsx?v=9"></script>

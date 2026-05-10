@@ -5,14 +5,8 @@
 // The image upload is purely visual for the recording — the file is read
 // into a local data-URL, never uploaded anywhere.
 
-// Options sourced from window.LOOKUP_OPTIONS (loaded from data.js — mirrors lookup.csv).
-const CATEGORY_CHOICES = {
-  productType: LOOKUP_OPTIONS.productType,
-  color:       LOOKUP_OPTIONS.color,
-  material:    LOOKUP_OPTIONS.material,
-  appearance:  LOOKUP_OPTIONS.appearance,
-  gender:      LOOKUP_OPTIONS.gender,
-};
+// Vocabularies come from useData().options (fetched from /options at runtime,
+// with data.js's LOOKUP_OPTIONS as fallback). Resolved per-render below.
 
 const TAG_LABELS = {
   productType: 'Type', color: 'Color', material: 'Material', appearance: 'Appearance', gender: 'Gender',
@@ -106,12 +100,20 @@ function ImageDropzone({ image, onChange }) {
 }
 
 function ScreenAdd({ onNav }) {
-  const { addItem }           = useData();
+  const { addItem, options }  = useData();
   const [name, setName]       = React.useState('');
   const [cost, setCost]       = React.useState('');
   const [tags, setTags]       = React.useState({});
   const [image, setImage]     = React.useState(null);     // data-URL or null
   const [submitted, setSubmitted] = React.useState(false);
+
+  const CATEGORY_CHOICES = {
+    productType: options.productType || [],
+    color:       options.color       || [],
+    material:    options.material    || [],
+    appearance:  options.appearance  || [],
+    gender:      options.gender      || [],
+  };
 
   const handleSubmit = (e) => {
     e.preventDefault();
