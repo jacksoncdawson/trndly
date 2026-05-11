@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:24px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:10px 18px;border-radius:var(--radius-full);
+  font-family:var(--font-sans);font-size:var(--text-sm);font-weight:600;
+  border:2px solid var(--color-border);cursor:pointer;
+  transition:transform 160ms cubic-bezier(0.34,1.4,0.64,1),box-shadow 160ms cubic-bezier(0.2,0,0,1);
+  box-shadow:var(--shadow-sm);
+}
+.btn:hover{transform:translate(-1px,-1px);box-shadow:var(--shadow-md)}
+.btn:active{transform:translate(1px,1px);box-shadow:var(--shadow-xs)}
+.btn-primary{background:var(--color-primary);color:var(--color-primary-fg)}
+.btn-secondary{background:var(--color-surface-1);color:var(--color-text-primary)}
+.btn-pop{background:var(--color-pop-mustard);color:var(--color-text-primary)}
+.btn-ghost{background:transparent;color:var(--color-text-primary);border-color:transparent;box-shadow:none}
+.btn-ghost:hover{background:var(--color-surface-3);box-shadow:none;transform:none}
+.btn-sm{padding:6px 12px;font-size:var(--text-xs)}
+.divider{width:1px;height:36px;background:var(--color-border-soft);margin:0 4px}
+</style>
+</head>
+<body>
+<div class="row">
+  <button class="btn btn-primary">Add to inventory</button>
+  <button class="btn btn-pop">Get prediction</button>
+  <button class="btn btn-secondary">Save for later</button>
+  <button class="btn btn-ghost">Cancel</button>
+  <div class="divider"></div>
+  <button class="btn btn-primary btn-sm">Add reminder</button>
+  <button class="btn btn-secondary btn-sm">View all</button>
+</div>
+</body>
+</html>

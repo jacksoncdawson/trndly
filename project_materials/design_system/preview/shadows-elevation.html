@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:28px 24px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:24px;align-items:flex-end}
+.item{display:flex;flex-direction:column;align-items:center;gap:10px}
+.card{background:var(--color-surface-1);border:2px solid var(--color-border);border-radius:var(--radius-md);width:80px;height:56px}
+.name{font-size:11px;font-weight:600;color:var(--color-text-primary)}
+.label{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);text-align:center}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="item">
+    <div class="card" style="box-shadow:var(--shadow-xs)"></div>
+    <div class="name">xs</div>
+    <div class="label">1px 1px 0</div>
+  </div>
+  <div class="item">
+    <div class="card" style="box-shadow:var(--shadow-sm)"></div>
+    <div class="name">sm</div>
+    <div class="label">2px 2px 0<br/>default card</div>
+  </div>
+  <div class="item">
+    <div class="card" style="box-shadow:var(--shadow-md)"></div>
+    <div class="name">md</div>
+    <div class="label">4px 4px 0<br/>hover / panels</div>
+  </div>
+  <div class="item">
+    <div class="card" style="box-shadow:var(--shadow-lg)"></div>
+    <div class="name">lg</div>
+    <div class="label">6px 6px 0<br/>feature panels</div>
+  </div>
+  <div style="width:1px;background:var(--color-border-soft);height:56px;align-self:center"></div>
+  <div class="item">
+    <div class="card" style="box-shadow:var(--shadow-soft-sm)"></div>
+    <div class="name">soft-sm</div>
+    <div class="label">0 2px 6px<br/>fallback only</div>
+  </div>
+  <div class="item">
+    <div class="card" style="box-shadow:var(--shadow-soft-md)"></div>
+    <div class="name">soft-md</div>
+    <div class="label">0 8px 20px<br/>fallback only</div>
+  </div>
+</div>
+</body>
+</html>

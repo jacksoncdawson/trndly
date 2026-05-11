@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:20px 24px;-webkit-font-smoothing:antialiased}
+.row{display:flex;align-items:flex-end;gap:10px}
+.bar-wrap{display:flex;flex-direction:column;align-items:center;gap:6px}
+.bar{background:var(--color-pop-mustard);border:2px solid var(--color-border);border-radius:var(--radius-sm);width:38px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:4px}
+.bar-label{font-family:var(--font-mono);font-size:9px;font-weight:600;color:var(--color-text-primary)}
+.bar-val{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary)}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="bar-wrap">
+    <div class="bar" style="height:4px"><span class="bar-label"></span></div>
+    <div class="bar-val">1 · 4px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:8px"></div>
+    <div class="bar-val">2 · 8px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:12px"></div>
+    <div class="bar-val">3 · 12px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:16px"><span class="bar-label">4</span></div>
+    <div class="bar-val">4 · 16px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:24px"><span class="bar-label">5</span></div>
+    <div class="bar-val">5 · 24px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:32px"><span class="bar-label">6</span></div>
+    <div class="bar-val">6 · 32px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:48px"><span class="bar-label">7</span></div>
+    <div class="bar-val">7 · 48px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:64px"><span class="bar-label">8</span></div>
+    <div class="bar-val">8 · 64px</div>
+  </div>
+  <div class="bar-wrap">
+    <div class="bar" style="height:96px"><span class="bar-label">9</span></div>
+    <div class="bar-val">9 · 96px</div>
+  </div>
+</div>
+</body>
+</html>

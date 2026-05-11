@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#fff;font-family:var(--font-sans);padding:20px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.swatch{flex:1;min-width:90px}
+.chip{height:64px;border-radius:var(--radius-md);border:2px solid var(--color-border)}
+.label{margin-top:8px;font-family:var(--font-mono);font-size:11px;color:var(--color-text-tertiary);line-height:1.4}
+.name{font-size:11px;font-weight:600;color:var(--color-text-primary);margin-top:2px}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-bg)"></div>
+    <div class="name">bg</div>
+    <div class="label">#fbf6ee · cream paper</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-surface-1)"></div>
+    <div class="name">surface-1</div>
+    <div class="label">#ffffff · cards</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-surface-2)"></div>
+    <div class="name">surface-2</div>
+    <div class="label">#fdfaf3 · nested hover</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-surface-3)"></div>
+    <div class="name">surface-3</div>
+    <div class="label">#f5ede0 · tinted callout</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-surface-sunk)"></div>
+    <div class="name">surface-sunk</div>
+    <div class="label">#f0e7d5 · inputs / wells</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-text-primary)"></div>
+    <div class="name">ink</div>
+    <div class="label">#1a1a1a · borders + text</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-text-secondary)"></div>
+    <div class="name">fg2</div>
+    <div class="label">#5a544a · secondary</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="background:var(--color-text-tertiary)"></div>
+    <div class="name">fg3</div>
+    <div class="label">#8a8275 · hints</div>
+  </div>
+</div>
+</body>
+</html>

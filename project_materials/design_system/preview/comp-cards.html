@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..800,0..100,0..1&display=swap"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:20px 24px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:16px;flex-wrap:wrap}
+.card{
+  background:var(--color-surface-1);
+  border:2px solid var(--color-border);
+  border-radius:var(--radius-lg);
+  padding:var(--space-4);
+  box-shadow:var(--shadow-sm);
+  flex:1;min-width:160px;
+}
+.card-title{font-size:var(--text-md);font-weight:600;margin-bottom:4px}
+.card-sub{font-size:var(--text-xs);color:var(--color-text-secondary);margin-bottom:12px}
+.metric{
+  font-family:var(--font-display);
+  font-weight:800;
+  font-size:var(--text-2xl);
+  line-height:1;
+  font-variation-settings:'SOFT' 50;
+}
+.meta-label{font-size:var(--text-2xs);text-transform:uppercase;letter-spacing:var(--tracking-caps);color:var(--color-text-tertiary);font-weight:600}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="card">
+    <div class="card-title">Default card</div>
+    <div class="card-sub">2px border · shadow-sm · radius-lg</div>
+    <div class="meta-label">est. return</div>
+    <div class="metric" style="color:var(--color-primary)">$84</div>
+  </div>
+  <div class="card" style="background:var(--color-surface-2)">
+    <div class="card-title">Nested / hover</div>
+    <div class="card-sub">surface-2 on surface-1</div>
+    <div class="meta-label">cost</div>
+    <div class="metric">$24</div>
+  </div>
+  <div class="card" style="background:var(--color-pop-mustard-soft);box-shadow:var(--shadow-md)">
+    <div class="card-title">Recommendation banner</div>
+    <div class="card-sub">mustard-soft bg · shadow-md</div>
+    <div class="meta-label">our recommendation</div>
+    <div style="font-family:var(--font-display);font-weight:800;font-size:var(--text-lg);margin-top:2px;font-variation-settings:'SOFT' 50">Hold for 1 month</div>
+  </div>
+  <div class="card" style="background:var(--color-surface-3)">
+    <div class="card-title">Tinted callout</div>
+    <div class="card-sub">surface-3 — sidebar / aside</div>
+    <div style="font-size:var(--text-sm);color:var(--color-text-secondary);line-height:1.6">Linen + burgundy are both rising heading into summer.</div>
+  </div>
+</div>
+</body>
+</html>

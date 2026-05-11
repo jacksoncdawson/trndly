@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..800,0..100,0..1&display=swap"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:24px;display:flex;gap:32px;align-items:center;flex-wrap:wrap;-webkit-font-smoothing:antialiased}
+.item{display:flex;flex-direction:column;align-items:center;gap:10px}
+.label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--color-text-tertiary);font-family:var(--font-mono);text-align:center}
+</style>
+</head>
+<body>
+
+<!-- App icon: forest green bg -->
+<div class="item">
+  <img src="../assets/brand-mark.svg" width="80" height="80" style="border-radius:20px;border:2px solid #1a1a1a;box-shadow:3px 3px 0 0 #1a1a1a"/>
+  <div class="label">app icon · forest</div>
+</div>
+
+<!-- App icon: cream bg -->
+<div class="item">
+  <img src="../assets/brand-mark-light.svg" width="80" height="80" style="border-radius:20px;border:2px solid #1a1a1a;box-shadow:3px 3px 0 0 #1a1a1a"/>
+  <div class="label">app icon · light</div>
+</div>
+
+<!-- Wordmark horizontal -->
+<div class="item">
+  <div style="display:flex;align-items:center;gap:10px;padding:14px 18px;background:var(--color-surface-1);border:2px solid var(--color-border);border-radius:14px;box-shadow:2px 2px 0 0 var(--color-border)">
+    <img src="../assets/brand-mark.svg" width="32" height="32" style="border-radius:9px;border:2px solid #1a1a1a;box-shadow:2px 2px 0 0 #1a1a1a;flex-shrink:0"/>
+    <span style="font-family:'Fraunces',serif;font-weight:800;font-size:26px;letter-spacing:-0.02em;font-variation-settings:'SOFT' 50;line-height:1;white-space:nowrap">trndly<span style="color:#d96941">.</span></span>
+  </div>
+  <div class="label">wordmark · horizontal</div>
+</div>
+
+<!-- Mark only -->
+<div class="item">
+  <img src="../assets/brand-mark-only.svg" width="28" height="100"/>
+  <div class="label">mark only</div>
+</div>
+
+</body>
+</html>

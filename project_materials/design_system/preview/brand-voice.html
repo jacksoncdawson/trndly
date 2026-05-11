@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..800,0..100,0..1&display=swap"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:24px;-webkit-font-smoothing:antialiased}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.card{background:var(--color-surface-1);border:2px solid var(--color-border);border-radius:var(--radius-lg);padding:20px;box-shadow:var(--shadow-sm)}
+.card-title{font-size:var(--text-md);font-weight:700;margin-bottom:4px}
+.card-sub{font-size:var(--text-xs);color:var(--color-text-secondary);margin-bottom:12px;line-height:1.5}
+.example{font-family:var(--font-display);font-weight:800;font-size:var(--text-xl);font-variation-settings:'SOFT' 50;margin:4px 0}
+.note{font-size:var(--text-xs);color:var(--color-text-tertiary);font-family:var(--font-mono)}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="card">
+    <div class="card-title">Numbers come first</div>
+    <div class="card-sub">Lead with the number the user cares about. Explanation follows.</div>
+    <div class="example">$84</div>
+    <div style="font-size:var(--text-sm);color:var(--color-text-secondary)">estimated return if you list in 1 month</div>
+    <div class="note" style="margin-top:8px">not: "Estimated return: $84"</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Verbs over labels</div>
+    <div class="card-sub">System labels are lowercase. Recommendations use plain verbs.</div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="background:var(--color-trend-rising-soft);border:2px solid var(--color-border);border-radius:99px;padding:3px 10px;font-size:12px;font-weight:700">↗ rising</span>
+        <span style="font-size:var(--text-xs);color:var(--color-text-secondary)">not "TREND STATUS: RISING"</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="background:var(--color-pop-mustard);border:2px solid var(--color-border);border-radius:99px;padding:3px 10px;font-size:12px;font-weight:700">★ list in 1 mo</span>
+        <span style="font-size:var(--text-xs);color:var(--color-text-secondary)">not "Optimal listing window: T+30"</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:var(--text-sm);font-weight:600">Hold for 1 month, then list</span>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
