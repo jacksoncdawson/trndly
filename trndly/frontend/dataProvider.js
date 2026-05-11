@@ -1,56 +1,134 @@
 // dataProvider.js — session-scoped store for inventory + signals,
-// with API-backed trends + options served via SWR.
+// with API-backed trends + options + health.
 //
 // ─────────────────────────────────────────────────────────────────
 // Public surface (the contract screens consume):
 //   useData() → {
-//     inventory, signals, recentlyAddedName,    // session state
+//     inventory, signals, recentlyAddedName,    // session state (start empty)
 //     addItem(item),                             // mutator
-//     trends, options, lookupIds,                // API-backed (SWR)
-//     trendsLoading, optionsLoading,
+//     trends,                                    // API-backed; undefined while loading/errored
+//     options, lookupIds,                        // API-backed (with one seed exception)
+//     trendsLoading,  trendsError,
+//     optionsLoading, optionsError,
+//     health, healthLoading, healthError,        // for the sidebar API-status pill
 //   }
 //   <DataProvider>
 //
-// Trends and options are fetched from the FastAPI service; while loading
-// (or on error) we fall back to the seed mocks from data.js so the UI
-// always has something to render.
+// trends / options / health come from the FastAPI service. When they fail
+// or are still loading, this provider exposes `undefined`/error rather than
+// substituting fixtures — the screens render explicit loading and error
+// states so the failure mode is visible.
 //
-// Adds persist for the browser session only — refreshing the page resets
-// to the seed `INVENTORY_DATA`/`INVENTORY_SIGNALS` from data.js. To make
-// inventory durable, swap the useState seeds for an API fetch and route
-// addItem through POST /api/inventory.
-// ─────────────────────────────────────────────────────────────────
+// One intentional exception: `options` falls back to `LOOKUP_OPTIONS` from
+// data.js. The /options endpoint does not yet expose `colorSpectrum` or
+// `productGroup`, and the Add Item form depends on them. Remove the
+// fallback once the endpoint is extended.
+//
+// Inventory starts empty and persists for the browser session only —
+// refreshing the page resets it. To make it durable, swap the empty
+// initial state for an API fetch and route addItem through POST /api/inventory.
+//
+// ─── Fetcher hook ────────────────────────────────────────────────────
+// We use a tiny in-house useFetch instead of SWR. SWR 2.x ships ESM only,
+// so the UMD CDN tag we used to rely on returned 404; rather than wrestle
+// with bundling for a no-build setup, this hook covers what we actually
+// need: keyed cache, optional polling, optional refocus revalidation.
+// ─────────────────────────────────────────────────────────────────────
 
 const DataContext = React.createContext(null);
 
-// SWR is loaded as UMD in index.html → exposes window.SWR.useSWR.
-const useSWR = (window.SWR && (window.SWR.default || window.SWR.useSWR)) || null;
+// Module-level cache shared across all useFetch consumers of the same key.
+const _fetchCache = new Map();        // key → { data?, error? }
+const _fetchSubscribers = new Map();  // key → Set<setState>
 
-function _safeSWR(key, fetcher, options) {
-  // If SWR didn't load (CDN failure, offline dev), return a no-data shape
-  // so the rest of the provider still renders against mock fallbacks.
-  if (!useSWR) return { data: undefined, error: undefined, isLoading: false };
-  return useSWR(key, fetcher, options);
+function _notify(key, payload) {
+  const subs = _fetchSubscribers.get(key);
+  if (!subs) return;
+  for (const set of subs) set({ ...payload, isLoading: false });
+}
+
+function useFetch(key, fetcher, options) {
+  const opts = options || {};
+  const { refreshInterval = 0, revalidateOnFocus = false } = opts;
+
+  const cached = _fetchCache.get(key);
+  const [state, setState] = React.useState(() => ({
+    data:      cached ? cached.data  : undefined,
+    error:     cached ? cached.error : undefined,
+    isLoading: !cached,
+  }));
+
+  React.useEffect(() => {
+    if (!key) return undefined;
+
+    let alive = true;
+    let subs = _fetchSubscribers.get(key);
+    if (!subs) { subs = new Set(); _fetchSubscribers.set(key, subs); }
+    subs.add(setState);
+
+    const run = () => {
+      Promise.resolve()
+        .then(() => fetcher(key))
+        .then(data => {
+          if (!alive) return;
+          const next = { data, error: undefined };
+          _fetchCache.set(key, next);
+          _notify(key, next);
+        })
+        .catch(error => {
+          if (!alive) return;
+          const next = { data: undefined, error };
+          _fetchCache.set(key, next);
+          _notify(key, next);
+        });
+    };
+
+    // Always fire an initial fetch on mount — gives the user a fresh value
+    // even when re-mounting against a stale cache entry (e.g. after fix-and-reload).
+    run();
+
+    let intervalId;
+    if (refreshInterval > 0) intervalId = setInterval(run, refreshInterval);
+
+    let focusHandler;
+    if (revalidateOnFocus) {
+      focusHandler = () => run();
+      window.addEventListener('focus', focusHandler);
+    }
+
+    return () => {
+      alive = false;
+      subs.delete(setState);
+      if (intervalId) clearInterval(intervalId);
+      if (focusHandler) window.removeEventListener('focus', focusHandler);
+    };
+  }, [key, refreshInterval, revalidateOnFocus]);
+
+  return state;
 }
 
 function DataProvider({ children }) {
-  const [inventory, setInventory] = React.useState(() => INVENTORY_DATA.slice());
-  const [signals,   setSignals]   = React.useState(() => Object.assign({}, INVENTORY_SIGNALS));
+  const [inventory, setInventory] = React.useState([]);
+  const [signals,   setSignals]   = React.useState({});
   // Name of the most recently added item — used to animate its tile on the
   // inventory grid. Auto-clears after a few seconds so it doesn't re-animate
   // on subsequent visits within the same session.
   const [recentlyAddedName, setRecentlyAddedName] = React.useState(null);
 
-  // ─── API-backed trends + options ─────────────────────────────────────
-  const trendsRes  = _safeSWR('/trends',  apiFetcher, { revalidateOnFocus: false });
-  const optionsRes = _safeSWR('/options', apiFetcher, { revalidateOnFocus: false });
+  // ─── API-backed trends + options + health ─────────────────────────────
+  const trendsRes  = useFetch('/trends',  apiFetcher, { revalidateOnFocus: false });
+  const optionsRes = useFetch('/options', apiFetcher, { revalidateOnFocus: false });
+  const healthRes  = useFetch('/health',  apiFetcher, { refreshInterval: 15000, revalidateOnFocus: true });
 
+  // `undefined` while loading or errored — screens distinguish via trendsLoading/trendsError.
   const trends = React.useMemo(() => {
     if (trendsRes.data) return mapTrendsToTrendData(trendsRes.data);
-    // Fallback: hand-authored mock from data.js.
-    return TREND_DATA;
+    return undefined;
   }, [trendsRes.data]);
 
+  // Options falls back to LOOKUP_OPTIONS so the Add form keeps working with
+  // colorSpectrum/productGroup (not yet exposed by /options). Drop this
+  // fallback once those vocabs are in the endpoint response.
   const optionsState = React.useMemo(() => {
     if (optionsRes.data) {
       return {
@@ -62,9 +140,8 @@ function DataProvider({ children }) {
   }, [optionsRes.data]);
 
   // Keep the legacy window globals in sync with whatever's currently loaded
-  // — some screens still read them directly; refactoring those is a
-  // follow-up. SWR handles re-rendering when data changes so the screens
-  // see the fresh values on the next render cycle.
+  // — `lookupTrendState` in data.js reads window.TREND_DATA lazily, and
+  // refactoring the consumers is a follow-up.
   React.useEffect(() => {
     if (trendsRes.data) window.TREND_DATA = trends;
   }, [trends]);
@@ -93,6 +170,9 @@ function DataProvider({ children }) {
     optionsLoading: optionsRes.isLoading,
     trendsError:    trendsRes.error,
     optionsError:   optionsRes.error,
+    health:         healthRes.data,
+    healthLoading:  healthRes.isLoading,
+    healthError:    healthRes.error,
   };
 
   return (
@@ -108,4 +188,4 @@ function useData() {
   return ctx;
 }
 
-Object.assign(window, { DataProvider, useData });
+Object.assign(window, { DataProvider, useData, useFetch });

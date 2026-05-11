@@ -1,10 +1,22 @@
 // ScreenInventory.jsx — user's inventory grouped by recommended listing window.
-// Three groups: list now, list in 1 month, list in 2+ months. Click a tile -> Item Detail.
+//
+// Five groups, mapping the recommendation outcomes from
+// `deriveRecommendationFromSeries` in data.js:
+//   List now             ← state ∈ {list now, falling}
+//   List in 1 month      ← state = hold 1mo  (forecast peaks at h1)
+//   List in 2 months     ← state = hold 2mo  (forecast peaks at h2)
+//   Hold 3+ months       ← state = hold 3+   (forecast peaks at h3..h6)
+//   More data needed     ← state = more data needed  (no series available)
+//
+// Empty groups collapse so the screen never shows an empty section header.
+// Click a tile → Item Detail.
 
 const TIMELINE_GROUPS = [
-  { key: 'now', title: 'List now',          states: ['list now', 'falling'], accent: '#f8ebc9', glyph: '★' },
-  { key: '1mo', title: 'List in 1 month',   states: ['hold 1mo'],            accent: '#d8e7dc', glyph: '↗' },
-  { key: '2mo', title: 'List in 2+ months', states: ['hold 2mo'],            accent: '#ece2cf', glyph: '→' },
+  { key: 'now',  title: 'List now',         states: ['list now', 'falling'], accent: '#f8ebc9', glyph: '★' },
+  { key: '1mo',  title: 'List in 1 month',  states: ['hold 1mo'],            accent: '#d8e7dc', glyph: '↗' },
+  { key: '2mo',  title: 'List in 2 months', states: ['hold 2mo'],            accent: '#d8e7dc', glyph: '↗' },
+  { key: '3+',   title: 'Hold 3+ months',   states: ['hold 3+'],             accent: '#ece2cf', glyph: '→' },
+  { key: 'tbd',  title: 'More data needed', states: ['more data needed'],    accent: '#fdfaf3', glyph: '?' },
 ];
 
 // Single tile in the inventory grid. Falls back to a placeholder garment SVG
@@ -70,7 +82,18 @@ function ScreenInventory({ onNav, onSelectItem }) {
         action={<Button variant="primary" size="sm" onClick={() => onNav('add')}>+ Add Item</Button>}
       />
       <div style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 32 }}>
-        {groups.map(g => (
+        {inventory.length === 0 ? (
+          <div style={{
+            background: '#fff', border: '2px solid #1a1a1a', borderRadius: 14,
+            boxShadow: '2px 2px 0 0 #1a1a1a', padding: '20px 22px', maxWidth: 560,
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 18, marginBottom: 6 }}>No items yet.</div>
+            <div style={{ color: '#5a544a', fontSize: 14, marginBottom: 14 }}>
+              Add your first piece to start getting listing recommendations.
+            </div>
+            <Button variant="primary" onClick={() => onNav('add')}>+ Add Item</Button>
+          </div>
+        ) : groups.map(g => (
           <section key={g.key}>
             {/* Group header — glyph, title, divider */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, paddingBottom: 10, borderBottom: '2px solid #1a1a1a' }}>

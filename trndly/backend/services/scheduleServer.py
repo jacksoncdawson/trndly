@@ -5,13 +5,22 @@ The monthly tick (``python -m pipelines.monthly run``) writes two parquets:
     data/predictions/predictions_univariate_<YYYY-MM>.parquet
     data/predictions/predictions_fingerprint_<YYYY-MM>.parquet
 
-This service loads the most recent of each at startup and exposes them via
-three GET routes:
+This service loads the most recent of each at startup and exposes four
+GET routes:
 
     GET /options                  — dropdown vocabularies (name + id per category)
     GET /trends                   — every (dimension, level) row from univariate
     GET /forecast/fingerprint     — single row matching the 5-D fingerprint
-    GET /health                   — liveness + bundle status
+    GET /health                   — liveness + bundle status + `lags_synthetic` flag
+
+At load time we also join the observed shares at the anchor month and
+its three prior months from ``merged_*.parquet`` onto each predictions row
+(``share_lag3``, ``share_lag2``, ``share_lag1``, ``share_t``) so the
+frontend has the full 10-point series for charts without a second call.
+If any of those lag months came from
+``scripts/backfill_anchor_lags.py`` (the synthetic-history stopgap for
+isolated live months), ``BUNDLE.lags_synthetic`` flags it and ``/health``
+surfaces that to the UI for the chart-legend footnote.
 
 There are no live model calls in the request path. To refresh the bundle,
 restart the container (or re-run the tick + redeploy).
@@ -48,6 +57,8 @@ from pipelines.contracts import (
 from pipelines.paths import (
     FRONTEND_DIR,
     LOOKUP_CSV,
+    MERGED_FINGERPRINT_PARQUET,
+    MERGED_UNIVARIATE_PARQUET,
     latest_predictions_fingerprint_parquet,
     latest_predictions_univariate_parquet,
 )
@@ -67,6 +78,10 @@ class PredictionsBundle:
     univariate: pd.DataFrame
     fingerprint: pd.DataFrame
     anchor_month: str   # ISO date string from the parquets
+    # True if any of the anchor's 3 prior lag months came from the synthetic
+    # backfill (source == 'backfill' in the merged cube). Sourced once at
+    # load time so /health can report it without re-reading the cube.
+    lags_synthetic: bool = False
 
 
 BUNDLE: PredictionsBundle | None = None
@@ -95,6 +110,11 @@ class HealthResponse(BaseModel):
     predictions_anchor_month: Optional[str] = None
     predictions_univariate_rows: Optional[int] = None
     predictions_fingerprint_rows: Optional[int] = None
+    # True when the lag values served alongside predictions came from the
+    # synthetic-backfill stopgap (see scripts/backfill_anchor_lags.py). UI
+    # surfaces this as a small footnote so users know the "past 3mo"
+    # context on charts isn't real observed history.
+    lags_synthetic: bool = False
     error: Optional[str] = None
 
 
@@ -115,6 +135,15 @@ class TrendRow(BaseModel):
     dimension: str
     level_id: int
     level_name: str
+    # Observed shares at anchor − 3, − 2, − 1, and anchor month itself.
+    # Null when the cube doesn't carry the value (predictions cube only
+    # emits rows where the lag history is complete, so these should be set
+    # in practice, but the schema is permissive).
+    share_lag3: Optional[float] = None
+    share_lag2: Optional[float] = None
+    share_lag1: Optional[float] = None
+    share_t:    Optional[float] = None
+    # Forward 6-horizon forecast.
     y_h1: float
     y_h2: float
     y_h3: float
@@ -136,6 +165,10 @@ class FingerprintForecastResponse(BaseModel):
     color_master_name: str
     graphical_appearance_name: str
     material_name: str
+    share_lag3: Optional[float] = None
+    share_lag2: Optional[float] = None
+    share_lag1: Optional[float] = None
+    share_t:    Optional[float] = None
     y_h1: float
     y_h2: float
     y_h3: float
@@ -147,6 +180,64 @@ class FingerprintForecastResponse(BaseModel):
 
 
 # --- LOADER ---
+
+def _opt_float(v) -> Optional[float]:
+    """Coerce a possibly-NaN pandas value to a JSON-safe float-or-None."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(f):
+        return None
+    return f
+
+
+_LAG_COLUMNS: tuple[tuple[int, str], ...] = (
+    (3, "share_lag3"),
+    (2, "share_lag2"),
+    (1, "share_lag1"),
+    (0, "share_t"),
+)
+
+
+def _attach_lag_shares(
+    preds: pd.DataFrame, merged: pd.DataFrame, key_cols: list[str]
+) -> pd.DataFrame:
+    """Attach `share_lag3`, `share_lag2`, `share_lag1`, `share_t` to a predictions
+    frame by joining against the merged cube on (anchor − lag, *key_cols).
+
+    The merged cube may carry duplicate (month, *key) rows when historical and
+    live snapshots overlap; we mean-pool to a single observation per key + month
+    before the join. Missing lag values land as NaN/None.
+    """
+    if preds.empty:
+        for _, col in _LAG_COLUMNS:
+            preds[col] = float("nan")
+        return preds
+
+    # Dedupe + restrict to the columns we need for the join.
+    obs = (
+        merged.groupby(["month"] + key_cols, as_index=False, observed=False)
+        ["share_articles"]
+        .mean()
+    )
+    obs["month"] = pd.to_datetime(obs["month"])
+
+    out = preds.copy()
+    out["_anchor_dt"] = pd.to_datetime(out["anchor_month"])
+    for lag, col in _LAG_COLUMNS:
+        target = out["_anchor_dt"] - pd.DateOffset(months=lag)
+        joined = out.assign(_target=target).merge(
+            obs.rename(columns={"month": "_target", "share_articles": col}),
+            on=["_target"] + key_cols,
+            how="left",
+        )
+        out[col] = joined[col].values
+    out = out.drop(columns=["_anchor_dt"])
+    return out
+
 
 def reload_predictions_bundle() -> None:
     """Load the latest predictions parquets into BUNDLE."""
@@ -175,6 +266,45 @@ def reload_predictions_bundle() -> None:
         uv = validate_predictions_univariate_frame(uv)
         fp = validate_predictions_fingerprint_frame(fp)
 
+        # Attach observed shares at anchor and 3 prior months so the API
+        # surfaces the same time window the chart needs (past + future).
+        # Sourced from merged_*.parquet — no schema changes upstream.
+        # We also detect whether any of those lag months came from the
+        # backfill stopgap so /health can flag the chart's past as synthetic.
+        anchor_dt = pd.Timestamp(uv["anchor_month"].iloc[0])
+        lag_months = {anchor_dt - pd.DateOffset(months=k) for k in (1, 2, 3)}
+        lags_synthetic = False
+
+        if MERGED_UNIVARIATE_PARQUET.exists():
+            merged_uv = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
+            merged_uv["month"] = pd.to_datetime(merged_uv["month"])
+            if "source" in merged_uv.columns and (
+                (merged_uv["source"] == "backfill")
+                & (merged_uv["month"].isin(lag_months))
+            ).any():
+                lags_synthetic = True
+            uv = _attach_lag_shares(
+                uv,
+                merged_uv,
+                key_cols=["dimension", "level_id"],
+            )
+        if MERGED_FINGERPRINT_PARQUET.exists():
+            merged_fp = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
+            merged_fp["month"] = pd.to_datetime(merged_fp["month"])
+            if "source" in merged_fp.columns and (
+                (merged_fp["source"] == "backfill")
+                & (merged_fp["month"].isin(lag_months))
+            ).any():
+                lags_synthetic = True
+            fp = _attach_lag_shares(
+                fp,
+                merged_fp,
+                key_cols=[
+                    "product_type_id", "gender_id", "color_master_id",
+                    "graphical_appearance_id", "material_id",
+                ],
+            )
+
         # Both parquets carry an anchor_month column; report whichever's most recent.
         anchors = sorted(
             [pd.Timestamp(uv["anchor_month"].iloc[0]),
@@ -183,7 +313,9 @@ def reload_predictions_bundle() -> None:
         anchor_month = anchors[-1].strftime("%Y-%m")
 
         BUNDLE = PredictionsBundle(
-            univariate=uv, fingerprint=fp, anchor_month=anchor_month
+            univariate=uv, fingerprint=fp,
+            anchor_month=anchor_month,
+            lags_synthetic=lags_synthetic,
         )
         logger.info(
             "predictions bundle ready (univariate=%d rows, fingerprint=%d rows, anchor=%s)",
@@ -224,6 +356,7 @@ def health() -> HealthResponse:
         predictions_anchor_month=BUNDLE.anchor_month,
         predictions_univariate_rows=int(len(BUNDLE.univariate)),
         predictions_fingerprint_rows=int(len(BUNDLE.fingerprint)),
+        lags_synthetic=BUNDLE.lags_synthetic,
     )
 
 
@@ -273,6 +406,10 @@ def trends(
             dimension=str(row["dimension"]),
             level_id=int(row["level_id"]),
             level_name=str(row["level_name"]),
+            share_lag3=_opt_float(row.get("share_lag3")),
+            share_lag2=_opt_float(row.get("share_lag2")),
+            share_lag1=_opt_float(row.get("share_lag1")),
+            share_t=_opt_float(row.get("share_t")),
             y_h1=float(row["y_h1"]),
             y_h2=float(row["y_h2"]),
             y_h3=float(row["y_h3"]),
@@ -328,6 +465,10 @@ def forecast_fingerprint(
         color_master_name=str(row["color_master_name"]),
         graphical_appearance_name=str(row["graphical_appearance_name"]),
         material_name=str(row["material_name"]),
+        share_lag3=_opt_float(row.get("share_lag3")),
+        share_lag2=_opt_float(row.get("share_lag2")),
+        share_lag1=_opt_float(row.get("share_lag1")),
+        share_t=_opt_float(row.get("share_t")),
         y_h1=float(row["y_h1"]),
         y_h2=float(row["y_h2"]),
         y_h3=float(row["y_h3"]),

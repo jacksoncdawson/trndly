@@ -2,14 +2,25 @@
 
 Iterates every ``(dimension, level_id)`` and every distinct 5-D fingerprint
 present at the latest anchor month of the merged cubes; scores each via the
-champion model; classifies the trajectory via :mod:`pipelines.monthly.state`;
+champion model; classifies the trajectory via :mod:`pipelines.monthly.state`
+(forward-first hybrid rule consuming share_lag1, share_t, and y_h1..h6);
 decodes IDs to human names via ``lookup.csv``; writes two parquet files:
 
     data/predictions/predictions_univariate_<YYYY-MM>.parquet
     data/predictions/predictions_fingerprint_<YYYY-MM>.parquet
 
-Rows where the cube lacks t-3..t-1 lag coverage are silently skipped — the
-parquet only contains rows for which a forecast was producible.
+Anchor selection: ``_find_eligible_anchor`` picks the latest month with
+3 contiguous prior months in the cube. When the latest live month is
+isolated (no real priors), run ``scripts/backfill_anchor_lags.py`` first
+to synthesize seasonal priors so the live month becomes eligible. If
+this step runs against a cube that has no synthetic backfill and an
+isolated live month, predict will log a WARNING and fall back to the
+nearest eligible (typically historical) anchor — it tells you how to
+fix it in the log message.
+
+Rows where the cube lacks t-3..t-1 lag coverage at a candidate anchor
+are silently skipped — the parquet only contains rows for which a
+forecast was producible.
 
 Schemas are enforced via :mod:`pipelines.contracts` validators
 (``validate_predictions_univariate_frame`` / ``validate_predictions_fingerprint_frame``)
@@ -149,7 +160,12 @@ def _univariate_rows(
                 f"univariate model returned {len(y_hat)} horizons (expected 6)"
             )
         y_h0 = float(feat["share_t"])
-        state, stat = classify_state(y_h0, y_hat)
+        past_lags = [
+            float(feat["share_lag3"]),
+            float(feat["share_lag2"]),
+            float(feat["share_lag1"]),
+        ]
+        state, stat = classify_state(y_h0, y_hat, past_lags=past_lags)
         level_name = lookup_index.get(
             (str(dimension), int(level_id)),
             f"{dimension}:{level_id}",
@@ -208,7 +224,12 @@ def _fingerprint_rows(
             )
         y_hat = Y[i, :].tolist()
         y_h0 = float(X.iloc[i]["share_t"])
-        state, stat = classify_state(y_h0, y_hat)
+        past_lags = [
+            float(X.iloc[i]["share_lag3"]),
+            float(X.iloc[i]["share_lag2"]),
+            float(X.iloc[i]["share_lag1"]),
+        ]
+        state, stat = classify_state(y_h0, y_hat, past_lags=past_lags)
 
         ids: dict[str, int] = {col: int(v) for col, v in zip(FINGERPRINT_COLS, key_tuple)}
         names: dict[str, str] = {
@@ -262,6 +283,23 @@ def run_predict() -> dict[str, int]:
     # groups may still fail their own lag check and are silently skipped.
     anchor_fp = _find_eligible_anchor(cube_fp)
     anchor_uni = _find_eligible_anchor(cube_uni)
+
+    # Soft-warn when the chosen anchor isn't the latest month on disk — most
+    # often this means the latest live scrape lacks 3 prior lag months and
+    # predict fell back to the historical block. Surface the backfill stopgap
+    # so the operator can decide whether to run it instead of silently
+    # serving predictions from a years-old anchor.
+    latest_uni_month = pd.to_datetime(cube_uni["month"]).max()
+    if anchor_uni < latest_uni_month:
+        logger.warning(
+            "predict: anchor (%s) is older than the latest month in the cube (%s). "
+            "The newer month lacks 3 contiguous prior lags. If you want the newer "
+            "month as the anchor, run `python scripts/backfill_anchor_lags.py` "
+            "first to manufacture synthetic priors, then re-run this command. "
+            "See TODO.md 'Sparse cube' section for context.",
+            anchor_uni.strftime("%Y-%m"),
+            pd.Timestamp(latest_uni_month).strftime("%Y-%m"),
+        )
     if anchor_fp != anchor_uni:
         logger.warning(
             "predict: cube anchor mismatch (fingerprint=%s, univariate=%s); "

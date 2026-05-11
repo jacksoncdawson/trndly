@@ -22,6 +22,55 @@ const SIDEBAR_NAV = [
   { id: 'settings',   label: 'Settings',   icon: 'Settings' },
 ];
 
+// Visual metadata for the API status pill — green/amber/red dot + label.
+const API_STATUS_META = {
+  ok:         { dot: '#2d5e3e' },
+  degraded:   { dot: '#c98e1f' },
+  down:       { dot: '#c64a3a' },
+  connecting: { dot: '#b5ad9c' },
+  unknown:    { dot: '#b5ad9c' },
+};
+
+function ApiStatusPill() {
+  const { health, healthError, healthLoading } = useData();
+  let state, label;
+  if (healthError) {
+    state = 'down';
+    label = 'API · offline';
+  } else if (healthLoading && !health) {
+    state = 'connecting';
+    label = 'API · connecting';
+  } else if (health && health.status === 'healthy') {
+    state = 'ok';
+    label = `API · ${health.predictions_anchor_month || 'live'}`;
+  } else if (health && health.status === 'degraded') {
+    state = 'degraded';
+    label = 'API · degraded';
+  } else {
+    state = 'unknown';
+    label = 'API · unknown';
+  }
+  const meta = API_STATUS_META[state];
+  const tooltip = (() => {
+    try { return JSON.stringify(health || (healthError && { error: healthError.message }) || {}, null, 2); }
+    catch { return label; }
+  })();
+
+  return (
+    <div title={tooltip} style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      padding: '4px 10px', borderRadius: 9999,
+      background: '#fff', border: '1.5px solid #1a1a1a',
+      fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, monospace)',
+      fontSize: 11, fontWeight: 600, color: '#5a544a',
+      maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    }}>
+      <span style={{ width: 8, height: 8, borderRadius: 9999, background: meta.dot, flexShrink: 0 }}/>
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+    </div>
+  );
+}
+
 function Sidebar({ active, onNav }) {
   // DEMO AUTH — read user + logout from auth context. Replace the auth module,
   // not this component, when wiring real auth.
@@ -95,6 +144,11 @@ function Sidebar({ active, onNav }) {
           <SidebarIcon name="Plus" size={16} color="#fbf6ee"/>
           Add Item
         </button>
+      </div>
+
+      {/* API status pill — live read of /health, so you can see at a glance whether the forecast service is reachable. */}
+      <div style={{ padding: '8px 10px 0' }}>
+        <ApiStatusPill/>
       </div>
 
       {/* User pill — pinned to the bottom of the rail */}

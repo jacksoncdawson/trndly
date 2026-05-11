@@ -1,26 +1,76 @@
 // TrendCard.jsx — feature trend card with sparkline
 // Exports to window: TrendCard, TrendChip, ChartSparkline
 
-// ChartSparkline: lines stretch via preserveAspectRatio="none";
-// the "now" dot is rendered as an HTML overlay so it stays circular.
-function ChartSparkline({ state }) {
-  // Time domain: past = 3mo (x: 0 → 67), future = 6mo (x: 67 → 200). NOW marker at x = 67 (1/3).
-  const paths = {
-    rising:  { past: 'M0,58 L22,55 L44,52 L67,48',  future: 'M67,48 L86,42 L105,36 L124,28 L143,22 L162,16 L181,12 L200,10', futureColor: '#2d5e3e', nowY: 48 },
-    peak:    { past: 'M0,40 L22,30 L44,22 L67,18',  future: 'M67,18 L86,20 L105,26 L124,34 L143,42 L162,48 L181,52 L200,54', futureColor: '#2d5e3e', nowY: 18 },
-    falling: { past: 'M0,28 L22,34 L44,42 L67,50',  future: 'M67,50 L86,57 L105,63 L124,68 L143,72 L162,75 L181,77 L200,78', futureColor: '#c64a3a', nowY: 50 },
-    flat:    { past: 'M0,46 L22,44 L44,47 L67,45',  future: 'M67,45 L86,43 L105,46 L124,44 L143,46 L162,44 L181,45 L200,45', futureColor: '#8a8275', nowY: 45 },
-  };
-  const p = paths[state] || paths.flat;
-  const nowYpct = (p.nowY / 90) * 100;
+// Future-line color keyed to trend state (visual cue layered on top of the
+// real shape). Keep in sync with the same map in Chart.jsx.
+const _FUTURE_COLOR = {
+  rising:  '#2d5e3e',
+  peak:    '#c98e1f',
+  flat:    '#8a8275',
+  falling: '#c64a3a',
+};
 
+// Convert a {past[4], future[6]} series into past + future SVG path strings
+// over the given viewBox. NOW sits at x = viewW * 1/3 (the past[3] / share_t
+// point). Auto-scales Y to the series min/max with 10% padding.
+function _seriesToPaths(series, viewW, viewH) {
+  if (!series || !Array.isArray(series.past) || !Array.isArray(series.future)) return null;
+  if (series.past.length !== 4 || series.future.length !== 6) return null;
+  const all = [...series.past, ...series.future];
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (!isFinite(lo) || !isFinite(hi)) return null;
+  if (hi - lo < 1e-12) {
+    const eps = Math.max(Math.abs(hi) * 0.05, 1e-9);
+    lo -= eps; hi += eps;
+  }
+  const padY = (hi - lo) * 0.1;
+  lo -= padY; hi += padY;
+
+  const cellW = viewW / 9;
+  const xOf = i => i * cellW;
+  const yOf = v => viewH - ((v - lo) / (hi - lo)) * viewH;
+  const nowX = xOf(3), nowY = yOf(series.past[3]);
+
+  const pastPath = series.past
+    .map((v, i) => `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(2)},${yOf(v).toFixed(2)}`)
+    .join(' ');
+  const futurePoints = [
+    [nowX, nowY],
+    ...series.future.map((v, i) => [xOf(4 + i), yOf(v)]),
+  ];
+  const futurePath = futurePoints
+    .map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`)
+    .join(' ');
+
+  return { pastPath, futurePath, nowX, nowY, viewH };
+}
+
+// ChartSparkline: lines stretch via preserveAspectRatio="none"; the "now"
+// dot is rendered as an HTML overlay so it stays circular. Shows a faint
+// dashed baseline when the series isn't available (no real data).
+function ChartSparkline({ state, series }) {
+  const paths = _seriesToPaths(series, 200, 90);
+  const futureColor = _FUTURE_COLOR[state] || _FUTURE_COLOR.flat;
+
+  if (!paths) {
+    return (
+      <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+        <svg viewBox="0 0 200 90" preserveAspectRatio="none"
+             style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+          <line x1="0" y1="45" x2="200" y2="45" stroke="#ece2cf" strokeWidth="2.5" strokeLinecap="round" strokeDasharray="3 5"/>
+        </svg>
+      </div>
+    );
+  }
+
+  const nowYpct = (paths.nowY / 90) * 100;
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <svg viewBox="0 0 200 90" preserveAspectRatio="none"
            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
-        <line x1="67" y1="0" x2="67" y2="90" stroke="#1a1a1a" strokeWidth="1.5" strokeDasharray="3 3" opacity="0.35"/>
-        <path d={p.past} fill="none" stroke="#b5ad9c" strokeWidth="2.5" strokeLinecap="round"/>
-        <path d={p.future} fill="none" stroke={p.futureColor} strokeWidth="3" strokeLinecap="round"/>
+        <line x1={paths.nowX} y1="0" x2={paths.nowX} y2="90" stroke="#1a1a1a" strokeWidth="1.5" strokeDasharray="3 3" opacity="0.35"/>
+        <path d={paths.pastPath}   fill="none" stroke="#b5ad9c"    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d={paths.futurePath} fill="none" stroke={futureColor} strokeWidth="3"   strokeLinecap="round" strokeLinejoin="round"/>
       </svg>
       <div style={{
         position: 'absolute',
@@ -42,7 +92,7 @@ const TREND_META = {
   flat:    { glyph: '→', label: 'flat',    bg: '#ece2cf', color: '#5a544a' },
 };
 
-function TrendCard({ name, category, state, stat, onClick }) {
+function TrendCard({ name, category, state, stat, series, onClick }) {
   const [hovered, setHovered] = React.useState(false);
   const meta = TREND_META[state] || TREND_META.flat;
   return (
@@ -68,7 +118,7 @@ function TrendCard({ name, category, state, stat, onClick }) {
         </span>
       </div>
       <div style={{ height: 80, position: 'relative' }}>
-        <ChartSparkline state={state} />
+        <ChartSparkline state={state} series={series} />
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 11, color: '#8a8275', fontFamily: 'var(--font-mono)' }}>
         <span>past 3mo</span>

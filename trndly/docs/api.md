@@ -24,15 +24,23 @@ curl -s http://localhost:8000/health
 {
   "status": "healthy",
   "predictions_loaded": true,
-  "predictions_anchor_month": "2020-08",
-  "predictions_univariate_rows": 182,
-  "predictions_fingerprint_rows": 6461,
+  "predictions_anchor_month": "2026-05",
+  "predictions_univariate_rows": 119,
+  "predictions_fingerprint_rows": 3830,
+  "lags_synthetic": true,
   "error": null
 }
 ```
 
 If `predictions_loaded` is `false`, `error` carries the load failure
 reason (e.g., "no `predictions_*.parquet` found — run `python -m pipelines.monthly run`").
+
+`lags_synthetic` is `true` when one or more of the anchor's 3 prior lag
+months in the merged cube came from
+[`scripts/backfill_anchor_lags.py`](../scripts/backfill_anchor_lags.py) —
+the synthetic-history stopgap used until enough live months have been
+scraped to provide real lag context. UI surfaces a footnote on the chart
+legend when this flag is set.
 
 ---
 
@@ -83,6 +91,7 @@ curl -s 'http://localhost:8000/trends?dimension=color_master&state=rising'
     "dimension": "color_master",
     "level_id": 4,
     "level_name": "Beige",
+    "share_lag3": 0.082, "share_lag2": 0.085, "share_lag1": 0.094, "share_t": 0.104,
     "y_h1": 0.108, "y_h2": 0.111, "y_h3": 0.115, "y_h4": 0.118, "y_h5": 0.121, "y_h6": 0.124,
     "state": "rising",
     "stat": "+22% next 6mo"
@@ -90,6 +99,21 @@ curl -s 'http://localhost:8000/trends?dimension=color_master&state=rising'
   ...
 ]
 ```
+
+`share_lag3` / `share_lag2` / `share_lag1` / `share_t` are the observed
+catalog shares at anchor − 3, − 2, − 1, and the anchor month itself. They
+are joined onto the predictions cube at service startup from
+`data/processed/merged_univariate.parquet` so the chart has 3 months of
+real context to draw before the forecasted 6. May be `null` if the
+underlying cube row is missing — in practice the predictions cube only
+emits rows where the lag history is complete, so this is rare.
+
+**"Unknown" rows.** Every dimension reserves `level_id = 0` for items the
+scraper couldn't categorize (e.g. `color_master:0 = Unknown`,
+`material:0 = Unknown`, etc.). The API returns these rows uniformly, but
+the React frontend filters them out at the `api.js` reshape boundary —
+they're real data but they're not actionable for a reseller. API clients
+that DO care about unclassified buckets can read them directly.
 
 ---
 
@@ -116,12 +140,18 @@ curl -s 'http://localhost:8000/forecast/fingerprint?product_type_id=1&gender_id=
   "product_type_name": "Trousers", "gender_name": "Women",
   "color_master_name": "Unknown", "graphical_appearance_name": "Unknown",
   "material_name": "viscose",
+  "share_lag3": 4.1e-05, "share_lag2": 3.7e-05, "share_lag1": 3.9e-05, "share_t": 4.0e-05,
   "y_h1": 4.589e-05, "y_h2": 4.962e-05, "y_h3": 5.226e-05,
   "y_h4": 5.267e-05, "y_h5": 5.282e-05, "y_h6": 5.302e-05,
   "state": "rising",
   "stat": "+32% next 6mo"
 }
 ```
+
+The `share_lag3` / `share_lag2` / `share_lag1` / `share_t` fields are the
+observed shares for this 5-D fingerprint at anchor − 3..0 months,
+joined onto the predictions cube at startup from
+`data/processed/merged_fingerprint.parquet`.
 
 ```bash
 # Missing fingerprint → 404
@@ -136,6 +166,16 @@ anchor month (t-3..t). 5-D combinations that didn't appear in the cube
 at the latest anchor — or that lack lag coverage — are silently
 skipped during `pipelines.monthly.predict` and therefore 404 here.
 
+**Frontend handling of 404s.** The React UI calls this endpoint for the
+Item Detail "Overall popularity" chart. When it 404s, the frontend falls
+back to `synthesizeFingerprintSeries(tags, trends)` in `frontend/api.js`
+— a multiplicative joint built from the per-dimension univariate
+forecasts already in memory (no extra API call). The chart legend
+labels the result: "We've never seen this item before! Predicting based
+on this item's distinct characteristics." See
+[architecture.md § Item recommendation pipeline](architecture.md#item-recommendation-pipeline)
+for the full source-priority chain.
+
 ---
 
 ## State + stat semantics
@@ -144,14 +184,23 @@ skipped during `pipelines.monthly.predict` and therefore 404 here.
 `pipelines.monthly.predict` (in `pipelines/monthly/state.py`) and stored
 in the parquet. The API doesn't recompute on read.
 
-`stat` is a short human-readable string keyed off `state`:
+`stat` reports the **forward** percentage change (`y_h6 / share_t − 1`,
+rounded to int) and is keyed off `state`:
 - `rising`: `"+{int}% next 6mo"`
 - `falling`: `"−{int}% next 6mo"` (U+2212 minus sign)
 - `peak`: `"at peak"`
 - `flat`: `"stable"`
 
-Initial thresholds are placeholders (RISING_RATIO=1.15, FALLING_RATIO=0.85,
-PEAK_HORIZON_INDEX=1) flagged for tuning.
+Current thresholds (in `pipelines/monthly/state.py`, see file docstring for
+the full rule):
+
+- `RISING_RATIO = 1.08` — forward must beat anchor by >8% to fire rising
+- `FALLING_RATIO = 0.92` — forward must trail anchor by >8% to fire falling
+- `PEAK_MIN_DROP = 0.08` — peak must drop ≥8% to its forward end to fire
+
+All three are flagged for tuning against the real prediction
+distributions (see [TODO.md](../../TODO.md) "State-classifier threshold
+tuning").
 
 ---
 

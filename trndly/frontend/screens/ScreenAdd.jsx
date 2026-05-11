@@ -100,7 +100,7 @@ function ImageDropzone({ image, onChange }) {
 }
 
 function ScreenAdd({ onNav }) {
-  const { addItem, options }  = useData();
+  const { addItem, options, trends }  = useData();
   const [name, setName]       = React.useState('');
   const [cost, setCost]       = React.useState('');
   const [tags, setTags]       = React.useState({});
@@ -119,11 +119,19 @@ function ScreenAdd({ onNav }) {
     e.preventDefault();
     if (!name || !cost) return;
 
-    // Derive the item's per-feature signals + recommendation from the picked
-    // tags, looking each value up against TREND_DATA. This is the seam where
-    // a real ML prediction would replace the static lookup.
-    const signals        = buildSignalsFromTags(tags);
-    const recommendation = deriveRecommendation(signals);
+    // Per-feature signals are labels only — they show on the Item Detail
+    // signal breakdown grid but no longer drive the recommendation.
+    const signals = buildSignalsFromTags(tags);
+
+    // Recommendation is derived from a single series (the chart). At add
+    // time we don't have the fingerprint fetched yet, so we use the
+    // synthesized joint as a placeholder. The Item Detail screen will
+    // re-derive once the actual fingerprint resolves — but for landing
+    // the new item in the right Inventory group on submit, the synthesis
+    // is a reasonable approximation. (For known-precomputed combos it's
+    // also close to the real fingerprint.)
+    const series        = synthesizeFingerprintSeries(tags, trends);
+    const recommendation = deriveRecommendationFromSeries(series);
 
     addItem({
       name,
@@ -134,6 +142,9 @@ function ScreenAdd({ onNav }) {
       state: recommendation,
       image,
       signals,
+      // Carry the raw tag values forward so ScreenItem can resolve them to
+      // IDs (via lookupIds) and fetch the per-item fingerprint forecast.
+      tags,
     });
 
     setSubmitted(true);

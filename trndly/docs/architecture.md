@@ -60,7 +60,7 @@ at the bottom captures the GCP target we're working toward.
                               │
                               ▼
                 ┌──────────────────────────────────────────────┐
-                │  frontend/  (React + JSX-via-Babel + SWR)    │
+                │  frontend/  (React + JSX-via-Babel)          │
                 │    Trends screen      ← GET /trends          │
                 │    Add Item screen    ← GET /options         │
                 │    Item Detail screen ← GET /forecast/fingerprint
@@ -203,17 +203,72 @@ refresh.
 
 ## Frontend
 
-Stack: **React 18** + **JSX-via-Babel** (no build step) + **SWR**.
+Stack: **React 18** + **JSX-via-Babel** (no build step). Data fetching is a
+tiny in-house `useFetch` hook inside `dataProvider.js` — keyed cache, optional
+poll, optional refocus revalidation. SWR was the original choice (see
+[rationale.md](rationale.md)), but SWR 2.x ships ESM only with no UMD bundle,
+which doesn't fit the no-build setup; the in-house hook covers what we
+actually use in ~50 lines.
 
 `frontend/dataProvider.js` provides a single `useData()` hook exposing:
 
-- `inventory`, `signals`, `addItem` — session-scoped local state
-- `trends` — `GET /trends` via SWR, with `data.js` mocks as fallback
-- `options` / `lookupIds` — `GET /options` via SWR, with mocks as fallback
+- `inventory`, `signals`, `addItem` — session-scoped local state (start empty;
+  no seeded mocks)
+- `trends` — `GET /trends`. `undefined` while loading/errored; screens
+  render explicit loading/error states instead of silently substituting
+  fixtures. Each row carries 10 numeric points (`share_lag3..t` joined
+  from the merged cube at service startup, then `y_h1..y_h6`) so charts
+  draw 3 months of history + 6 months of forecast. The `api.js` reshape
+  drops `Unknown` rows (every dimension reserves `id=0 = Unknown` for
+  unclassified items — surfacing those in the UI isn't actionable).
+- `options` / `lookupIds` — `GET /options`, falling back to the
+  `LOOKUP_OPTIONS` seed in `data.js` only for `colorSpectrum` /
+  `productGroup` (the two vocabularies the endpoint doesn't expose yet).
+- `health` — `GET /health` (15s poll); drives the sidebar API status pill
+  + the chart-legend "synthetic past" footnote when `lags_synthetic` is set.
 
-`api.js` reshapes API responses into the frontend's pre-existing
-contracts (`TREND_DATA[]`, `LOOKUP_OPTIONS`) so screen components don't
-care that the data now comes from a real API.
+`api.js` reshapes API responses (`mapTrendsToTrendData`,
+`mapOptionsToLookupOptions`, `indexOptionsById`) into the shapes the
+screens already consume, so the swap from local parquet to cloud SQL
+will not touch frontend code as long as the API response shapes stay
+stable.
+
+### Item recommendation pipeline
+
+Per-item recommendations (the pill on Item Detail) are derived directly
+from a single 10-point series — the same series the Overall Popularity
+chart shows. Source priority:
+
+1. `GET /forecast/fingerprint` — gold standard for 5-D combinations that
+   are in the precomputed cube.
+2. `synthesizeFingerprintSeries(tags, trends)` in `api.js` — multiplicative
+   joint of per-dimension univariate motions. Fires when the fingerprint
+   endpoint 404s (combination not precomputed). UI labels the chart
+   "We've never seen this item before! Predicting based on this item's
+   distinct characteristics."
+3. `null` — chart hidden; pill reads "More data needed".
+
+`deriveRecommendationFromSeries(series)` in `data.js` then returns one of
+five outcomes (`list now / hold 1mo / hold 2mo / hold 3+ / more data needed`)
+based on the argmax in the forward window vs. anchor (with a 2.5% minimum
+upside threshold). Per-feature signal cards on Item Detail are labels
+only — they do not aggregate into the recommendation, but they ARE the
+data source the synthesis step consumes.
+
+### Trend label vocabulary vs. recommendation vocabulary
+
+Two separate vocabularies, two purposes:
+
+- **Trend label** (`rising / peak / flat / falling`): per-feature direction
+  classified by [pipelines/monthly/state.py](../pipelines/monthly/state.py)
+  on the univariate forward window. Shown on Trends cards + Item Detail
+  signal cards.
+- **Recommendation outcome** (`list now / hold 1mo / hold 2mo / hold 3+ /
+  more data needed`): item-level action derived from
+  `deriveRecommendationFromSeries` against the fingerprint/synthesized
+  series. Shown on Item Detail pill + Inventory grouping.
+
+The two never coerce into each other.
 
 ---
 
