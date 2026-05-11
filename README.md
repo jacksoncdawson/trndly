@@ -57,6 +57,14 @@ python -m venv .venv
 # Or skip scrape if items_*.csv already on disk
 .venv/bin/python -m pipelines.monthly run --skip-scrape
 
+# (Stopgap, today only) Backfill synthetic Feb/Mar/Apr 2026 lag rows so
+# the predictor can anchor on the most recent live scrape (2026-05)
+# instead of falling back to the 2020-08 historical block. Re-run
+# pipelines.monthly predict afterward. Remove once ≥4 contiguous live
+# months have been scraped — see TODO.md "Sparse cube" section.
+.venv/bin/python scripts/backfill_anchor_lags.py
+.venv/bin/python -m pipelines.monthly predict
+
 # Serve the API (FastAPI + static React UI at /ui)
 .venv/bin/python -m uvicorn backend.services.scheduleServer:app --port 8000
 ```

@@ -1,7 +1,7 @@
 # TODO
 
 Forward-looking work list for the trndly forecaster pipeline.
-Last updated: 2026-05-09.
+Last updated: 2026-05-10.
 
 For the shipped state, read [README.md](README.md) and
 [trndly/docs/architecture.md](trndly/docs/architecture.md). For
@@ -51,10 +51,39 @@ column), `pipelines/monthly/predict.py` (passes through).
 
 ### State-classifier threshold tuning
 
-`pipelines/monthly/state.py` ships with placeholder thresholds
-(`RISING_RATIO=1.15`, `FALLING_RATIO=0.85`). Validate against real
-predictions distributions; consider adding seasonality-aware variants
-(e.g., "rising for time of year").
+`pipelines/monthly/state.py` was rewritten in 2026-05 to a forward-first
+hybrid rule (peak band considers past lags + anchor + first 2 forward
+horizons; rising/falling decided on the forward ratio `y_h6 / share_t`).
+Current constants:
+
+- `RISING_RATIO = 1.08` — forward must beat anchor by >8% to fire rising
+- `FALLING_RATIO = 0.92` — forward must trail anchor by >8% to fire falling
+- `PEAK_MIN_DROP = 0.08` — peak must drop ≥8% to its forward end to fire
+
+The remaining work: validate against real-distribution histograms now
+that we have a stable 2026-05 anchor; consider seasonality-aware variants
+("rising for time of year"). The numeric thresholds may need re-tuning
+once enough live months accumulate to evaluate against held-out data.
+
+### Frontend fingerprint synthesis quality
+
+`frontend/api.js::synthesizeFingerprintSeries` produces a joint forecast
+by multiplying per-dimension relative motions when `/forecast/fingerprint`
+404s. This is a multiplicative-independence approximation — fine for many
+cases but doesn't capture cross-dimension correlations (some
+materials/types co-occur more than independence predicts).
+
+Possible follow-ups:
+- Share-weight the factors so tiny-share dimensions (e.g. Blazer at
+  0.0002) contribute less than dominant ones (Women at 0.54).
+- Expand `pipelines/monthly/predict.py` to compute predictions for the
+  full Cartesian product, not just observed combinations. ~3.77M rows
+  if done naively — needs filtering down to plausible combos.
+- Trail real fingerprint forecasts vs. synthesized for combos where both
+  exist, to quantify error.
+
+Not blocking; the chart legend labels synthesized series clearly
+("We've never seen this item before!").
 
 ### Auto-rebootstrap AE on 401
 
@@ -151,18 +180,36 @@ import will raise — fix the diff before the scrapers can run.**
 Negative test in
 [tests/test_trndly.py::test_lookup_consistency_validator_detects_drift](trndly/tests/test_trndly.py).
 
-### Sparse cube → empty predictions
+### Sparse cube — anchor backfill stopgap in place
 
 `pipelines/monthly/predict.py` requires 4 contiguous months in the cube
-to produce predictions for an anchor (t, t-1, t-2, t-3). Currently the
-merged cube has 23 contiguous historical months (Oct 2018 → Aug 2020)
-plus a single live month (May 2026). The eligible-anchor finder picks
-the latest historical month for both fingerprint and univariate output.
+to produce predictions for an anchor (t, t-1, t-2, t-3). The merged cube
+has 23 contiguous historical months (Oct 2018 → Aug 2020) plus the
+single live month (May 2026) — a 5-year gap between the two.
 
-**Until ≥4 contiguous live months accumulate, predictions reflect
-historical (H&M) anchor data, not current retail snapshots.** This is a
-known limitation flagged for the user; see
-[docs/monthly_tick.md](trndly/docs/monthly_tick.md) for behavior detail.
+**Stopgap (currently active):**
+[scripts/backfill_anchor_lags.py](trndly/scripts/backfill_anchor_lags.py)
+manufactures synthetic Feb/Mar/Apr 2026 rows for the merged cube by
+taking historical seasonal ratios (hist[lag_month] / hist[anchor_month],
+averaged across 2019 + 2020) and rescaling by the current 2026-05
+share_t. This lets `pipelines.monthly.predict` anchor at 2026-05 and
+gives the UI real-recent live data plus synthetic-but-plausible context
+for past 3 months.
+
+The backfill is **traceable**: synthetic rows carry `source = 'backfill'`
+in the merged cube and the `/health` endpoint exposes `lags_synthetic: true`
+when any of the anchor's lag months were backfilled. The chart legend on
+the Item Detail screen surfaces a footnote when that flag is set.
+
+**Remove the stopgap when:** real live scrapes have accumulated ≥4
+contiguous months (around 2026-08 if scrapes keep running monthly). At
+that point `pipelines.monthly aggregate` will produce a cube with real
+lag history, and predict will naturally pick the latest live anchor.
+Re-running aggregate also clobbers the backfill rows (intended).
+
+See [docs/monthly_tick.md](trndly/docs/monthly_tick.md) for cube
+semantics and [scripts/backfill_anchor_lags.py](trndly/scripts/backfill_anchor_lags.py)
+for the full method.
 
 ---
 
