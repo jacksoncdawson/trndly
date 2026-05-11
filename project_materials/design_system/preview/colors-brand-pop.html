@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:20px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.swatch{flex:1;min-width:80px}
+.chip{height:56px;border-radius:var(--radius-md);border:2px solid var(--color-border)}
+.soft{height:28px;border-radius:0 0 var(--radius-md) var(--radius-md);border-top:2px solid var(--color-border)}
+.label{font-family:var(--font-mono);font-size:10px;color:var(--color-text-tertiary);margin-top:6px;line-height:1.4}
+.name{font-size:11px;font-weight:600;color:var(--color-text-primary);margin-top:2px}
+.section-label{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--color-text-tertiary);margin-bottom:8px;margin-top:16px}
+.section-label:first-child{margin-top:0}
+</style>
+</head>
+<body>
+  <div class="section-label">Brand primary</div>
+  <div class="row" style="margin-bottom:12px">
+    <div class="swatch">
+      <div style="overflow:hidden;border-radius:var(--radius-md);border:2px solid var(--color-border)">
+        <div class="chip" style="background:var(--color-primary);border:none;border-radius:0"></div>
+        <div class="soft" style="background:var(--color-primary-soft);border:none"></div>
+      </div>
+      <div class="name">primary / forest</div>
+      <div class="label">#2d5e3e / #d8e7dc soft</div>
+    </div>
+    <div class="swatch" style="flex:3"></div>
+  </div>
+  <div class="section-label">Pop palette</div>
+  <div class="row">
+    <div class="swatch">
+      <div style="overflow:hidden;border-radius:var(--radius-md);border:2px solid var(--color-border)">
+        <div style="height:44px;background:var(--color-pop-rust)"></div>
+        <div style="height:22px;background:var(--color-pop-rust-soft)"></div>
+      </div>
+      <div class="name">rust</div>
+      <div class="label">#d96941</div>
+    </div>
+    <div class="swatch">
+      <div style="overflow:hidden;border-radius:var(--radius-md);border:2px solid var(--color-border)">
+        <div style="height:44px;background:var(--color-pop-mustard)"></div>
+        <div style="height:22px;background:var(--color-pop-mustard-soft)"></div>
+      </div>
+      <div class="name">mustard</div>
+      <div class="label">#e8b840</div>
+    </div>
+    <div class="swatch">
+      <div style="overflow:hidden;border-radius:var(--radius-md);border:2px solid var(--color-border)">
+        <div style="height:44px;background:var(--color-pop-coral)"></div>
+        <div style="height:22px;background:var(--color-pop-coral-soft)"></div>
+      </div>
+      <div class="name">coral</div>
+      <div class="label">#e87168</div>
+    </div>
+    <div class="swatch">
+      <div style="overflow:hidden;border-radius:var(--radius-md);border:2px solid var(--color-border)">
+        <div style="height:44px;background:var(--color-pop-sky)"></div>
+        <div style="height:22px;background:var(--color-pop-sky-soft)"></div>
+      </div>
+      <div class="name">sky</div>
+      <div class="label">#6ba8c9</div>
+    </div>
+    <div class="swatch">
+      <div style="overflow:hidden;border-radius:var(--radius-md);border:2px solid var(--color-border)">
+        <div style="height:44px;background:var(--color-pop-plum)"></div>
+        <div style="height:22px;background:var(--color-pop-plum-soft)"></div>
+      </div>
+      <div class="name">plum</div>
+      <div class="label">#8b5a8c</div>
+    </div>
+    <div class="swatch">
+      <div style="overflow:hidden;border-radius:var(--radius-md);border:2px solid var(--color-border)">
+        <div style="height:44px;background:var(--color-pop-sage)"></div>
+        <div style="height:22px;background:var(--color-pop-sage-soft)"></div>
+      </div>
+      <div class="name">sage</div>
+      <div class="label">#8fb085</div>
+    </div>
+  </div>
+</body>
+</html>

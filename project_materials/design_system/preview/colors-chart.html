@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:20px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:12px;align-items:flex-end}
+.swatch{display:flex;flex-direction:column;align-items:center;gap:6px}
+.chip{border:2px solid var(--color-border);border-radius:var(--radius-sm);width:44px}
+.label{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);text-align:center;line-height:1.3}
+.legend{display:flex;gap:20px;margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-soft)}
+.leg-item{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--color-text-secondary)}
+.leg-line{width:20px;height:3px;border-radius:2px}
+.leg-dot{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--color-border)}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="swatch">
+    <div class="chip" style="height:56px;background:var(--chart-past)"></div>
+    <div class="label">past<br/>#b5ad9c</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="height:72px;background:var(--chart-present)"></div>
+    <div class="label">present<br/>#1a1a1a</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="height:80px;background:var(--chart-future)"></div>
+    <div class="label">future<br/>#2d5e3e</div>
+  </div>
+  <div style="width:1px;background:var(--color-border-soft);height:80px;margin:0 4px"></div>
+  <div class="swatch">
+    <div class="chip" style="height:80px;background:var(--chart-1)"></div>
+    <div class="label">series 1<br/>forest</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="height:66px;background:var(--chart-2)"></div>
+    <div class="label">series 2<br/>rust</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="height:52px;background:var(--chart-3)"></div>
+    <div class="label">series 3<br/>mustard</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="height:40px;background:var(--chart-4)"></div>
+    <div class="label">series 4<br/>sky</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="height:30px;background:var(--chart-5)"></div>
+    <div class="label">series 5<br/>plum</div>
+  </div>
+  <div class="swatch">
+    <div class="chip" style="height:20px;background:var(--chart-6)"></div>
+    <div class="label">series 6<br/>sage</div>
+  </div>
+</div>
+<div class="legend">
+  <div class="leg-item"><div class="leg-line" style="background:var(--chart-past)"></div>past</div>
+  <div class="leg-item"><div class="leg-dot" style="background:var(--chart-present)"></div>now</div>
+  <div class="leg-item"><div class="leg-line" style="background:var(--chart-future)"></div>predicted</div>
+</div>
+</body>
+</html>

@@ -1,179 +1,160 @@
 # trndly
 
-`trndly` is the primary project workspace for the MLOps checkpoint.
+Fashion trend forecasting for secondhand apparel resellers. A monthly
+batch tick scrapes retailer catalogs, retrains two RandomForest
+regressors, and **precomputes 6-horizon catalog-share forecasts** for
+the entire universe of (dimension, level) pairs and 5-D fingerprints.
+The FastAPI service is a read-only layer over the predictions parquet —
+no live `model.predict()` calls in the request path.
 
-Current scope in this repo:
-
-- synthetic local data generation (`train/val/test` + user payloads),
-- model training + MLflow registration,
-- FastAPI serving with model loaded from MLflow Model Registry alias URI.
-
-## Demo recording
+## Demo
 
 Product preview:
 
 ![Product preview recording](./trndly_demo.gif)
 
+## Repo layout
 
-## Project structure
+The project root has minimal scaffolding; the code lives one level down
+in `trndly/`.
 
-- `backend/services/scheduleServer.py` - FastAPI service (`/`, `/health`, `/predict`)
-- `backend/services/.env` - local runtime config (not committed)
-- `pipelines/training/generate_synthetic_listing_data.py` - synthetic dataset generator
-- `pipelines/training/feature_contract.py` - shared featurization contract for training + serving
-- `pipelines/training/train_listing_timeline.py` - classifier training + MLflow registration/alias assignment
-- `pipelines/training/data/` - generated local artifacts (train/val/test CSVs, seasonality table, combined trend signals)
-- `pipelines/training/data/trend_signals/` - per-source trend signal CSVs from each collector/scraper, merged by `combine_trend_signals.py`
-- `scripts/run_mlflow_experiment.sh` - one-command experiment run
-- `scripts/run_api.sh` - one-command API start
-- `scripts/kill_api.sh` - stop API processes on configured port
-- `Dockerfile` - API container build
+```
+.
+├── README.md                  ← this file
+├── trndly_demo.gif            ← product preview recording
+├── TODO.md                    ← forward-looking work list
+├── mlflow.db                  ← local MLflow tracking store (gitignored)
+├── project_materials/         ← pitch deck, demo videos, checkpoints
+└── trndly/                    ← the application
+    ├── pipelines/
+    │   ├── paths.py           — central path registry
+    │   ├── contracts.py       — schema validators
+    │   ├── cube_slicing.py    — shared cube → feature-row helpers
+    │   ├── collectors/        — 4 retail scrapers + build_live_cube.py
+    │   └── monthly/           — the monthly tick (scrape → ... → predict)
+    ├── backend/services/
+    │   └── scheduleServer.py  — FastAPI service (read-only over predictions)
+    ├── frontend/              — React SPA, no build step (JSX-via-Babel + SWR)
+    ├── notebooks/             — 0 (Kaggle clean), 1 (historical agg), 4 (HP sweep)
+    ├── tests/                 — unit, contract, and integration tests
+    ├── data/                  — raw / reference / processed / models / predictions
+    ├── docs/                  — architecture, API reference, monthly-tick runbook
+    └── experiments/           — one-off measurement / A-B scripts
+```
 
-## Project Setup
+Two RandomForest regressors:
 
-### 1) Install dependencies
+- **Univariate** — one row per `(dimension, level_id)`. Powers trend exploration.
+- **Fingerprint** — one row per 5-D `(product_type, gender, color_master, graphical_appearance, material)`. Powers per-item recommendations.
 
-From `trndly/`:
+## Quick start
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
+cd trndly                                                  # the inner package dir
+python -m venv .venv
+./scripts/setup_venv.sh                                    # pip install + playwright install chromium
+
+# One-time bootstrap from the H&M Kaggle dump (places it in data/raw/kaggle/)
+.venv/bin/python notebooks/_run_notebook.py notebooks/0_clean_historical.ipynb
+.venv/bin/python notebooks/_run_notebook.py notebooks/1_aggregate_historical.ipynb
+
+# Monthly tick: scrape → aggregate → features → train → evaluate → predict
+.venv/bin/python -m pipelines.monthly run
+
+# Or skip scrape if items_*.csv already on disk
+.venv/bin/python -m pipelines.monthly run --skip-scrape
+
+# (Stopgap, today only) Backfill synthetic Feb/Mar/Apr 2026 lag rows so
+# the predictor can anchor on the most recent live scrape (2026-05)
+# instead of falling back to the 2020-08 historical block. Re-run
+# pipelines.monthly predict afterward. Remove once ≥4 contiguous live
+# months have been scraped — see TODO.md "Sparse cube" section.
+.venv/bin/python scripts/backfill_anchor_lags.py
+.venv/bin/python -m pipelines.monthly predict
+
+# Serve the API (FastAPI + static React UI at /ui)
+.venv/bin/python -m uvicorn backend.services.scheduleServer:app --port 8000
 ```
 
-### 2) Create local env file
+Then open `http://localhost:8000/ui/` for the React app or
+`http://localhost:8000/docs` for Swagger UI.
 
-Create `backend/services/.env` with values like:
+## The monthly tick
 
-```env
-MLFLOW_TRACKING_URI=http://<private-mlflow-host>:5000
-MLFLOW_MODEL_URI=models:/listing_timeline_experiments@candidate
-MLFLOW_EXPERIMENT_NAME=checkpoint_fastapi
-TREND_SIGNALS_PATH=../../pipelines/training/data/trend_signals.csv
-MLFLOW_MODEL_ARTIFACT_PATH=model
-```
+`python -m pipelines.monthly run` drives six stages end-to-end:
 
-Notes:
 
-- `MLFLOW_MODEL_URI` is the model the API serves.
-- Keep private tracking host/IP in local `.env` only.
-- `MLFLOW_MODEL_ARTIFACT_PATH` should be `model` (artifact path in a run), not a filesystem path.
+| Stage       | What it does                                         | Output                                                       |
+| ----------- | ---------------------------------------------------- | ------------------------------------------------------------ |
+| `scrape`    | Subprocess each retailer scraper + `build_live_cube` | `data/raw/items/`, `data/processed/live_*_<YYYY-MM>.parquet` |
+| `aggregate` | Concat historical + live cubes with dedup            | `data/processed/merged_*.parquet`                            |
+| `features`  | Calendar-strict windowing (lags + 6 targets)         | `data/processed/training_*.parquet`                          |
+| `train`     | Fit RandomForest, log to MLflow, persist joblibs     | `data/models/*.joblib`, `model_training_run.json`            |
+| `evaluate`  | Compare candidate vs incumbent WMAE; auto-promote    | `data/models/champion_metrics.json` (on promotion)           |
+| `predict`   | Score the universe, classify state, write parquet    | `data/predictions/predictions_*_<YYYY-MM>.parquet`           |
 
-### 3) Run training experiment (logs to MLflow)
 
-From `trndly/`:
+Stages are also runnable individually:
 
 ```bash
-./scripts/run_mlflow_experiment.sh
+python -m pipelines.monthly aggregate
+python -m pipelines.monthly evaluate
 ```
 
-By default this script:
+After a tick, restart the FastAPI service to pick up the new predictions.
 
-- regenerates synthetic data,
-- trains classifier using synthetic splits,
-- logs params/metrics/artifacts to MLflow,
-- registers to `listing_timeline_experiments`,
-- sets alias `candidate`.
+See [trndly/docs/monthly_tick.md](trndly/docs/monthly_tick.md) for the
+full operator runbook (prereqs, debugging, common failures).
 
-Example override:
+## API surface
+
+All routes are `GET`; no POST triggers a model call.
+
+
+| Route                                                                                                          | Behavior                                               |
+| -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `GET /options`                                                                                                 | Dropdown vocabularies, `[{name, id}]` per category     |
+| `GET /trends`                                                                                                  | Univariate predictions. Filters: `?dimension=&state=`  |
+| `GET /forecast/fingerprint?product_type_id=&gender_id=&color_master_id=&graphical_appearance_id=&material_id=` | One fingerprint forecast (404 if no precomputed match) |
+| `GET /health`                                                                                                  | Bundle status + anchor month                           |
+| `/ui/*`                                                                                                        | Static React app                                       |
+
+
+Full request/response shapes in [trndly/docs/api.md](trndly/docs/api.md).
+
+## Testing
 
 ```bash
-N_ESTIMATORS=400 MODEL_ALIAS=candidate DATA_VERSION=synthetic-exp2 ./scripts/run_mlflow_experiment.sh
+cd trndly
+.venv/bin/python -m pytest tests/         # full suite
+.venv/bin/python -m pytest tests/monthly/ # tick-stage unit tests
 ```
 
----
+220+ tests covering schema validators, lookup-csv consistency, cube
+concat-compatibility, items-CSV ID validity, trend-state classification,
+evaluator promotion logic, and predictions-parquet integration.
 
-## Running the API
+Live retailer smoke checks are gated behind `pytest -m live`.
 
-### Without Docker
+## Documentation
 
-From `trndly/`:
+- [trndly/docs/architecture.md](trndly/docs/architecture.md) — shipped architecture + future GCP target
+- [trndly/docs/api.md](trndly/docs/api.md) — endpoint reference with example bodies
+- [trndly/docs/monthly_tick.md](trndly/docs/monthly_tick.md) — operator runbook
+- [trndly/docs/rationale.md](trndly/docs/rationale.md) — design decisions (SWR, SPA, IaC)
+- [trndly/pipelines/collectors/README.md](trndly/pipelines/collectors/README.md) — scrapers, items.csv schema, brittle areas
+- [trndly/data/reference/SCHEMA.md](trndly/data/reference/SCHEMA.md) — per-dimension reachability audit
+- [TODO.md](TODO.md) — forward-looking work + brittle-area watchlist
 
-```bash
-./scripts/run_api.sh
-```
+## Status
 
-Equivalent direct command (without helper script):
+**Shipped:** monthly batch architecture (manual cadence), precomputed predictions, read-only FastAPI service, React frontend wired to API via SWR.
 
-```bash
-cd backend/services
-../../.venv/bin/uvicorn scheduleServer:app --host 127.0.0.1 --port 8000
-```
+**Future** (out of scope for current MVP):
 
-Stop API:
-
-```bash
-./scripts/kill_api.sh
-```
-
-### With Docker
-
-From `trndly/`:
-
-```bash
-# Format: <dockerhub-namespace>/<image-repo>:<tag>
-
-# Example used for this checkpoint:
-IMAGE_NAME=jacksoncdawson/trndly-fastapi:checkpoint-v1
-
-# Build
-docker build -t $IMAGE_NAME .
-
-# Push
-docker push $IMAGE_NAME
-
-# Run
-docker run --rm -p 8000:8000 --env-file backend/services/.env $IMAGE_NAME
-```
-
-> For this submission, our team published the image to Docker Hub namespace jacksoncdawson, so the registry screenshot shows jacksoncdawson/trndly-fastapi:checkpoint-v1.
-
----
-
-## Example `/predict` request (input + expected output format)
-
-Input payload format:
-
-```json
-{
-  "item_name": "string",
-  "color": "string",
-  "category": "string",
-  "material": "string"
-}
-```
-
-Example request:
-
-```bash
-curl http://127.0.0.1:8000/
-curl http://127.0.0.1:8000/health
-curl -X POST http://127.0.0.1:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "item_name": "Denim Skirt #demo",
-    "color": "blue",
-    "category": "skirt",
-    "material": "denim"
-  }'
-```
-
-Expected response format:
-
-```json
-{
-  "item_name": "string",
-  "best_timeframe": "current | next_week | next_month | three_months | six_months",
-  "timeframe_scores": {
-    "current": 0.0,
-    "next_week": 0.0,
-    "next_month": 0.0,
-    "three_months": 0.0,
-    "six_months": 0.0
-  },
-  "model_loaded": true,
-  "model_uri": "models:/<registered_model>@<alias>",
-  "run_id": "string"
-}
-```
+- Storage migration: local parquet → GCS / BigQuery
+- Cloud cadence: manual CLI → Cloud Scheduler + Vertex Custom Container job
+- Frontend hosting split: Firebase Hosting (static) + Cloud Run (API)
+- Auth: Firebase Auth + per-user inventory in Firestore
+- Container split: separate images for collectors / monthly tick / API
 

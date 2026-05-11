@@ -1,0 +1,28 @@
+{
+  "status": "ok",
+  "result": {
+    "pagination": {"total": 4, "offset": 0, "count": 100},
+    "items": [
+      {
+        "productId": "E482195-000",
+        "l1Id":      "482195",
+        "name":      "Ribbed Cropped Bra Top",
+        "genderName": "WOMEN",
+        "colors": [
+          {"code": "COL18", "displayCode": "18", "name": "WINE", "filterCode": "RED"},
+          {"code": "COL09", "displayCode": "09", "name": "BLACK", "filterCode": "BLACK"}
+        ]
+      },
+      {
+        "productId": "E482196-000",
+        "l1Id":      "482196",
+        "name":      "AIRism Seamless Hiphuggers",
+        "genderName": "WOMEN",
+        "colors": [
+          {"code": "COL01", "displayCode": "01", "name": "WHITE", "filterCode": "WHITE"},
+          {"code": "COL02", "displayCode": "02", "name": "BEIGE", "filterCode": "BEIGE"}
+        ]
+      }
+    ]
+  }
+}

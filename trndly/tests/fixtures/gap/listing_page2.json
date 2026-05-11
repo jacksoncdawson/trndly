@@ -1,0 +1,30 @@
+{
+  "totalColors": 6,
+  "pagination": {"pageNumberTotal": "3"},
+  "products": [
+    {
+      "styleId": "100003",
+      "styleName": "Soft Cotton Hoodie",
+      "webProductType": "mens tops",
+      "styleColors": [
+        {
+          "ccId": "100003-003",
+          "ccName": "Gray",
+          "ccShortDescription": "Heather gray"
+        }
+      ]
+    },
+    {
+      "styleId": "100004",
+      "styleName": "Performance Jogger",
+      "webProductType": "mens pants",
+      "styleColors": [
+        {
+          "ccId": "100004-004",
+          "ccName": "Navy",
+          "ccShortDescription": "Classic navy"
+        }
+      ]
+    }
+  ]
+}

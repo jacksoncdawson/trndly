@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:20px 24px;-webkit-font-smoothing:antialiased}
+.row{display:grid;grid-template-columns:120px 1fr;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--color-border-soft);gap:16px}
+.row:last-child{border-bottom:none}
+.label{font-family:var(--font-mono);font-size:10px;color:var(--color-text-tertiary)}
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="label">mono xs</div>
+    <div style="font-family:var(--font-mono);font-size:var(--text-xs);color:var(--color-text-tertiary)">cost $24 · added 3 days ago</div>
+  </div>
+  <div class="row">
+    <div class="label">mono sm medium</div>
+    <div style="font-family:var(--font-mono);font-size:var(--text-sm);font-weight:500">v0.2 · design language</div>
+  </div>
+  <div class="row">
+    <div class="label">mono base tnum</div>
+    <div style="font-family:var(--font-mono);font-size:var(--text-base);font-feature-settings:'tnum'">past 6mo · +38% next 3mo</div>
+  </div>
+  <div class="row">
+    <div class="label">mono axis labels</div>
+    <div style="font-family:var(--font-mono);font-size:var(--text-2xs);color:var(--color-text-tertiary);letter-spacing:.03em">JAN FEB MAR APR MAY JUN</div>
+  </div>
+</body>
+</html>

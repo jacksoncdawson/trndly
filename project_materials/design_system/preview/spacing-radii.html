@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:20px 24px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.chip{background:var(--color-surface-1);border:2px solid var(--color-border);display:flex;align-items:center;justify-content:center;width:56px;height:56px}
+.label{font-family:var(--font-mono);font-size:9px;color:var(--color-text-tertiary);text-align:center;margin-top:6px}
+.name{font-size:10px;font-weight:600;color:var(--color-text-primary);text-align:center;margin-top:2px}
+.item{display:flex;flex-direction:column;align-items:center}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="item">
+    <div class="chip" style="border-radius:var(--radius-xs)"></div>
+    <div class="name">xs</div>
+    <div class="label">4px</div>
+  </div>
+  <div class="item">
+    <div class="chip" style="border-radius:var(--radius-sm)"></div>
+    <div class="name">sm</div>
+    <div class="label">8px</div>
+  </div>
+  <div class="item">
+    <div class="chip" style="border-radius:var(--radius-md)"></div>
+    <div class="name">md</div>
+    <div class="label">12px · inputs</div>
+  </div>
+  <div class="item">
+    <div class="chip" style="border-radius:var(--radius-lg)"></div>
+    <div class="name">lg</div>
+    <div class="label">16px · cards</div>
+  </div>
+  <div class="item">
+    <div class="chip" style="border-radius:var(--radius-xl)"></div>
+    <div class="name">xl</div>
+    <div class="label">24px · panels</div>
+  </div>
+  <div class="item">
+    <div class="chip" style="border-radius:var(--radius-2xl)"></div>
+    <div class="name">2xl</div>
+    <div class="label">32px</div>
+  </div>
+  <div class="item">
+    <div class="chip" style="border-radius:var(--radius-full);width:56px"></div>
+    <div class="name">full</div>
+    <div class="label">9999px · pills</div>
+  </div>
+</div>
+</body>
+</html>

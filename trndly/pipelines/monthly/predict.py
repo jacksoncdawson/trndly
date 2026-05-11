@@ -1,0 +1,357 @@
+"""Precompute predictions for the entire universe.
+
+Iterates every ``(dimension, level_id)`` and every distinct 5-D fingerprint
+present at the latest anchor month of the merged cubes; scores each via the
+champion model; classifies the trajectory via :mod:`pipelines.monthly.state`
+(forward-first hybrid rule consuming share_lag1, share_t, and y_h1..h6);
+decodes IDs to human names via ``lookup.csv``; writes two parquet files:
+
+    data/predictions/predictions_univariate_<YYYY-MM>.parquet
+    data/predictions/predictions_fingerprint_<YYYY-MM>.parquet
+
+Anchor selection: ``_find_eligible_anchor`` picks the latest month with
+3 contiguous prior months in the cube. When the latest live month is
+isolated (no real priors), run ``scripts/backfill_anchor_lags.py`` first
+to synthesize seasonal priors so the live month becomes eligible. If
+this step runs against a cube that has no synthetic backfill and an
+isolated live month, predict will log a WARNING and fall back to the
+nearest eligible (typically historical) anchor — it tells you how to
+fix it in the log message.
+
+Rows where the cube lacks t-3..t-1 lag coverage at a candidate anchor
+are silently skipped — the parquet only contains rows for which a
+forecast was producible.
+
+Schemas are enforced via :mod:`pipelines.contracts` validators
+(``validate_predictions_univariate_frame`` / ``validate_predictions_fingerprint_frame``)
+before write.
+
+Usage:
+    python -m pipelines.monthly.predict
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+import joblib
+import numpy as np
+import pandas as pd
+
+from pipelines.contracts import (
+    validate_predictions_fingerprint_frame,
+    validate_predictions_univariate_frame,
+)
+from pipelines.paths import (
+    FINGERPRINT_MODEL_JOBLIB,
+    LOOKUP_CSV,
+    MERGED_FINGERPRINT_PARQUET,
+    MERGED_UNIVARIATE_PARQUET,
+    MODEL_TRAINING_RUN_JSON,
+    PREDICTIONS_DIR,
+    UNIVARIATE_MODEL_JOBLIB,
+    predictions_fingerprint_path_for,
+    predictions_univariate_path_for,
+)
+from pipelines.monthly.state import classify_state
+from pipelines.cube_slicing import (
+    FINGERPRINT_COLS,
+    build_fingerprint_inference_rows,
+    build_univariate_inference_row,
+    month_shift,
+)
+
+logger = logging.getLogger(__name__)
+
+HORIZONS: list[str] = [f"y_h{h}" for h in range(1, 7)]
+
+
+# --------------------------------------------------------------------------- #
+# Helpers                                                                      #
+# --------------------------------------------------------------------------- #
+
+def _find_eligible_anchor(cube: pd.DataFrame, *, lag_months: int = 3) -> pd.Timestamp:
+    """Latest month M in ``cube`` where M, M-1, ..., M-lag_months all appear.
+
+    This is the globally-eligible anchor — individual (dim, level) or
+    fingerprint groups may still fail their per-key lag check if the cube
+    is sparse at that level. Such rows are skipped silently downstream.
+
+    Raises:
+        RuntimeError: no anchor found (cube too short for requested lags).
+    """
+    months_set = set(pd.to_datetime(cube["month"]).dt.as_unit("ns").unique())
+    months_sorted_desc = sorted(months_set, reverse=True)
+    for candidate in months_sorted_desc:
+        needed = {month_shift(candidate, -k) for k in range(0, lag_months + 1)}
+        if needed.issubset(months_set):
+            return pd.Timestamp(candidate)
+    raise RuntimeError(
+        f"no anchor with {lag_months} contiguous prior months found in cube; "
+        f"cube spans {min(months_sorted_desc)} → {max(months_sorted_desc)}"
+    )
+
+
+def _model_version() -> str:
+    """Return the current model version string from MODEL_TRAINING_RUN_JSON.
+
+    Falls back to ``"unknown"`` if the manifest is missing. The model version
+    is informational metadata in the predictions parquet.
+    """
+    if not MODEL_TRAINING_RUN_JSON.exists():
+        return "unknown"
+    try:
+        with open(MODEL_TRAINING_RUN_JSON) as f:
+            meta = json.load(f)
+        return str(meta.get("generated_at_utc") or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _coerce_predict_frame(X: pd.DataFrame) -> pd.DataFrame:
+    """Coerce numeric columns to float32 (matches train.py's split_xy)."""
+    out = X.copy()
+    for col in out.columns:
+        if np.issubdtype(out[col].dtype, np.number):
+            out[col] = out[col].astype(np.float32)
+    return out
+
+
+def _decode_lookup(lookup: pd.DataFrame) -> dict[tuple[str, int], str]:
+    """Build a {(category, id): name} index from lookup.csv."""
+    return {
+        (str(row["category"]), int(row["id"])): str(row["name"])
+        for _, row in lookup.iterrows()
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Univariate predictions                                                       #
+# --------------------------------------------------------------------------- #
+
+def _univariate_rows(
+    *,
+    cube: pd.DataFrame,
+    anchor: pd.Timestamp,
+    model: Any,
+    lookup_index: dict[tuple[str, int], str],
+    model_version: str,
+) -> list[dict]:
+    """Score every (dimension, level_id) at the anchor month."""
+    pairs = (
+        cube[cube["month"] == anchor][["dimension", "level_id"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+
+    rows: list[dict] = []
+    for dimension, level_id in pairs:
+        feat = build_univariate_inference_row(
+            cube, anchor_month=anchor, dimension=dimension, level_id=int(level_id)
+        )
+        if feat is None:
+            continue  # insufficient lag history
+        X = _coerce_predict_frame(feat.to_frame().T)
+        y_hat = np.asarray(model.predict(X), dtype=float).ravel().tolist()
+        if len(y_hat) != 6:
+            raise RuntimeError(
+                f"univariate model returned {len(y_hat)} horizons (expected 6)"
+            )
+        y_h0 = float(feat["share_t"])
+        past_lags = [
+            float(feat["share_lag3"]),
+            float(feat["share_lag2"]),
+            float(feat["share_lag1"]),
+        ]
+        state, stat = classify_state(y_h0, y_hat, past_lags=past_lags)
+        level_name = lookup_index.get(
+            (str(dimension), int(level_id)),
+            f"{dimension}:{level_id}",
+        )
+        rows.append(
+            {
+                "anchor_month": anchor,
+                "model_version": model_version,
+                "dimension": str(dimension),
+                "level_id": int(level_id),
+                "level_name": level_name,
+                **{h: y_hat[i] for i, h in enumerate(HORIZONS)},
+                "state": state,
+                "stat": stat,
+            }
+        )
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# Fingerprint predictions                                                      #
+# --------------------------------------------------------------------------- #
+
+# Map fingerprint id-column → lookup.csv category (for name decoding).
+_FP_NAME_CATEGORIES: dict[str, str] = {
+    "product_type_id": "product_type",
+    "gender_id": "gender",
+    "color_master_id": "color_master",
+    "graphical_appearance_id": "graphical_appearance",
+    "material_id": "material",
+}
+
+
+def _fingerprint_rows(
+    *,
+    cube: pd.DataFrame,
+    anchor: pd.Timestamp,
+    model: Any,
+    lookup_index: dict[tuple[str, int], str],
+    model_version: str,
+) -> list[dict]:
+    """Score every distinct 5-D fingerprint at the anchor month."""
+    # Empty dimensions = all fingerprints at the anchor month with lag coverage.
+    X, keys = build_fingerprint_inference_rows(
+        cube, anchor_month=anchor, dimensions={}
+    )
+    if X.empty:
+        return []
+
+    Y = np.asarray(model.predict(_coerce_predict_frame(X)), dtype=float)
+    rows: list[dict] = []
+    for i, key_tuple in enumerate(keys):
+        if Y.shape[1] != 6:
+            raise RuntimeError(
+                f"fingerprint model returned {Y.shape[1]} horizons (expected 6)"
+            )
+        y_hat = Y[i, :].tolist()
+        y_h0 = float(X.iloc[i]["share_t"])
+        past_lags = [
+            float(X.iloc[i]["share_lag3"]),
+            float(X.iloc[i]["share_lag2"]),
+            float(X.iloc[i]["share_lag1"]),
+        ]
+        state, stat = classify_state(y_h0, y_hat, past_lags=past_lags)
+
+        ids: dict[str, int] = {col: int(v) for col, v in zip(FINGERPRINT_COLS, key_tuple)}
+        names: dict[str, str] = {
+            col.replace("_id", "_name"): lookup_index.get(
+                (_FP_NAME_CATEGORIES[col], ids[col]),
+                f"{_FP_NAME_CATEGORIES[col]}:{ids[col]}",
+            )
+            for col in FINGERPRINT_COLS
+        }
+        rows.append(
+            {
+                "anchor_month": anchor,
+                "model_version": model_version,
+                **ids,
+                **names,
+                **{h: y_hat[j] for j, h in enumerate(HORIZONS)},
+                "state": state,
+                "stat": stat,
+            }
+        )
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# Stage driver                                                                 #
+# --------------------------------------------------------------------------- #
+
+def run_predict() -> dict[str, int]:
+    """Score the universe; write predictions parquets. Returns row counts."""
+    PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not FINGERPRINT_MODEL_JOBLIB.exists():
+        raise FileNotFoundError(f"missing fingerprint joblib at {FINGERPRINT_MODEL_JOBLIB}")
+    if not UNIVARIATE_MODEL_JOBLIB.exists():
+        raise FileNotFoundError(f"missing univariate joblib at {UNIVARIATE_MODEL_JOBLIB}")
+
+    logger.info("predict: loading champion models")
+    fp_model = joblib.load(FINGERPRINT_MODEL_JOBLIB)
+    uni_model = joblib.load(UNIVARIATE_MODEL_JOBLIB)
+
+    logger.info("predict: loading cubes + lookup")
+    cube_fp = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
+    cube_fp["month"] = pd.to_datetime(cube_fp["month"]).dt.as_unit("ns")
+    cube_uni = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
+    cube_uni["month"] = pd.to_datetime(cube_uni["month"]).dt.as_unit("ns")
+    lookup = pd.read_csv(LOOKUP_CSV)
+    lookup_index = _decode_lookup(lookup)
+
+    # Pick the latest globally-eligible anchor per cube (latest month with
+    # 3 contiguous prior months in the cube). Individual fingerprints / level
+    # groups may still fail their own lag check and are silently skipped.
+    anchor_fp = _find_eligible_anchor(cube_fp)
+    anchor_uni = _find_eligible_anchor(cube_uni)
+
+    # Soft-warn when the chosen anchor isn't the latest month on disk — most
+    # often this means the latest live scrape lacks 3 prior lag months and
+    # predict fell back to the historical block. Surface the backfill stopgap
+    # so the operator can decide whether to run it instead of silently
+    # serving predictions from a years-old anchor.
+    latest_uni_month = pd.to_datetime(cube_uni["month"]).max()
+    if anchor_uni < latest_uni_month:
+        logger.warning(
+            "predict: anchor (%s) is older than the latest month in the cube (%s). "
+            "The newer month lacks 3 contiguous prior lags. If you want the newer "
+            "month as the anchor, run `python scripts/backfill_anchor_lags.py` "
+            "first to manufacture synthetic priors, then re-run this command. "
+            "See TODO.md 'Sparse cube' section for context.",
+            anchor_uni.strftime("%Y-%m"),
+            pd.Timestamp(latest_uni_month).strftime("%Y-%m"),
+        )
+    if anchor_fp != anchor_uni:
+        logger.warning(
+            "predict: cube anchor mismatch (fingerprint=%s, univariate=%s); "
+            "predictions will use each cube's own eligible anchor",
+            anchor_fp, anchor_uni,
+        )
+    model_version = _model_version()
+
+    # Univariate
+    logger.info("predict: scoring univariate at anchor=%s", anchor_uni.isoformat())
+    uv_rows = _univariate_rows(
+        cube=cube_uni, anchor=anchor_uni, model=uni_model,
+        lookup_index=lookup_index, model_version=model_version,
+    )
+    if not uv_rows:
+        raise RuntimeError(
+            "predict: no univariate predictions produced — check cube lag coverage."
+        )
+    df_uv = pd.DataFrame(uv_rows)
+    df_uv = validate_predictions_univariate_frame(df_uv)
+    out_uv = predictions_univariate_path_for(anchor_uni)
+    df_uv.to_parquet(out_uv, index=False)
+    logger.info("predict: wrote %s | rows=%d", out_uv, len(df_uv))
+
+    # Fingerprint
+    logger.info("predict: scoring fingerprint at anchor=%s", anchor_fp.isoformat())
+    fp_rows = _fingerprint_rows(
+        cube=cube_fp, anchor=anchor_fp, model=fp_model,
+        lookup_index=lookup_index, model_version=model_version,
+    )
+    if not fp_rows:
+        raise RuntimeError(
+            "predict: no fingerprint predictions produced — check cube lag coverage."
+        )
+    df_fp = pd.DataFrame(fp_rows)
+    df_fp = validate_predictions_fingerprint_frame(df_fp)
+    out_fp = predictions_fingerprint_path_for(anchor_fp)
+    df_fp.to_parquet(out_fp, index=False)
+    logger.info("predict: wrote %s | rows=%d", out_fp, len(df_fp))
+
+    return {"univariate": len(df_uv), "fingerprint": len(df_fp)}
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    summary = run_predict()
+    logger.info("predict summary: %s", summary)
+
+
+if __name__ == "__main__":
+    main()

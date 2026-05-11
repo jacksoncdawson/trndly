@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html>
+<head><title>Test PDP</title></head>
+<body>
+<script>
+window.__INITIAL_STATE__ = "{\"productData\":{\"sections\":[{\"label\":\"Description\",\"bullets\":[\"Some text\"]},{\"label\":\"Fabric \u0026 care\",\"bullets\":[\"98% Cotton, 2% Elastane\",\"Machine wash cold\"]}]}}";
+</script>
+</body>
+</html>

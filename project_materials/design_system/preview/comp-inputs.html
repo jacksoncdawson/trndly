@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://rsms.me/"/>
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css"/>
+<link rel="stylesheet" href="../tokens.css"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--color-bg);font-family:var(--font-sans);padding:24px;-webkit-font-smoothing:antialiased}
+.row{display:flex;gap:20px;flex-wrap:wrap}
+.input-group{display:flex;flex-direction:column;gap:8px;flex:1;min-width:180px}
+.input-label{font-size:var(--text-sm);font-weight:600;color:var(--color-text-primary)}
+.input{
+  background:var(--color-surface-sunk);
+  border:2px solid var(--color-border);
+  border-radius:var(--radius-md);
+  padding:10px 14px;
+  color:var(--color-text-primary);
+  font-family:var(--font-sans);
+  font-size:var(--text-base);
+  outline:none;
+  width:100%;
+}
+.input:focus{background:var(--color-surface-1);box-shadow:4px 4px 0 0 var(--color-primary)}
+.input::placeholder{color:var(--color-text-tertiary)}
+.input-error{border-color:var(--color-danger);box-shadow:4px 4px 0 0 var(--color-danger)}
+.input-hint{font-size:var(--text-xs);color:var(--color-text-tertiary);margin-top:2px}
+.input-hint.err{color:var(--color-danger)}
+</style>
+</head>
+<body>
+<div class="row">
+  <div class="input-group">
+    <label class="input-label">Item name</label>
+    <input class="input" value="Burgundy linen blazer"/>
+    <span class="input-hint">What did you find?</span>
+  </div>
+  <div class="input-group">
+    <label class="input-label">What did you pay?</label>
+    <input class="input" value="$24"/>
+  </div>
+  <div class="input-group">
+    <label class="input-label">Description</label>
+    <input class="input" placeholder="Optional notes…"/>
+  </div>
+  <div class="input-group">
+    <label class="input-label">Platform <span style="color:var(--color-danger)">*</span></label>
+    <input class="input input-error" value="Depop"/>
+    <span class="input-hint err">Platform not recognised</span>
+  </div>
+</div>
+</body>
+</html>
