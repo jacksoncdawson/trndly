@@ -7,6 +7,12 @@ the entire universe of (dimension, level) pairs and 5-D fingerprints.
 The FastAPI service is a read-only layer over the predictions parquet —
 no live `model.predict()` calls in the request path.
 
+## Demo
+
+Product preview:
+
+![Product preview recording](./trndly_demo.gif)
+
 ## Repo layout
 
 The project root has minimal scaffolding; the code lives one level down
@@ -15,6 +21,7 @@ in `trndly/`.
 ```
 .
 ├── README.md                  ← this file
+├── trndly_demo.gif            ← product preview recording
 ├── TODO.md                    ← forward-looking work list
 ├── mlflow.db                  ← local MLflow tracking store (gitignored)
 ├── project_materials/         ← pitch deck, demo videos, checkpoints
