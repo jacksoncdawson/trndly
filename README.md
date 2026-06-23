@@ -23,7 +23,6 @@ in `trndly/`.
 ├── README.md                  ← this file
 ├── trndly_demo.gif            ← product preview recording
 ├── TODO.md                    ← forward-looking work list
-├── mlflow.db                  ← local MLflow tracking store (gitignored)
 ├── project_materials/         ← pitch deck, demo videos, checkpoints
 └── trndly/                    ← the application
     ├── pipelines/
@@ -34,12 +33,12 @@ in `trndly/`.
     │   └── monthly/           — the monthly tick (scrape → ... → predict)
     ├── backend/services/
     │   └── scheduleServer.py  — FastAPI service (read-only over predictions)
-    ├── frontend/              — React SPA, no build step (JSX-via-Babel + SWR)
+    ├── frontend/              — React SPA, no build step (JSX-via-Babel + in-house useFetch hook)
     ├── notebooks/             — 0 (Kaggle clean), 1 (historical agg), 4 (HP sweep)
+    ├── EDA/                   — exploratory data/training/transaction notebooks
     ├── tests/                 — unit, contract, and integration tests
     ├── data/                  — raw / reference / processed / models / predictions
-    ├── docs/                  — architecture, API reference, monthly-tick runbook
-    └── experiments/           — one-off measurement / A-B scripts
+    └── docs/                  — architecture, API reference, monthly-tick runbook
 ```
 
 Two RandomForest regressors:
@@ -89,10 +88,13 @@ Then open `http://localhost:8000/ui/` for the React app or
 | `scrape`    | Subprocess each retailer scraper + `build_live_cube` | `data/raw/items/`, `data/processed/live_*_<YYYY-MM>.parquet` |
 | `aggregate` | Concat historical + live cubes with dedup            | `data/processed/merged_*.parquet`                            |
 | `features`  | Calendar-strict windowing (lags + 6 targets)         | `data/processed/training_*.parquet`                          |
-| `train`     | Fit RandomForest, log to MLflow, persist joblibs     | `data/models/*.joblib`, `model_training_run.json`            |
+| `train`     | Fit RandomForest, write run metrics, persist joblibs | `data/models/*.joblib`, `model_training_run.json`            |
 | `evaluate`  | Compare candidate vs incumbent WMAE; auto-promote    | `data/models/champion_metrics.json` (on promotion)           |
 | `predict`   | Score the universe, classify state, write parquet    | `data/predictions/predictions_*_<YYYY-MM>.parquet`           |
 
+The tick is self-contained and writes everything to local disk — no
+cloud calls. (See **MLflow & cloud infra** below for what *does* talk to
+the cloud, and when.)
 
 Stages are also runnable individually:
 
@@ -106,6 +108,40 @@ After a tick, restart the FastAPI service to pick up the new predictions.
 See [trndly/docs/monthly_tick.md](trndly/docs/monthly_tick.md) for the
 full operator runbook (prereqs, debugging, common failures).
 
+### Champion model management (local-MVP)
+
+`evaluate` is explicitly the **local-MVP** version: the champion is a
+local `data/models/champion_metrics.json` file, not an MLflow registry
+alias. Promotion rule: `candidate.holdout_wmae <= incumbent.holdout_wmae`
+→ promote (or promote if no incumbent recorded). Note that `train`
+overwrites the joblib models before `evaluate` runs, so a candidate that
+loses the comparison is not auto-reverted — only the champion-metrics
+pointer is left unchanged. Registry-backed champion aliasing is the
+target architecture (see [docs/architecture.md](trndly/docs/architecture.md)),
+not the current behavior.
+
+## MLflow & cloud infra
+
+The tick and the serving path are **fully local**; the only cloud touch
+point is model development:
+
+- **Monthly tick** — no MLflow. `train` writes joblibs +
+  `model_training_run.json`; `evaluate` manages a local
+  `champion_metrics.json`. There are no `mlflow.*` calls anywhere in
+  `pipelines/monthly/`.
+- **Serving** (`backend/services/scheduleServer.py`) — reads precomputed
+  predictions parquets from local disk; no live model calls. The
+  `MLFLOW_*` variables in `backend/services/.env` are **leftovers** from
+  an older registry-backed serving design and are not referenced in the
+  request path.
+- **Model development / HP sweeps** — `notebooks/_gen_4_hyperparameter_search.py`
+  logs runs to a **real self-hosted MLflow tracking server + model
+  registry** on a GCP VM (`MLFLOW_TRACKING_URI=http://34.169.170.34:5000`,
+  Postgres backend store, GCS-backed artifacts at
+  `gs://trndly-mlops-us/mlflow/`). This is used only during development,
+  never by the tick or the API. (Notebook runs may also use a local
+  SQLite `mlflow.db`, which is gitignored and not committed.)
+
 ## API surface
 
 All routes are `GET`; no POST triggers a model call.
@@ -116,7 +152,7 @@ All routes are `GET`; no POST triggers a model call.
 | `GET /options`                                                                                                 | Dropdown vocabularies, `[{name, id}]` per category     |
 | `GET /trends`                                                                                                  | Univariate predictions. Filters: `?dimension=&state=`  |
 | `GET /forecast/fingerprint?product_type_id=&gender_id=&color_master_id=&graphical_appearance_id=&material_id=` | One fingerprint forecast (404 if no precomputed match) |
-| `GET /health`                                                                                                  | Bundle status + anchor month                           |
+| `GET /health`                                                                                                  | Bundle status + anchor month + `lags_synthetic` flag   |
 | `/ui/*`                                                                                                        | Static React app                                       |
 
 
@@ -130,31 +166,39 @@ cd trndly
 .venv/bin/python -m pytest tests/monthly/ # tick-stage unit tests
 ```
 
-220+ tests covering schema validators, lookup-csv consistency, cube
-concat-compatibility, items-CSV ID validity, trend-state classification,
-evaluator promotion logic, and predictions-parquet integration.
+250+ tests (253 collected from 107 test functions, expanded by
+parametrization) covering schema validators, lookup-csv consistency,
+cube concat-compatibility, items-CSV ID validity, trend-state
+classification, evaluator promotion logic, and scraper retry/dedup
+logic.
 
-Live retailer smoke checks are gated behind `pytest -m live`.
+Live retailer smoke checks are gated behind `pytest -m live` (skipped by
+default via `addopts = -m "not live"` in `pytest.ini`).
+
+CI runs the suite on every push and pull request to `main` (and on
+manual dispatch) via
+[`.github/workflows/tests.yml`](.github/workflows/tests.yml) on
+Python 3.11, uploading a junit report as an artifact.
 
 ## Documentation
 
 - [trndly/docs/architecture.md](trndly/docs/architecture.md) — shipped architecture + future GCP target
 - [trndly/docs/api.md](trndly/docs/api.md) — endpoint reference with example bodies
 - [trndly/docs/monthly_tick.md](trndly/docs/monthly_tick.md) — operator runbook
-- [trndly/docs/rationale.md](trndly/docs/rationale.md) — design decisions (SWR, SPA, IaC)
+- [trndly/docs/rationale.md](trndly/docs/rationale.md) — design decisions (in-house useFetch vs SWR, SPA, IaC)
 - [trndly/pipelines/collectors/README.md](trndly/pipelines/collectors/README.md) — scrapers, items.csv schema, brittle areas
 - [trndly/data/reference/SCHEMA.md](trndly/data/reference/SCHEMA.md) — per-dimension reachability audit
 - [TODO.md](TODO.md) — forward-looking work + brittle-area watchlist
 
 ## Status
 
-**Shipped:** monthly batch architecture (manual cadence), precomputed predictions, read-only FastAPI service, React frontend wired to API via SWR.
+**Shipped:** monthly batch architecture (manual cadence), precomputed predictions, local-file champion management, read-only FastAPI service, React frontend wired to the API via an in-house `useFetch` hook.
 
 **Future** (out of scope for current MVP):
 
 - Storage migration: local parquet → GCS / BigQuery
 - Cloud cadence: manual CLI → Cloud Scheduler + Vertex Custom Container job
+- Champion management: local `champion_metrics.json` → MLflow registry alias (`set_registered_model_alias`) on the GCP-backed registry, with auto-revert on demotion
 - Frontend hosting split: Firebase Hosting (static) + Cloud Run (API)
 - Auth: Firebase Auth + per-user inventory in Firestore
 - Container split: separate images for collectors / monthly tick / API
-

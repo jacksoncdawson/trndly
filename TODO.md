@@ -1,7 +1,7 @@
 # TODO
 
 Forward-looking work list for the trndly forecaster pipeline.
-Last updated: 2026-05-10.
+Last updated: 2026-05-10 (audited 2026-06-22).
 
 For the shipped state, read [README.md](README.md) and
 [trndly/docs/architecture.md](trndly/docs/architecture.md). For
@@ -24,24 +24,37 @@ The shipped MVP is laptop-driven. The
 captures the target end state. Concretely:
 
 - **Storage migration: local parquet → GCS.** `paths.py` is the single
-  chokepoint; swap with an `fsspec`-backed resolver. `gcsfs` already in
-  `requirements.txt`. Existing infra: `gs://trndly-mlops-us`.
+  chokepoint — today it is pure local `Path(__file__).resolve()` logic
+  with no `fsspec`/`gs://` resolver. Swap with an `fsspec`-backed
+  resolver. `gcsfs` already in `requirements.txt`. Existing infra:
+  `gs://trndly-mlops-us`.
 - **Cadence: manual CLI → Cloud Scheduler + Vertex Custom Container.**
   Replace `python -m pipelines.monthly run` with a Vertex job, fire
   monthly via Cloud Scheduler.
 - **MLflow registry: local file → managed tracking.** `evaluate.py`
-  currently writes `champion_metrics.json` locally; swap for
-  `MlflowClient.set_registered_model_alias`.
+  currently writes `champion_metrics.json` locally (it explicitly calls
+  itself the "local-MVP version"); swap for
+  `MlflowClient.set_registered_model_alias`. The real self-hosted MLflow
+  tracking + registry already exists on a GCP VM
+  (`MLFLOW_TRACKING_URI=http://34.169.170.34:5000`, Postgres backend
+  store, GCS artifacts under `gs://trndly-mlops-us/mlflow/`) but is used
+  **only during model development / HP sweeps**
+  (`notebooks/_gen_4_hyperparameter_search.py`), not in the monthly tick
+  or the serving request path.
 - **Frontend hosting: same-origin uvicorn → Firebase Hosting + Cloud
   Run API.** Add CORS allowlist.
 - **Auth: none → Firebase Auth.** Per-user inventory in Firestore.
 - **Container split: 3 images (collectors / monthly tick / API).**
-  Currently single `trndly/Dockerfile`.
+  Currently single `trndly/Dockerfile`. (Note: that Dockerfile's
+  `COPY pipelines/training` line is dead — no `pipelines/training`
+  directory exists in the repo, so the copy silently no-ops. Drop or fix
+  it when the container is reworked.)
 
 ### Univariate `dimension` feature
 
 Univariate model is currently dimension-blind (features:
-`[month_of_year, share_t, share_lag1..3]`). Adding `dimension` as a
+`[month_of_year, share_t, share_lag1..3]`, confirmed in
+`features.py::UNIVARIATE_FEATURE_COLS`). Adding `dimension` as a
 pandas Categorical lets the model specialize per dim (color seasonality
 ≠ material seasonality) without splitting into N models. Touchpoints:
 `pipelines/monthly/features.py` (add column to
@@ -54,7 +67,7 @@ column), `pipelines/monthly/predict.py` (passes through).
 `pipelines/monthly/state.py` was rewritten in 2026-05 to a forward-first
 hybrid rule (peak band considers past lags + anchor + first 2 forward
 horizons; rising/falling decided on the forward ratio `y_h6 / share_t`).
-Current constants:
+Current constants (verified module-level in `state.py`):
 
 - `RISING_RATIO = 1.08` — forward must beat anchor by >8% to fire rising
 - `FALLING_RATIO = 0.92` — forward must trail anchor by >8% to fire falling
@@ -90,32 +103,58 @@ Not blocking; the chart legend labels synthesized series clearly
 American Eagle's Akamai JWT has ~30-min TTL.
 [american_eagle_scraper.py](trndly/pipelines/collectors/american_eagle_scraper.py)
 should detect a 401 mid-run and re-invoke `_bootstrap_session` instead
-of failing the whole scrape. Today the user has to re-run from scratch.
+of failing the whole scrape. Today there is no 401 detection in the
+fetch loop, so the user has to re-run from scratch.
 
 ### `evaluate.py` candidate-rollback on regression
 
 When a candidate model loses to the incumbent on holdout WMAE,
 `evaluate.py` keeps `champion_metrics.json` pointing at the old model
 but the canonical joblibs in `data/models/` were already overwritten by
-`train.py` with the (worse) candidate. Recovery requires retraining
-from a prior month or restoring from backup. Add an archive-on-train +
-revert-on-loss path: `train.py` writes to
+`train.py` with the (worse) candidate. (This trade-off is explicitly
+acknowledged in the `evaluate.py` module docstring.) Recovery requires
+retraining from a prior month or restoring from backup. Add an
+archive-on-train + revert-on-loss path: `train.py` writes to
 `data/models/runs/<timestamp>/`, `evaluate.py` swaps the canonical
 symlink/copy on promotion.
 
 ### MLflow registry hygiene
 
-The retired `listing_timeline` registered model still lives in MLflow.
-Clean up via the UI or
-`MlflowClient.delete_registered_model(name="listing_timeline")`.
+A retired registered model still lives in the cloud MLflow registry.
+Note the name is ambiguous from the repo: the HP-sweep notebook
+references the legacy name `listing_timeline`, while the serving
+leftover config (`backend/services/.env`) references
+`listing_timeline_experiments`. The registry itself is on the GCP VM
+(`http://34.169.170.34:5000`) and cannot be inspected from this repo —
+list the registered models there first, then clean up via the UI or
+`MlflowClient.delete_registered_model(name=...)` with the confirmed name.
 
-### Test infrastructure: missing pytest plugins
+### Test infrastructure: missing `pytest-asyncio` (and venv Python version)
 
-`pytest tests/` reports 16 errors + 1 failure due to
-`pytest-asyncio` and `pytest-httpx` not being installed in
-`trndly/.venv`. They're listed in `requirements.txt`; reinstall the
-venv (or `pip install pytest-asyncio pytest-httpx`) to get those tests
-passing.
+`pytest tests/` currently reports **17 failed** (236 passed, 3
+deselected). All 17 failures are the async scraper tests
+(`test_ae.py`, `test_gap.py`, `test_uniqlo.py`, `test_hollister.py`,
+`test_http_utils.py`) erroring with *"async def functions are not
+natively supported"*.
+
+Two compounding causes:
+
+1. **`pytest-asyncio` is not installed** — and, contrary to a previous
+   note, it is **not** listed in `requirements.txt` (only `pytest` and
+   `pytest-httpx` are). So reinstalling the venv from `requirements.txt`
+   alone will **not** fix this. Either `pip install pytest-asyncio`
+   directly, or add it to `requirements.txt` first.
+2. **The on-disk `.venv` is Python 3.14**, not the supported 3.11
+   (`scripts/setup_venv.sh` and CI both pin 3.11). Under this combo
+   pytest 9 also warns `Unknown config option: asyncio_mode` and treats
+   `@pytest.mark.asyncio` as an unknown mark.
+
+**Fix:** rebuild the venv on Python 3.11 via `scripts/setup_venv.sh`,
+add `pytest-asyncio` to `requirements.txt`, and reinstall. Note that CI
+(`.github/workflows/tests.yml`) runs on Python 3.11 and currently does
+`pip install -r requirements.txt && pip install pytest` — it will hit
+the same async failures until `pytest-asyncio` is added to the install
+step or requirements.
 
 ---
 
@@ -154,7 +193,8 @@ Catalog data lives inside
 in the SSR HTML. If Hollister renames the variable or wraps it
 differently, parsing returns `None` and Hollister's items file becomes
 empty. Constant: `APOLLO_STATE_PREFIX` at the top of
-[hollister_scraper.py](trndly/pipelines/collectors/hollister_scraper.py).
+[hollister_scraper.py](trndly/pipelines/collectors/hollister_scraper.py)
+(consumed by `_parse_apollo_state`).
 
 ### PDP fabric regex per retailer
 
@@ -166,7 +206,7 @@ specific JSON-string structure:
 | Gap       | `\\"label\\":\\"Fabric \\u0026 care\\".*?\\"bullets\\":\[(.*?)\]` | `gap_scraper.py:FABRIC_BULLETS_RE` |
 | Uniqlo    | `"composition"\s*:\s*"((?:.\|[^"])*)"` | `uniqlo_scraper.py` |
 | AE        | JSON path `data["data"]["attributes"]["copySections"]["material"]["bullets"]` | `american_eagle_scraper.py:_fetch_pdp_fabric` |
-| Hollister | `"fabricDetails":"((?:[^"]\|.)*)"` | `hollister_scraper.py` |
+| Hollister | `"fabricDetails":"((?:[^"\\]\|\\.)*)"` | `hollister_scraper.py:PDP_FABRIC_RE` |
 
 If any retailer changes their PDP serialization, enrichment silently
 returns empty strings → `material_raw` unknown rate jumps from ~2% to
@@ -187,14 +227,15 @@ to produce predictions for an anchor (t, t-1, t-2, t-3). The merged cube
 has 23 contiguous historical months (Oct 2018 → Aug 2020) plus the
 single live month (May 2026) — a 5-year gap between the two.
 
-**Stopgap (currently active):**
+**Stopgap (currently active — verified 2026-06-22):**
 [scripts/backfill_anchor_lags.py](trndly/scripts/backfill_anchor_lags.py)
 manufactures synthetic Feb/Mar/Apr 2026 rows for the merged cube by
 taking historical seasonal ratios (hist[lag_month] / hist[anchor_month],
 averaged across 2019 + 2020) and rescaling by the current 2026-05
 share_t. This lets `pipelines.monthly.predict` anchor at 2026-05 and
 gives the UI real-recent live data plus synthetic-but-plausible context
-for past 3 months.
+for past 3 months. (Confirmed live: `merged_univariate.parquet` holds
+357 rows with `source = 'backfill'` for 2026-02/03/04.)
 
 The backfill is **traceable**: synthetic rows carry `source = 'backfill'`
 in the merged cube and the `/health` endpoint exposes `lags_synthetic: true`
@@ -222,14 +263,18 @@ for the full method.
   pipelines.monthly` resolves imports off cwd; running from the project
   root will fail with `ModuleNotFoundError: pipelines`.
 - **Python interpreter.** `trndly/.venv/bin/python` is the supported
-  env. Built from `trndly/requirements.txt`.
+  env, built from `trndly/requirements.txt` via `scripts/setup_venv.sh`.
+  The supported version is **Python 3.11** (matches CI). Note: the venv
+  currently on disk is Python 3.14, which is why the async tests fail —
+  see "Test infrastructure" above.
 
 ### Smoke commands
 
 ```bash
 cd /Users/jackcdawson/Desktop/trndly/trndly
 
-# Full monthly tick (scrape → ... → predict). ~15 min including scrape.
+# Full monthly tick (scrape → aggregate → features → train → evaluate
+# → predict). ~15 min including scrape.
 .venv/bin/python -m pipelines.monthly run
 
 # Skip scrape stage (use existing items_*.csv). ~1 min.
@@ -244,7 +289,8 @@ cd /Users/jackcdawson/Desktop/trndly/trndly
 # Just the merge stage (rebuild merged_*.parquet from cubes on disk)
 .venv/bin/python -m pipelines.monthly aggregate
 
-# Test integrity
+# Test integrity (note: 17 async scraper tests fail until pytest-asyncio
+# is installed and the venv is on Python 3.11 — see Test infrastructure)
 .venv/bin/python -m pytest tests/ -q
 
 # Serve the API
@@ -265,7 +311,7 @@ cd /Users/jackcdawson/Desktop/trndly/trndly
 | `/trends` returns `[]` | No predictions parquet, or anchor month has no rows | Run `python -m pipelines.monthly predict`; restart API |
 | API returns 503 with "predictions bundle not loaded" | No predictions parquet found at startup | `ls data/predictions/`; run the monthly tick |
 | `predict` exits "no univariate predictions produced" | Latest cube month has no 3 contiguous prior months | See "Sparse cube → empty predictions" above |
-| Tests show 16 errors / 1 failure | Missing `pytest-asyncio` / `pytest-httpx` | Reinstall venv from `requirements.txt` |
+| `async def functions are not natively supported` (17 failures) | `pytest-asyncio` missing and/or venv on Python 3.14 | Install `pytest-asyncio`; rebuild venv on Python 3.11 |
 
 ### Documentation
 
