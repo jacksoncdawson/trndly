@@ -44,6 +44,10 @@ env/
 **/data/reference/*
 !**/data/reference/lookup.csv
 **/data/raw/kaggle/
+# Published static JSON (pipelines.monthly.publish output). Commit the canonical
+# files the SPA fetches (turnkey demo, like committed predictions); the versioned
+# *_<YYYY-MM>.json archives are regenerated each tick.
+**/frontend/data/*_[0-9][0-9][0-9][0-9]-[0-9][0-9].json
 .env
 
 # MLflow

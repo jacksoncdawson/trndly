@@ -1,7 +1,7 @@
 // ScreenItem.jsx — item detail: identity hero, popularity chart, signal breakdown.
 //
 // Series source priority:
-//   1. /forecast/fingerprint   ← gold standard, used when the 5-D combo is precomputed
+//   1. fingerprint.json lookup ← gold standard, used when the 5-D combo is precomputed
 //   2. synthesizeFingerprintSeries(tags, trends)   ← multiplicative joint fallback
 //   3. null   ← chart hidden, recommendation = "More data needed"
 //
@@ -58,9 +58,10 @@ function findTrendSeriesFor(trends, signal) {
   return match ? match.series : null;
 }
 
-// Resolve an item's stored tags to the 5-D fingerprint querystring used by
-// /forecast/fingerprint. Returns null if any tag is missing or unknown to
-// the loaded /options vocabulary.
+// Resolve an item's stored tags to the 5-D fingerprint lookup key (also the
+// useFetch cache key; apiFetcher parses the ids back out for the static
+// fingerprint.json lookup). Returns null if any tag is missing or unknown to
+// the loaded options vocabulary.
 function buildFingerprintKey(item, lookupIds) {
   if (!item || !item.tags || !lookupIds) return null;
   const t = item.tags;
@@ -120,8 +121,8 @@ function ScreenItem({ onNav, index = 0 }) {
 
   // ── Series source: fingerprint → synthesis → null ──────────────────
   // Synthesis kicks in when the precomputed cube doesn't carry this exact
-  // 5-D combination (404). It multiplies per-dimension univariate motions
-  // — see api.js::synthesizeFingerprintSeries.
+  // 5-D combination (lookup miss → null). It multiplies per-dimension
+  // univariate motions — see api.js::synthesizeFingerprintSeries.
   const fingerprintSeries = fpRes.data ? seriesFromRow(fpRes.data) : null;
   const synthesizedSeries = !fingerprintSeries
     ? synthesizeFingerprintSeries(item.tags, trends)

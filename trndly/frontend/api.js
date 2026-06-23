@@ -1,13 +1,18 @@
-// api.js — fetch + reshape adapter between the FastAPI service and the
+// api.js — fetch + reshape adapter between the published static JSON and the
 // frontend's UI contract.
 //
 // ─────────────────────────────────────────────────────────────────
-// API endpoints (served by backend/services/scheduleServer.py):
-//   GET /options                  → vocabularies for dropdowns
-//   GET /trends                   → univariate predictions (every dim/level)
-//   GET /forecast/fingerprint     → single fingerprint forecast (5-D query)
-//   GET /health                   → liveness + bundle status (fetched directly
-//                                   by dataProvider; no reshape needed)
+// Static JSON (emitted by pipelines.monthly.publish, served same-origin under
+// ./data/ on Firebase Hosting / the dev server's /ui):
+//   ./data/trends.json        → univariate predictions (every dim/level)
+//   ./data/options.json       → vocabularies for dropdowns
+//   ./data/health.json        → bundle status + lags_synthetic flag
+//   ./data/fingerprint.json   → { "pt|g|cm|ga|m": forecast } — ONE 5-D-keyed
+//                               bundle; the client does the lookup (a miss
+//                               returns null, not a 404)
+//
+// Override window.API_BASE = 'http://localhost:8000' to hit a live
+// scheduleServer instead (the /forecast/fingerprint endpoint 404s on a miss).
 //
 // Shapes the React screens consume (produced by the adapters below):
 //   Trend row:   { name, category, state, stat }
@@ -19,20 +24,46 @@
 // All exports go on `window` so .jsx siblings can read them.
 // ─────────────────────────────────────────────────────────────────
 
-// Same-origin (FastAPI mounts /ui statically, so the API is at /).
-// Override with window.API_BASE = '...' if running the UI from a different host.
 const API_BASE = (typeof window !== 'undefined' && window.API_BASE) || '';
 
-// ─── Fetcher ────────────────────────────────────────────────────────────
-async function apiFetcher(path) {
-  const res = await fetch(API_BASE + path, { headers: { 'Accept': 'application/json' } });
+// API path → published static file (used in the default static mode).
+const STATIC_JSON = {
+  '/trends':  './data/trends.json',
+  '/options': './data/options.json',
+  '/health':  './data/health.json',
+};
+
+async function _fetchJson(url) {
+  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    const err = new Error(`API ${res.status} ${path}: ${body}`);
+    const err = new Error(`fetch ${res.status} ${url}: ${body}`);
     err.status = res.status;
     throw err;
   }
   return res.json();
+}
+
+// ─── Fetcher ────────────────────────────────────────────────────────────
+// Default: serve the published static JSON. With window.API_BASE set, proxy to
+// a live scheduleServer instead (handy for local API development).
+async function apiFetcher(path) {
+  if (API_BASE) return _fetchJson(API_BASE + path);
+
+  const base = path.split('?')[0];
+  if (base === '/forecast/fingerprint') {
+    const p = new URLSearchParams(path.split('?')[1] || '');
+    return fetchFingerprintSignals({
+      product_type_id:         p.get('product_type_id'),
+      gender_id:               p.get('gender_id'),
+      color_master_id:         p.get('color_master_id'),
+      graphical_appearance_id: p.get('graphical_appearance_id'),
+      material_id:             p.get('material_id'),
+    });
+  }
+  const file = STATIC_JSON[base];
+  if (!file) throw new Error(`no static route for ${path}`);
+  return _fetchJson(file);
 }
 
 // ─── /trends → TREND_DATA shape ────────────────────────────────────────
@@ -115,28 +146,42 @@ function indexOptionsById(apiOptions) {
   };
 }
 
-// ─── /forecast/fingerprint → per-item signal row ───────────────────────
-// One API call returns the full 5-D fingerprint forecast; we project it into
-// the per-feature signal-card shape the Item Detail screen renders.
-async function fetchFingerprintSignals({
+// ─── fingerprint.json (single 5-D-keyed bundle) ────────────────────────
+// Locked design: ONE fingerprint.json (not sharded); the client loads it once
+// and does the 5-D lookup. The key matches pipelines.serving.fingerprint_key:
+// "product_type_id|gender_id|color_master_id|graphical_appearance_id|material_id".
+let _fingerprintBundle = null;   // Promise<{ key: forecastRow }>
+
+function fingerprintKey({
   product_type_id, gender_id, color_master_id, graphical_appearance_id, material_id,
 }) {
-  const qs = new URLSearchParams({
+  return [
     product_type_id, gender_id, color_master_id, graphical_appearance_id, material_id,
-  }).toString();
-  const data = await apiFetcher(`/forecast/fingerprint?${qs}`);
-  // The fingerprint endpoint returns ONE forecast for the whole 5-tuple,
-  // not per-feature. To populate the four signal cards, we cross-reference
-  // each dimension against /trends (cached upstream by dataProvider's
-  // useFetch hook) and pick the matching row. dataProvider does that
-  // wiring; here we just return the single fingerprint row.
-  return data;
+  ].map(v => String(Number(v))).join('|');
+}
+
+function _loadFingerprintBundle() {
+  if (!_fingerprintBundle) {
+    _fingerprintBundle = _fetchJson('./data/fingerprint.json').catch(err => {
+      _fingerprintBundle = null;   // allow a retry on the next call
+      throw err;
+    });
+  }
+  return _fingerprintBundle;
+}
+
+// Returns the precomputed forecast row for the 5-D fingerprint, or null on a
+// miss. The caller routes null into synthesizeFingerprintSeries (this replaces
+// the old /forecast/fingerprint 404 catch — the miss→synthesis fallback).
+async function fetchFingerprintSignals(ids) {
+  const bundle = await _loadFingerprintBundle();
+  return bundle[fingerprintKey(ids)] || null;
 }
 
 // ─── synthesizeFingerprintSeries(tags, trends) ─────────────────────────
-// When `/forecast/fingerprint` returns 404 (the 5-D combination isn't
-// precomputed — common for niche combos), we fall back to a joint forecast
-// built from the per-dimension univariate trends already in memory.
+// When the fingerprint lookup misses (the 5-D combination isn't precomputed —
+// common for niche combos), we fall back to a joint forecast built from the
+// per-dimension univariate trends already in memory.
 //
 // Method: multiplicative independence. For each populated tag, look up
 // the trend row (by category + name) and take its relative motion

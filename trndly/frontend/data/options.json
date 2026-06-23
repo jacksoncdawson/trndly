@@ -1,0 +1,712 @@
+{
+  "colors": [
+    {
+      "name": "Beige",
+      "id": 4
+    },
+    {
+      "name": "Black",
+      "id": 1
+    },
+    {
+      "name": "Blue",
+      "id": 2
+    },
+    {
+      "name": "Brown",
+      "id": 9
+    },
+    {
+      "name": "Green",
+      "id": 5
+    },
+    {
+      "name": "Grey",
+      "id": 6
+    },
+    {
+      "name": "Metal",
+      "id": 12
+    },
+    {
+      "name": "Orange",
+      "id": 11
+    },
+    {
+      "name": "Pink",
+      "id": 8
+    },
+    {
+      "name": "Purple",
+      "id": 13
+    },
+    {
+      "name": "Red",
+      "id": 7
+    },
+    {
+      "name": "Unknown",
+      "id": 0
+    },
+    {
+      "name": "White",
+      "id": 3
+    },
+    {
+      "name": "Yellow",
+      "id": 10
+    }
+  ],
+  "categories": [
+    {
+      "name": "Alice band",
+      "id": 90
+    },
+    {
+      "name": "Bag",
+      "id": 22
+    },
+    {
+      "name": "Ballerinas",
+      "id": 46
+    },
+    {
+      "name": "Beanie",
+      "id": 74
+    },
+    {
+      "name": "Belt",
+      "id": 24
+    },
+    {
+      "name": "Bikini top",
+      "id": 9
+    },
+    {
+      "name": "Blazer",
+      "id": 18
+    },
+    {
+      "name": "Blouse",
+      "id": 6
+    },
+    {
+      "name": "Bodysuit",
+      "id": 33
+    },
+    {
+      "name": "Bootie",
+      "id": 92
+    },
+    {
+      "name": "Boots",
+      "id": 27
+    },
+    {
+      "name": "Bra",
+      "id": 8
+    },
+    {
+      "name": "Bra extender",
+      "id": 84
+    },
+    {
+      "name": "Bracelet",
+      "id": 63
+    },
+    {
+      "name": "Braces",
+      "id": 82
+    },
+    {
+      "name": "Bucket hat",
+      "id": 83
+    },
+    {
+      "name": "Cap",
+      "id": 88
+    },
+    {
+      "name": "Cap/peaked",
+      "id": 56
+    },
+    {
+      "name": "Cardigan",
+      "id": 20
+    },
+    {
+      "name": "Coat",
+      "id": 31
+    },
+    {
+      "name": "Costumes",
+      "id": 66
+    },
+    {
+      "name": "Dog Wear",
+      "id": 76
+    },
+    {
+      "name": "Dress",
+      "id": 2
+    },
+    {
+      "name": "Dungarees",
+      "id": 54
+    },
+    {
+      "name": "Earring",
+      "id": 26
+    },
+    {
+      "name": "Earrings",
+      "id": 64
+    },
+    {
+      "name": "Eyeglasses",
+      "id": 95
+    },
+    {
+      "name": "Felt hat",
+      "id": 85
+    },
+    {
+      "name": "Flat shoe",
+      "id": 44
+    },
+    {
+      "name": "Flat shoes",
+      "id": 89
+    },
+    {
+      "name": "Flip flop",
+      "id": 59
+    },
+    {
+      "name": "Garment Set",
+      "id": 86
+    },
+    {
+      "name": "Giftbox",
+      "id": 94
+    },
+    {
+      "name": "Gloves",
+      "id": 55
+    },
+    {
+      "name": "Hair clip",
+      "id": 50
+    },
+    {
+      "name": "Hair string",
+      "id": 48
+    },
+    {
+      "name": "Hair ties",
+      "id": 45
+    },
+    {
+      "name": "Hair/alice band",
+      "id": 40
+    },
+    {
+      "name": "Hairband",
+      "id": 78
+    },
+    {
+      "name": "Hat/beanie",
+      "id": 41
+    },
+    {
+      "name": "Hat/brim",
+      "id": 57
+    },
+    {
+      "name": "Headband",
+      "id": 93
+    },
+    {
+      "name": "Heeled sandals",
+      "id": 42
+    },
+    {
+      "name": "Heels",
+      "id": 68
+    },
+    {
+      "name": "Hoodie",
+      "id": 19
+    },
+    {
+      "name": "Jacket",
+      "id": 16
+    },
+    {
+      "name": "Jumpsuit/Playsuit",
+      "id": 23
+    },
+    {
+      "name": "Leggings/Tights",
+      "id": 15
+    },
+    {
+      "name": "Long John",
+      "id": 91
+    },
+    {
+      "name": "Necklace",
+      "id": 30
+    },
+    {
+      "name": "Night gown",
+      "id": 43
+    },
+    {
+      "name": "Nipple covers",
+      "id": 71
+    },
+    {
+      "name": "Other accessories",
+      "id": 37
+    },
+    {
+      "name": "Other shoe",
+      "id": 58
+    },
+    {
+      "name": "Outdoor Waistcoat",
+      "id": 67
+    },
+    {
+      "name": "Outdoor trousers",
+      "id": 69
+    },
+    {
+      "name": "Polo shirt",
+      "id": 39
+    },
+    {
+      "name": "Pumps",
+      "id": 53
+    },
+    {
+      "name": "Pyjama bottom",
+      "id": 36
+    },
+    {
+      "name": "Pyjama jumpsuit/playsuit",
+      "id": 77
+    },
+    {
+      "name": "Pyjama set",
+      "id": 28
+    },
+    {
+      "name": "Ring",
+      "id": 51
+    },
+    {
+      "name": "Robe",
+      "id": 52
+    },
+    {
+      "name": "Sandals",
+      "id": 32
+    },
+    {
+      "name": "Sarong",
+      "id": 47
+    },
+    {
+      "name": "Scarf",
+      "id": 29
+    },
+    {
+      "name": "Shirt",
+      "id": 14
+    },
+    {
+      "name": "Shorts",
+      "id": 11
+    },
+    {
+      "name": "Skirt",
+      "id": 13
+    },
+    {
+      "name": "Slippers",
+      "id": 60
+    },
+    {
+      "name": "Sneakers",
+      "id": 35
+    },
+    {
+      "name": "Socks",
+      "id": 17
+    },
+    {
+      "name": "Straw hat",
+      "id": 87
+    },
+    {
+      "name": "Sunglasses",
+      "id": 34
+    },
+    {
+      "name": "Sweater",
+      "id": 3
+    },
+    {
+      "name": "Swimsuit",
+      "id": 21
+    },
+    {
+      "name": "Swimwear bottom",
+      "id": 10
+    },
+    {
+      "name": "Swimwear set",
+      "id": 62
+    },
+    {
+      "name": "T-shirt",
+      "id": 4
+    },
+    {
+      "name": "Tailored Waistcoat",
+      "id": 75
+    },
+    {
+      "name": "Tie",
+      "id": 72
+    },
+    {
+      "name": "Top",
+      "id": 5
+    },
+    {
+      "name": "Trousers",
+      "id": 1
+    },
+    {
+      "name": "Umbrella",
+      "id": 81
+    },
+    {
+      "name": "Underdress",
+      "id": 65
+    },
+    {
+      "name": "Underwear Tights",
+      "id": 25
+    },
+    {
+      "name": "Underwear body",
+      "id": 38
+    },
+    {
+      "name": "Underwear bottom",
+      "id": 12
+    },
+    {
+      "name": "Underwear corset",
+      "id": 79
+    },
+    {
+      "name": "Underwear set",
+      "id": 61
+    },
+    {
+      "name": "Unknown",
+      "id": 0
+    },
+    {
+      "name": "Vest top",
+      "id": 7
+    },
+    {
+      "name": "Wallet",
+      "id": 73
+    },
+    {
+      "name": "Watch",
+      "id": 70
+    },
+    {
+      "name": "Waterbottle",
+      "id": 80
+    },
+    {
+      "name": "Wedge",
+      "id": 49
+    }
+  ],
+  "materials": [
+    {
+      "name": "Unknown",
+      "id": 0
+    },
+    {
+      "name": "acrylic",
+      "id": 33
+    },
+    {
+      "name": "canvas",
+      "id": 24
+    },
+    {
+      "name": "cashmere",
+      "id": 27
+    },
+    {
+      "name": "chiffon",
+      "id": 16
+    },
+    {
+      "name": "corduroy",
+      "id": 25
+    },
+    {
+      "name": "cotton",
+      "id": 1
+    },
+    {
+      "name": "crepe",
+      "id": 8
+    },
+    {
+      "name": "denim",
+      "id": 3
+    },
+    {
+      "name": "faux fur",
+      "id": 17
+    },
+    {
+      "name": "fleece",
+      "id": 22
+    },
+    {
+      "name": "imitation leather",
+      "id": 11
+    },
+    {
+      "name": "imitation suede",
+      "id": 20
+    },
+    {
+      "name": "jersey",
+      "id": 2
+    },
+    {
+      "name": "knit",
+      "id": 6
+    },
+    {
+      "name": "lace",
+      "id": 4
+    },
+    {
+      "name": "leather",
+      "id": 18
+    },
+    {
+      "name": "linen",
+      "id": 12
+    },
+    {
+      "name": "lyocell",
+      "id": 21
+    },
+    {
+      "name": "mesh",
+      "id": 13
+    },
+    {
+      "name": "metal",
+      "id": 7
+    },
+    {
+      "name": "modal",
+      "id": 23
+    },
+    {
+      "name": "nylon",
+      "id": 28
+    },
+    {
+      "name": "polyester",
+      "id": 15
+    },
+    {
+      "name": "satin",
+      "id": 14
+    },
+    {
+      "name": "shearling",
+      "id": 31
+    },
+    {
+      "name": "silk",
+      "id": 26
+    },
+    {
+      "name": "suede",
+      "id": 29
+    },
+    {
+      "name": "tencel",
+      "id": 34
+    },
+    {
+      "name": "tulle",
+      "id": 32
+    },
+    {
+      "name": "twill",
+      "id": 10
+    },
+    {
+      "name": "velour",
+      "id": 19
+    },
+    {
+      "name": "velvet",
+      "id": 30
+    },
+    {
+      "name": "viscose",
+      "id": 5
+    },
+    {
+      "name": "wool",
+      "id": 9
+    }
+  ],
+  "appearances": [
+    {
+      "name": "All over pattern",
+      "id": 2
+    },
+    {
+      "name": "Argyle",
+      "id": 25
+    },
+    {
+      "name": "Chambray",
+      "id": 22
+    },
+    {
+      "name": "Check",
+      "id": 7
+    },
+    {
+      "name": "Colour blocking",
+      "id": 12
+    },
+    {
+      "name": "Contrast",
+      "id": 14
+    },
+    {
+      "name": "Denim",
+      "id": 3
+    },
+    {
+      "name": "Dot",
+      "id": 10
+    },
+    {
+      "name": "Embroidery",
+      "id": 9
+    },
+    {
+      "name": "Front print",
+      "id": 11
+    },
+    {
+      "name": "Glittering/Metallic",
+      "id": 13
+    },
+    {
+      "name": "Hologram",
+      "id": 26
+    },
+    {
+      "name": "Jacquard",
+      "id": 15
+    },
+    {
+      "name": "Lace",
+      "id": 6
+    },
+    {
+      "name": "Melange",
+      "id": 4
+    },
+    {
+      "name": "Mesh",
+      "id": 20
+    },
+    {
+      "name": "Metallic",
+      "id": 17
+    },
+    {
+      "name": "Mixed solid/pattern",
+      "id": 18
+    },
+    {
+      "name": "Neps",
+      "id": 21
+    },
+    {
+      "name": "Placement print",
+      "id": 8
+    },
+    {
+      "name": "Sequin",
+      "id": 19
+    },
+    {
+      "name": "Slub",
+      "id": 23
+    },
+    {
+      "name": "Solid",
+      "id": 1
+    },
+    {
+      "name": "Stripe",
+      "id": 5
+    },
+    {
+      "name": "Transparent",
+      "id": 24
+    },
+    {
+      "name": "Treatment",
+      "id": 16
+    },
+    {
+      "name": "Unknown",
+      "id": 0
+    }
+  ],
+  "genders": [
+    {
+      "name": "Men",
+      "id": 3
+    },
+    {
+      "name": "Unisex",
+      "id": 2
+    },
+    {
+      "name": "Women",
+      "id": 1
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "status": "healthy",
+  "predictions_loaded": true,
+  "predictions_anchor_month": "2026-05",
+  "predictions_univariate_rows": 119,
+  "predictions_fingerprint_rows": 3830,
+  "lags_synthetic": true,
+  "error": null
+}
