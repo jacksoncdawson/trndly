@@ -1,0 +1,17 @@
+# Terraform working dirs and state — never commit.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Local-only var overrides (the committed terraform.tfvars holds non-secret values).
+*.auto.tfvars
+*.tfvars.local
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# NOTE: .terraform.lock.hcl IS committed (pins provider versions/hashes).
