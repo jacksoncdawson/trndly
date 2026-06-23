@@ -39,7 +39,8 @@ DIRECTORY LAYOUT
       fingerprint_model.joblib                 ← FINGERPRINT_MODEL_JOBLIB
       univariate_model.joblib                  ← UNIVARIATE_MODEL_JOBLIB
       model_training_run.json                  ← MODEL_TRAINING_RUN_JSON
-      champion_metrics.json                    ← evaluate.py promotion record
+      champion_metrics.json                    ← evaluate.py promotion record (per-model champion)
+      runs/<run_id>/                           ← MODEL_RUNS_DIR / run_id (archived joblibs per run; champion guard)
     predictions/                               ← PREDICTIONS_DIR
       predictions_univariate_<YYYY-MM>.parquet  ← matches PREDICTIONS_UNIVARIATE_GLOB
       predictions_fingerprint_<YYYY-MM>.parquet ← matches PREDICTIONS_FINGERPRINT_GLOB
@@ -100,6 +101,16 @@ MODELS_DIR: Path = DATA_DIR / "models"
 FINGERPRINT_MODEL_JOBLIB: Path = MODELS_DIR / "fingerprint_model.joblib"
 UNIVARIATE_MODEL_JOBLIB: Path = MODELS_DIR / "univariate_model.joblib"
 MODEL_TRAINING_RUN_JSON: Path = MODELS_DIR / "model_training_run.json"
+
+# Per-run joblib archive for the local champion guard (evaluate.py): each run's
+# canonical joblibs are copied to data/models/runs/<run_id>/ so a losing
+# candidate can be reverted to the prior champion's weights.
+MODEL_RUNS_DIR: Path = MODELS_DIR / "runs"
+
+
+def model_run_dir_for(run_id: str) -> Path:
+    """Directory holding one training run's archived joblibs + manifest."""
+    return MODEL_RUNS_DIR / run_id
 
 PREDICTIONS_DIR: Path = DATA_DIR / "predictions"
 PREDICTIONS_UNIVARIATE_GLOB: str = "predictions_univariate_*.parquet"

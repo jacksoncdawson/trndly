@@ -2,30 +2,34 @@
 
 Reads:
     data/models/model_training_run.json   (candidate manifest, written by train.py)
-    data/models/champion_metrics.json     (incumbent manifest, written by a prior
-                                          successful evaluate run; absent on first run)
+    data/models/champion_metrics.json     (incumbent record, written by a prior
+                                          evaluate run; absent on first run)
 
-Writes (only when promoting):
-    data/models/champion_metrics.json     (copy of model_training_run.json)
+Writes:
+    data/models/runs/<run_id>/            (this run's archived joblibs + manifest)
+    data/models/champion_metrics.json     (per-model champion record)
+    data/models/{univariate,fingerprint}_model.joblib  (reverted on a candidate loss)
 
-Promotion rule:
-    For each model independently (univariate, fingerprint):
-      candidate.holdout_wmae <= incumbent.holdout_wmae  → promote
-      no incumbent recorded                              → promote
-      else                                               → keep incumbent (no file changes)
+Promotion rule (per model independently — univariate, fingerprint):
+    candidate.holdout_wmae <= incumbent.holdout_wmae  → promote (keep candidate weights)
+    no incumbent recorded                              → promote
+    else                                               → keep incumbent + REVERT joblib
 
-Note: this is the local-MVP version. The plan's "MLflow registry champion alias"
-is deferred until cloud deployment. When that lands, replace the file shuffling
-here with ``MlflowClient.set_registered_model_alias(name=..., alias='champion',
-version=candidate.version)`` for each registered model.
+Local champion guard
+--------------------
+train.py always overwrites the canonical joblibs with the *candidate's* weights.
+Without intervention, a candidate that LOSES would still have its worse weights
+loaded by predict.py and baked into the published, CDN-cached forecasts for a
+month. So this stage:
 
-Caveat: when a candidate LOSES, train.py has already overwritten the canonical
-joblibs in ``data/models/{fingerprint,univariate}_model.joblib`` with the
-candidate's weights. evaluate.py does not currently revert those weights — it
-only refuses to advance the champion-metrics pointer. To recover the prior
-champion's joblibs you'd need to retrain from a prior month or restore from
-backup. This trade-off is acceptable for MVP; a future revision can add a
-runs/ archive + auto-revert path.
+  1. Archives each run's canonical joblibs to ``data/models/runs/<run_id>/``.
+  2. On a per-model loss, reverts that canonical joblib to the prior champion's
+     archived weights (tracked as ``champion_run`` in champion_metrics.json).
+
+MLflow-independent and SUPERSEDED by Phase 4's ``champion`` registry alias once
+the private MLflow lands. Migration note: a champion_metrics.json predating this
+guard carries no ``champion_run``, so the first loss for such a model cannot be
+reverted (logged as a warning); it self-heals on the next promotion.
 
 Usage:
     python -m pipelines.monthly.evaluate
@@ -36,15 +40,29 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
-from pipelines.paths import MODEL_TRAINING_RUN_JSON, MODELS_DIR
+from pipelines.paths import (
+    FINGERPRINT_MODEL_JOBLIB,
+    MODEL_RUNS_DIR,
+    MODEL_TRAINING_RUN_JSON,
+    MODELS_DIR,
+    UNIVARIATE_MODEL_JOBLIB,
+)
 
 logger = logging.getLogger(__name__)
 
 CHAMPION_METRICS_JSON: Path = MODELS_DIR / "champion_metrics.json"
 
 MODEL_KEYS: tuple[str, ...] = ("univariate", "fingerprint")
+
+# Canonical joblib per model key. Referenced via this module-level mapping so a
+# test can monkeypatch ``evaluate._CANONICAL_JOBLIB`` to a tmp dir.
+_CANONICAL_JOBLIB: dict[str, Path] = {
+    "univariate": UNIVARIATE_MODEL_JOBLIB,
+    "fingerprint": FINGERPRINT_MODEL_JOBLIB,
+}
 
 
 def _read_holdout_wmae(manifest: dict, model_key: str) -> float:
@@ -87,12 +105,64 @@ def _decide(candidate_manifest: dict, incumbent_manifest: dict | None) -> dict[s
     return decisions
 
 
-def run_evaluate() -> dict:
-    """Compare candidate vs incumbent. Promote if any model improved.
+def _run_id(manifest: dict) -> str:
+    """Filesystem-safe, sortable run id from the manifest's ``generated_at_utc``.
 
-    Returns a {action, decisions} summary. Champion metrics file is updated
-    iff at least one model is promoted (so a loss for one model doesn't
-    silently overwrite a stale-but-still-better incumbent for the other).
+    ``2026-05-10T22:12:19+00:00`` → ``2026-05-10T221219Z``.
+    """
+    ts = str(manifest.get("generated_at_utc") or datetime.now(timezone.utc).isoformat())
+    return ts.replace(":", "").replace("+0000", "Z").replace("+00:00", "Z")
+
+
+def _archive_run(run_id: str) -> Path:
+    """Copy the current canonical joblibs + candidate manifest into the run archive.
+
+    The canonical joblibs at this point are the candidate's (train.py just wrote
+    them), so this captures the candidate's weights under ``runs/<run_id>/``.
+    """
+    run_dir = MODEL_RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for src in _CANONICAL_JOBLIB.values():
+        if src.exists():
+            shutil.copyfile(src, run_dir / src.name)
+    if MODEL_TRAINING_RUN_JSON.exists():
+        shutil.copyfile(MODEL_TRAINING_RUN_JSON, run_dir / MODEL_TRAINING_RUN_JSON.name)
+    return run_dir
+
+
+def _revert_canonical(model_key: str, champion_run: str | None) -> bool:
+    """Restore the canonical joblib for ``model_key`` from the champion's archived
+    weights. Returns True on success; False (with a warning) when the archive is
+    unavailable (e.g. a champion_metrics.json predating this guard)."""
+    canonical = _CANONICAL_JOBLIB[model_key]
+    if not champion_run:
+        logger.warning(
+            "cannot revert %s: prior champion has no archived run "
+            "(champion_metrics.json predates the guard); canonical joblib keeps "
+            "the losing candidate's weights until the next promotion.",
+            model_key,
+        )
+        return False
+    archived = MODEL_RUNS_DIR / champion_run / canonical.name
+    if not archived.exists():
+        logger.warning(
+            "cannot revert %s: archived champion joblib missing at %s; "
+            "canonical keeps the losing candidate's weights.",
+            model_key, archived,
+        )
+        return False
+    shutil.copyfile(archived, canonical)
+    logger.info("reverted %s canonical joblib ← %s", model_key, archived)
+    return True
+
+
+def run_evaluate() -> dict:
+    """Compare candidate vs incumbent per model; promote winners, revert losers.
+
+    The canonical joblib for a model that LOSES is reverted to the prior
+    champion's archived weights so predict.py never loads worse weights than the
+    champion. The champion record is rewritten every run with the per-model
+    champion blocks (and each block's ``champion_run`` archive pointer).
     """
     if not MODEL_TRAINING_RUN_JSON.exists():
         raise FileNotFoundError(
@@ -109,19 +179,49 @@ def run_evaluate() -> dict:
 
     decisions = _decide(candidate, incumbent)
 
-    any_promoted = any(d["action"] == "promote" for d in decisions.values())
-    for k, d in decisions.items():
+    # 1. Archive this run's canonical joblibs (the candidate's, written by train).
+    run_id = _run_id(candidate)
+    _archive_run(run_id)
+
+    # 2. Per-model: keep winners' canonical weights, revert losers; assemble the
+    #    per-model champion record.
+    champion: dict = {
+        "champion_updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "last_candidate_run": run_id,
+    }
+    promoted: list[str] = []
+    reverted: list[str] = []
+    for k in MODEL_KEYS:
+        d = decisions[k]
+        if d["action"] == "promote":
+            block = dict(candidate[k])
+            block["champion_run"] = run_id
+            champion[k] = block
+            promoted.append(k)
+        else:
+            prior_run = (incumbent or {}).get(k, {}).get("champion_run")
+            if _revert_canonical(k, prior_run):
+                reverted.append(k)
+            # Champion is unchanged for this model — carry its block forward.
+            champion[k] = (incumbent or {}).get(k, candidate[k])
         emoji = "↑" if d["action"] == "promote" else "·"
         logger.info("  %s %-12s %s — %s", emoji, k, d["action"], d["reason"])
 
-    if any_promoted:
-        shutil.copyfile(MODEL_TRAINING_RUN_JSON, CHAMPION_METRICS_JSON)
-        logger.info("wrote %s", CHAMPION_METRICS_JSON)
-        action = "promoted"
-    else:
-        action = "kept"
+    # 3. Write the per-model champion record (always — it reflects the current
+    #    per-model champions, not just "any promotion happened").
+    CHAMPION_METRICS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    with open(CHAMPION_METRICS_JSON, "w") as f:
+        json.dump(champion, f, indent=2)
+    logger.info("wrote %s", CHAMPION_METRICS_JSON)
 
-    return {"action": action, "decisions": decisions}
+    action = "promoted" if promoted else ("reverted" if reverted else "kept")
+    return {
+        "action": action,
+        "decisions": decisions,
+        "run_id": run_id,
+        "promoted": promoted,
+        "reverted": reverted,
+    }
 
 
 def main() -> None:
