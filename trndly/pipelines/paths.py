@@ -20,7 +20,7 @@ DIRECTORY LAYOUT
         articles.csv                           ← HM_ARTICLES_CSV
         transactions_train.csv                 ← HM_TRANSACTIONS_CSV
       items/                                   ← RAW_ITEMS_DIR
-        items_<retailer>.csv                   ← items_csv_path_for(retailer)
+        items_<retailer>_<YYYY-MM>.csv         ← items_csv_path_for(retailer[, month])  (immutable per-month raw)
     reference/                                 ← REFERENCE_DIR
       lookup.csv                               ← LOOKUP_CSV
       SCHEMA.md                                ← SCHEMA_MD
@@ -133,15 +133,69 @@ TRAINING_RUN_JSON: Path = PROCESSED_DIR / "training_run.json"
 
 _LIVE_DATE_RE = re.compile(r"_(\d{4}-\d{2})\.parquet$")
 
+# Immutable raw landing zone: items_<retailer>_<YYYY-MM>.csv. The back-compat
+# glob also matches the legacy unsuffixed items_<retailer>.csv during transition.
+ITEMS_FILE_GLOB: str = "items_*.csv"
+_ITEMS_MONTH_RE = re.compile(r"^items_(?P<retailer>.+)_(?P<month>\d{4}-\d{2})\.csv$")
+_ITEMS_LEGACY_RE = re.compile(r"^items_(?P<retailer>.+)\.csv$")
+
 
 def _format_month(month) -> str:
     """Coerce ``month`` (datetime/Timestamp/'YYYY-MM-DD' string) to ``'YYYY-MM'``."""
     return pd.Timestamp(month).strftime("%Y-%m")
 
 
-def items_csv_path_for(retailer: str) -> Path:
-    """Path for a retailer's items CSV, e.g. ``data/raw/items/items_gap.csv``."""
-    return RAW_ITEMS_DIR / f"items_{retailer}.csv"
+def items_csv_path_for(retailer: str, month=None) -> Path:
+    """Path for a retailer's immutable per-month items CSV, e.g. for May 2026:
+    ``data/raw/items/items_gap_2026-05.csv``.
+
+    Within-month re-runs overwrite that month's file; prior months are preserved
+    (the immutable raw landing zone). ``month`` defaults to the current month —
+    a scrape writes "now"'s snapshot.
+    """
+    stamp = _format_month(month if month is not None else pd.Timestamp.now())
+    return RAW_ITEMS_DIR / f"items_{retailer}_{stamp}.csv"
+
+
+def _parse_items_filename(name: str) -> tuple[str | None, str | None]:
+    """Return ``(retailer, month)`` for an items CSV filename, ``month=None`` for
+    the legacy unsuffixed form. ``(None, None)`` if it isn't an items file."""
+    m = _ITEMS_MONTH_RE.match(name)
+    if m:
+        return m.group("retailer"), m.group("month")
+    m = _ITEMS_LEGACY_RE.match(name)
+    if m:
+        return m.group("retailer"), None
+    return None, None
+
+
+def discover_items_files(signals_dir: Path | None = None) -> list[Path]:
+    """Discover items CSVs, preferring the immutable monthly files.
+
+    Matches both ``items_<retailer>_<YYYY-MM>.csv`` and the legacy
+    ``items_<retailer>.csv`` (back-compat). To avoid double-counting a retailer
+    that has both forms on disk, the legacy file is used only when *no* monthly
+    file exists for that retailer; otherwise every monthly file is returned.
+    """
+    base = signals_dir if signals_dir is not None else RAW_ITEMS_DIR
+    monthly_by_retailer: dict[str, list[Path]] = {}
+    legacy_by_retailer: dict[str, Path] = {}
+    for p in sorted(base.glob(ITEMS_FILE_GLOB)):
+        retailer, month = _parse_items_filename(p.name)
+        if retailer is None:
+            continue
+        if month is None:
+            legacy_by_retailer[retailer] = p
+        else:
+            monthly_by_retailer.setdefault(retailer, []).append(p)
+
+    selected: list[Path] = []
+    for paths in monthly_by_retailer.values():
+        selected.extend(paths)
+    for retailer, p in legacy_by_retailer.items():
+        if retailer not in monthly_by_retailer:
+            selected.append(p)
+    return sorted(selected)
 
 
 def live_fingerprint_path_for(month) -> Path:

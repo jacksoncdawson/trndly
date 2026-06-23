@@ -64,14 +64,15 @@ from pipelines.contracts import (  # noqa: E402
     validate_live_univariate_frame,
 )
 from pipelines.paths import (  # noqa: E402
+    ITEMS_FILE_GLOB,
     PROCESSED_DIR,
     RAW_ITEMS_DIR,
+    discover_items_files,
     live_fingerprint_path_for,
     live_univariate_path_for,
 )
 
 DEFAULT_SIGNALS_DIR = RAW_ITEMS_DIR
-ITEMS_FILE_GLOB = "items_*.csv"
 
 # Fingerprint dim columns, in the canonical order the historical cube uses.
 FINGERPRINT_ID_COLS: list[str] = [
@@ -105,10 +106,6 @@ DIMENSION_CATEGORIES: list[str] = [
 # --------------------------------------------------------------------------- #
 # Loading                                                                       #
 # --------------------------------------------------------------------------- #
-
-def discover_items_files(signals_dir: Path) -> list[Path]:
-    return sorted(signals_dir.glob(ITEMS_FILE_GLOB))
-
 
 def load_items(paths: list[Path]) -> pd.DataFrame:
     """Read every items_<retailer>.csv and union them. Adds a `month` column

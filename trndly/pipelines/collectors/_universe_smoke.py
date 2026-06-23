@@ -36,7 +36,11 @@ from pipelines.collectors.feature_lookups import (  # noqa: E402
     extract_material,
     extract_product_type,
 )
-from pipelines.paths import LOOKUP_CSV, RAW_ITEMS_DIR  # noqa: E402
+from pipelines.paths import (  # noqa: E402
+    LOOKUP_CSV,
+    RAW_ITEMS_DIR,
+    discover_items_files,
+)
 
 ITEMS_DIR = RAW_ITEMS_DIR
 
@@ -60,7 +64,7 @@ def _resolve_row(row: pd.Series) -> tuple[int, int]:
 def run() -> None:
     names = _load_lookup_names()
 
-    items_files = sorted(ITEMS_DIR.glob("items_*.csv"))
+    items_files = discover_items_files(ITEMS_DIR)
     if not items_files:
         print(f"No items_*.csv in {ITEMS_DIR}")
         sys.exit(0)
