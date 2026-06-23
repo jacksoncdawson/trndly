@@ -39,7 +39,10 @@ env/
 !**/data/
 **/data/processed/
 **/data/models/
-**/data/reference/
+# data/reference/: ignore contents EXCEPT the tiny committed lookup.csv (the
+# publisher's options.json source — needed on a clean checkout, ~5 KB).
+**/data/reference/*
+!**/data/reference/lookup.csv
 **/data/raw/kaggle/
 .env
 

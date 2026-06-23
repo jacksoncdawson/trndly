@@ -1,94 +1,65 @@
 """trndly forecast service — read-only API over the predictions parquet.
 
-The monthly tick (``python -m pipelines.monthly run``) writes two parquets:
+LOCAL DEV CONVENIENCE + schema reference. The production serving path is now
+STATIC: the monthly tick's ``publish`` stage emits the same shapes as JSON files
+served by Firebase Hosting (no compute behind them). This server is retained for
+local development and as a live contract reference.
 
-    data/predictions/predictions_univariate_<YYYY-MM>.parquet
-    data/predictions/predictions_fingerprint_<YYYY-MM>.parquet
+It imports ``pipelines.serving`` — the single source of truth for the lag-join
+(``share_lag*``/``share_t``) and the response shapes — so the server and the
+static publisher can never diverge. It loads no ``.env`` (it reads only
+filesystem paths from ``pipelines.paths``).
 
-This service loads the most recent of each at startup and exposes four
-GET routes:
-
-    GET /options                  — dropdown vocabularies (name + id per category)
-    GET /trends                   — every (dimension, level) row from univariate
-    GET /forecast/fingerprint     — single row matching the 5-D fingerprint
-    GET /health                   — liveness + bundle status + `lags_synthetic` flag
-
-At load time we also join the observed shares at the anchor month and
-its three prior months from ``merged_*.parquet`` onto each predictions row
-(``share_lag3``, ``share_lag2``, ``share_lag1``, ``share_t``) so the
-frontend has the full 10-point series for charts without a second call.
-If any of those lag months came from
-``scripts/backfill_anchor_lags.py`` (the synthetic-history stopgap for
-isolated live months), ``BUNDLE.lags_synthetic`` flags it and ``/health``
-surfaces that to the UI for the chart-legend footnote.
-
-There are no live model calls in the request path. To refresh the bundle,
-restart the container (or re-run the tick + redeploy).
+Routes (identical shapes to the published static JSON):
+    GET /options  /trends  /forecast/fingerprint  /health
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
-import pandas as pd
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
-# Add project root to sys.path
+# Add project root to sys.path so ``pipelines`` is importable when this module is
+# run directly (uvicorn backend.services.scheduleServer:app).
 SERVICE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVICE_DIR.parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-
-from pipelines.contracts import (
-    validate_predictions_fingerprint_frame,
-    validate_predictions_univariate_frame,
+from pipelines.paths import FRONTEND_DIR, LOOKUP_CSV  # noqa: E402
+from pipelines.serving import (  # noqa: E402
+    FingerprintForecastResponse,
+    HealthResponse,
+    OptionsResponse,
+    PredictionsBundle,
+    TrendRow,
+    build_health,
+    build_options,
+    build_trend_rows,
+    load_bundle,
+    lookup_fingerprint,
 )
-from pipelines.paths import (
-    FRONTEND_DIR,
-    LOOKUP_CSV,
-    MERGED_FINGERPRINT_PARQUET,
-    MERGED_UNIVARIATE_PARQUET,
-    latest_predictions_fingerprint_parquet,
-    latest_predictions_univariate_parquet,
-)
-
-# ENV VARIABLES
-ENV_PATH = SERVICE_DIR / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
-
 
 logger = logging.getLogger(__name__)
 
 
 # --- STATE ---
 
-@dataclass
-class PredictionsBundle:
-    univariate: pd.DataFrame
-    fingerprint: pd.DataFrame
-    anchor_month: str   # ISO date string from the parquets
-    # True if any of the anchor's 3 prior lag months came from the synthetic
-    # backfill (source == 'backfill' in the merged cube). Sourced once at
-    # load time so /health can report it without re-reading the cube.
-    lags_synthetic: bool = False
-
-
 BUNDLE: PredictionsBundle | None = None
 BUNDLE_LOAD_ERROR: str | None = None
 
 
-# --- FASTAPI APP ---
+def reload_predictions_bundle() -> None:
+    """Reload BUNDLE from the latest predictions parquets + merged cubes."""
+    global BUNDLE, BUNDLE_LOAD_ERROR
+    BUNDLE, BUNDLE_LOAD_ERROR = load_bundle()
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -96,241 +67,14 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(
-    title="trndly forecast service",
-    lifespan=lifespan,
-)
-
-
-# --- SCHEMAS ---
-
-class HealthResponse(BaseModel):
-    status: str
-    predictions_loaded: bool
-    predictions_anchor_month: Optional[str] = None
-    predictions_univariate_rows: Optional[int] = None
-    predictions_fingerprint_rows: Optional[int] = None
-    # True when the lag values served alongside predictions came from the
-    # synthetic-backfill stopgap (see scripts/backfill_anchor_lags.py). UI
-    # surfaces this as a small footnote so users know the "past 3mo"
-    # context on charts isn't real observed history.
-    lags_synthetic: bool = False
-    error: Optional[str] = None
-
-
-class CategoryOption(BaseModel):
-    name: str
-    id: int
-
-
-class OptionsResponse(BaseModel):
-    colors: list[CategoryOption]         # color_master
-    categories: list[CategoryOption]     # product_type
-    materials: list[CategoryOption]
-    appearances: list[CategoryOption]    # graphical_appearance
-    genders: list[CategoryOption]
-
-
-class TrendRow(BaseModel):
-    dimension: str
-    level_id: int
-    level_name: str
-    # Observed shares at anchor − 3, − 2, − 1, and anchor month itself.
-    # Null when the cube doesn't carry the value (predictions cube only
-    # emits rows where the lag history is complete, so these should be set
-    # in practice, but the schema is permissive).
-    share_lag3: Optional[float] = None
-    share_lag2: Optional[float] = None
-    share_lag1: Optional[float] = None
-    share_t:    Optional[float] = None
-    # Forward 6-horizon forecast.
-    y_h1: float
-    y_h2: float
-    y_h3: float
-    y_h4: float
-    y_h5: float
-    y_h6: float
-    state: str
-    stat: str
-
-
-class FingerprintForecastResponse(BaseModel):
-    product_type_id: int
-    gender_id: int
-    color_master_id: int
-    graphical_appearance_id: int
-    material_id: int
-    product_type_name: str
-    gender_name: str
-    color_master_name: str
-    graphical_appearance_name: str
-    material_name: str
-    share_lag3: Optional[float] = None
-    share_lag2: Optional[float] = None
-    share_lag1: Optional[float] = None
-    share_t:    Optional[float] = None
-    y_h1: float
-    y_h2: float
-    y_h3: float
-    y_h4: float
-    y_h5: float
-    y_h6: float
-    state: str
-    stat: str
-
-
-# --- LOADER ---
-
-def _opt_float(v) -> Optional[float]:
-    """Coerce a possibly-NaN pandas value to a JSON-safe float-or-None."""
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    if pd.isna(f):
-        return None
-    return f
-
-
-_LAG_COLUMNS: tuple[tuple[int, str], ...] = (
-    (3, "share_lag3"),
-    (2, "share_lag2"),
-    (1, "share_lag1"),
-    (0, "share_t"),
-)
-
-
-def _attach_lag_shares(
-    preds: pd.DataFrame, merged: pd.DataFrame, key_cols: list[str]
-) -> pd.DataFrame:
-    """Attach `share_lag3`, `share_lag2`, `share_lag1`, `share_t` to a predictions
-    frame by joining against the merged cube on (anchor − lag, *key_cols).
-
-    The merged cube may carry duplicate (month, *key) rows when historical and
-    live snapshots overlap; we mean-pool to a single observation per key + month
-    before the join. Missing lag values land as NaN/None.
-    """
-    if preds.empty:
-        for _, col in _LAG_COLUMNS:
-            preds[col] = float("nan")
-        return preds
-
-    # Dedupe + restrict to the columns we need for the join.
-    obs = (
-        merged.groupby(["month"] + key_cols, as_index=False, observed=False)
-        ["share_articles"]
-        .mean()
-    )
-    obs["month"] = pd.to_datetime(obs["month"])
-
-    out = preds.copy()
-    out["_anchor_dt"] = pd.to_datetime(out["anchor_month"])
-    for lag, col in _LAG_COLUMNS:
-        target = out["_anchor_dt"] - pd.DateOffset(months=lag)
-        joined = out.assign(_target=target).merge(
-            obs.rename(columns={"month": "_target", "share_articles": col}),
-            on=["_target"] + key_cols,
-            how="left",
-        )
-        out[col] = joined[col].values
-    out = out.drop(columns=["_anchor_dt"])
-    return out
-
-
-def reload_predictions_bundle() -> None:
-    """Load the latest predictions parquets into BUNDLE."""
-    global BUNDLE, BUNDLE_LOAD_ERROR
-    BUNDLE = None
-    BUNDLE_LOAD_ERROR = None
-    try:
-        uv_path = latest_predictions_univariate_parquet()
-        fp_path = latest_predictions_fingerprint_parquet()
-        if uv_path is None:
-            BUNDLE_LOAD_ERROR = (
-                "no predictions_univariate_*.parquet found; "
-                "run `python -m pipelines.monthly run`"
-            )
-            return
-        if fp_path is None:
-            BUNDLE_LOAD_ERROR = (
-                "no predictions_fingerprint_*.parquet found; "
-                "run `python -m pipelines.monthly run`"
-            )
-            return
-
-        uv = pd.read_parquet(uv_path)
-        fp = pd.read_parquet(fp_path)
-        # Validate via contract — raises on schema drift.
-        uv = validate_predictions_univariate_frame(uv)
-        fp = validate_predictions_fingerprint_frame(fp)
-
-        # Attach observed shares at anchor and 3 prior months so the API
-        # surfaces the same time window the chart needs (past + future).
-        # Sourced from merged_*.parquet — no schema changes upstream.
-        # We also detect whether any of those lag months came from the
-        # backfill stopgap so /health can flag the chart's past as synthetic.
-        anchor_dt = pd.Timestamp(uv["anchor_month"].iloc[0])
-        lag_months = {anchor_dt - pd.DateOffset(months=k) for k in (1, 2, 3)}
-        lags_synthetic = False
-
-        if MERGED_UNIVARIATE_PARQUET.exists():
-            merged_uv = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
-            merged_uv["month"] = pd.to_datetime(merged_uv["month"])
-            if "source" in merged_uv.columns and (
-                (merged_uv["source"] == "backfill")
-                & (merged_uv["month"].isin(lag_months))
-            ).any():
-                lags_synthetic = True
-            uv = _attach_lag_shares(
-                uv,
-                merged_uv,
-                key_cols=["dimension", "level_id"],
-            )
-        if MERGED_FINGERPRINT_PARQUET.exists():
-            merged_fp = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
-            merged_fp["month"] = pd.to_datetime(merged_fp["month"])
-            if "source" in merged_fp.columns and (
-                (merged_fp["source"] == "backfill")
-                & (merged_fp["month"].isin(lag_months))
-            ).any():
-                lags_synthetic = True
-            fp = _attach_lag_shares(
-                fp,
-                merged_fp,
-                key_cols=[
-                    "product_type_id", "gender_id", "color_master_id",
-                    "graphical_appearance_id", "material_id",
-                ],
-            )
-
-        # Both parquets carry an anchor_month column; report whichever's most recent.
-        anchors = sorted(
-            [pd.Timestamp(uv["anchor_month"].iloc[0]),
-             pd.Timestamp(fp["anchor_month"].iloc[0])]
-        )
-        anchor_month = anchors[-1].strftime("%Y-%m")
-
-        BUNDLE = PredictionsBundle(
-            univariate=uv, fingerprint=fp,
-            anchor_month=anchor_month,
-            lags_synthetic=lags_synthetic,
-        )
-        logger.info(
-            "predictions bundle ready (univariate=%d rows, fingerprint=%d rows, anchor=%s)",
-            len(uv), len(fp), anchor_month,
-        )
-    except Exception as exc:
-        BUNDLE_LOAD_ERROR = str(exc)
-        logger.exception("reload_predictions_bundle failed")
+app = FastAPI(title="trndly forecast service", lifespan=lifespan)
 
 
 def _require_bundle() -> PredictionsBundle:
     if BUNDLE is None:
-        detail = BUNDLE_LOAD_ERROR or "predictions bundle not loaded"
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=BUNDLE_LOAD_ERROR or "predictions bundle not loaded",
         )
     return BUNDLE
 
@@ -344,49 +88,18 @@ def root() -> RedirectResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    if BUNDLE is None:
-        return HealthResponse(
-            status="degraded",
-            predictions_loaded=False,
-            error=BUNDLE_LOAD_ERROR,
-        )
-    return HealthResponse(
-        status="healthy",
-        predictions_loaded=True,
-        predictions_anchor_month=BUNDLE.anchor_month,
-        predictions_univariate_rows=int(len(BUNDLE.univariate)),
-        predictions_fingerprint_rows=int(len(BUNDLE.fingerprint)),
-        lags_synthetic=BUNDLE.lags_synthetic,
-    )
+    return build_health(BUNDLE, error=BUNDLE_LOAD_ERROR)
 
 
 @app.get("/options", response_model=OptionsResponse)
 def options() -> OptionsResponse:
-    """Vocabularies for the UI dropdowns. Sourced directly from
-    ``lookup.csv`` so the UI stays in sync with the canonical ID universe.
-    Each entry is ``{name, id}`` so the frontend can POST IDs back.
-    """
+    """Vocabularies for the UI dropdowns, sourced from lookup.csv."""
     if not LOOKUP_CSV.exists():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"lookup.csv missing at {LOOKUP_CSV}",
         )
-    lk = pd.read_csv(LOOKUP_CSV)
-
-    def opts_for(category: str) -> list[CategoryOption]:
-        rows = lk[lk["category"] == category]
-        return [
-            CategoryOption(name=str(r["name"]), id=int(r["id"]))
-            for _, r in rows.sort_values("name").iterrows()
-        ]
-
-    return OptionsResponse(
-        colors=opts_for("color_master"),
-        categories=opts_for("product_type"),
-        materials=opts_for("material"),
-        appearances=opts_for("graphical_appearance"),
-        genders=opts_for("gender"),
-    )
+    return build_options()
 
 
 @app.get("/trends", response_model=list[TrendRow])
@@ -395,32 +108,7 @@ def trends(
     state: str | None = None,
 ) -> list[TrendRow]:
     """Univariate predictions. Optional filters: ``?dimension=color_master&state=rising``."""
-    bundle = _require_bundle()
-    df = bundle.univariate
-    if dimension is not None:
-        df = df[df["dimension"] == dimension]
-    if state is not None:
-        df = df[df["state"] == state]
-    return [
-        TrendRow(
-            dimension=str(row["dimension"]),
-            level_id=int(row["level_id"]),
-            level_name=str(row["level_name"]),
-            share_lag3=_opt_float(row.get("share_lag3")),
-            share_lag2=_opt_float(row.get("share_lag2")),
-            share_lag1=_opt_float(row.get("share_lag1")),
-            share_t=_opt_float(row.get("share_t")),
-            y_h1=float(row["y_h1"]),
-            y_h2=float(row["y_h2"]),
-            y_h3=float(row["y_h3"]),
-            y_h4=float(row["y_h4"]),
-            y_h5=float(row["y_h5"]),
-            y_h6=float(row["y_h6"]),
-            state=str(row["state"]),
-            stat=str(row["stat"]),
-        )
-        for _, row in df.iterrows()
-    ]
+    return build_trend_rows(_require_bundle(), dimension=dimension, state=state)
 
 
 @app.get("/forecast/fingerprint", response_model=FingerprintForecastResponse)
@@ -431,18 +119,17 @@ def forecast_fingerprint(
     graphical_appearance_id: int,
     material_id: int,
 ) -> FingerprintForecastResponse:
-    """Single-fingerprint forecast lookup. 404 if no precomputed match."""
-    bundle = _require_bundle()
-    df = bundle.fingerprint
-    mask = (
-        (df["product_type_id"] == product_type_id)
-        & (df["gender_id"] == gender_id)
-        & (df["color_master_id"] == color_master_id)
-        & (df["graphical_appearance_id"] == graphical_appearance_id)
-        & (df["material_id"] == material_id)
+    """Single-fingerprint forecast lookup. 404 if no precomputed match (the SPA
+    routes a miss into its client-side synthesis fallback)."""
+    hit = lookup_fingerprint(
+        _require_bundle(),
+        product_type_id=product_type_id,
+        gender_id=gender_id,
+        color_master_id=color_master_id,
+        graphical_appearance_id=graphical_appearance_id,
+        material_id=material_id,
     )
-    hit = df[mask]
-    if hit.empty:
+    if hit is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
@@ -453,39 +140,14 @@ def forecast_fingerprint(
                 f"material_id={material_id}"
             ),
         )
-    row = hit.iloc[0]
-    return FingerprintForecastResponse(
-        product_type_id=int(row["product_type_id"]),
-        gender_id=int(row["gender_id"]),
-        color_master_id=int(row["color_master_id"]),
-        graphical_appearance_id=int(row["graphical_appearance_id"]),
-        material_id=int(row["material_id"]),
-        product_type_name=str(row["product_type_name"]),
-        gender_name=str(row["gender_name"]),
-        color_master_name=str(row["color_master_name"]),
-        graphical_appearance_name=str(row["graphical_appearance_name"]),
-        material_name=str(row["material_name"]),
-        share_lag3=_opt_float(row.get("share_lag3")),
-        share_lag2=_opt_float(row.get("share_lag2")),
-        share_lag1=_opt_float(row.get("share_lag1")),
-        share_t=_opt_float(row.get("share_t")),
-        y_h1=float(row["y_h1"]),
-        y_h2=float(row["y_h2"]),
-        y_h3=float(row["y_h3"]),
-        y_h4=float(row["y_h4"]),
-        y_h5=float(row["y_h5"]),
-        y_h6=float(row["y_h6"]),
-        state=str(row["state"]),
-        stat=str(row["stat"]),
-    )
+    return hit
 
 
 # --------------------------------------------------------------------------- #
 # Static UI                                                                     #
 # --------------------------------------------------------------------------- #
-# A React demo page (no build step — JSX-via-Babel script tag) lives in
-# trndly/frontend/. Mounted at /ui so everything stays same-origin with /options
-# /trends, and /forecast/* — no CORS setup required.
+# The buildless React demo (JSX-via-Babel) lives in trndly/frontend/. Mounted at
+# /ui so it stays same-origin with the API routes — no CORS setup required.
 if FRONTEND_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="ui")
 else:

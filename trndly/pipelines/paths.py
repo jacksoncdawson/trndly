@@ -74,8 +74,15 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 PIPELINES_DIR: Path = PROJECT_ROOT / "pipelines"
 COLLECTORS_DIR: Path = PIPELINES_DIR / "collectors"
 
-# Static demo UI, served by the FastAPI app at /ui (see scheduleServer.py).
+# Static demo UI (buildless React SPA). Served as static files on Firebase
+# Hosting (Phase 2); also mounted at /ui by the local dev server.
 FRONTEND_DIR: Path = PROJECT_ROOT / "frontend"
+
+# Where the publisher (pipelines.monthly.publish) writes browser-ready JSON.
+# Same-origin under the SPA so it fetches ./data/<name>.json; the canonical
+# month-less files are the "latest pointer" the SPA reads (cache-busted via
+# Hosting Cache-Control), alongside versioned <name>_<YYYY-MM>.json archives.
+FRONTEND_DATA_DIR: Path = FRONTEND_DIR / "data"
 
 # --------------------------------------------------------------------------- #
 # Canonical data tree (PROJECT_ROOT/data, gitignored except RAW_ITEMS_DIR)     #

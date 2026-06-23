@@ -1,0 +1,192 @@
+category,id,name
+color_master,0,Unknown
+color_master,1,Black
+color_master,2,Blue
+color_master,3,White
+color_master,4,Beige
+color_master,5,Green
+color_master,6,Grey
+color_master,7,Red
+color_master,8,Pink
+color_master,9,Brown
+color_master,10,Yellow
+color_master,11,Orange
+color_master,12,Metal
+color_master,13,Purple
+color_spectrum,0,Unknown
+color_spectrum,1,Dark
+color_spectrum,2,Dusty Light
+color_spectrum,3,Light
+color_spectrum,4,Medium Dusty
+color_spectrum,5,Medium
+color_spectrum,6,Bright
+gender,1,Women
+gender,2,Unisex
+gender,3,Men
+graphical_appearance,0,Unknown
+graphical_appearance,1,Solid
+graphical_appearance,2,All over pattern
+graphical_appearance,3,Denim
+graphical_appearance,4,Melange
+graphical_appearance,5,Stripe
+graphical_appearance,6,Lace
+graphical_appearance,7,Check
+graphical_appearance,8,Placement print
+graphical_appearance,9,Embroidery
+graphical_appearance,10,Dot
+graphical_appearance,11,Front print
+graphical_appearance,12,Colour blocking
+graphical_appearance,13,Glittering/Metallic
+graphical_appearance,14,Contrast
+graphical_appearance,15,Jacquard
+graphical_appearance,16,Treatment
+graphical_appearance,17,Metallic
+graphical_appearance,18,Mixed solid/pattern
+graphical_appearance,19,Sequin
+graphical_appearance,20,Mesh
+graphical_appearance,21,Neps
+graphical_appearance,22,Chambray
+graphical_appearance,23,Slub
+graphical_appearance,24,Transparent
+graphical_appearance,25,Argyle
+graphical_appearance,26,Hologram
+material,0,Unknown
+material,1,cotton
+material,2,jersey
+material,3,denim
+material,4,lace
+material,5,viscose
+material,6,knit
+material,7,metal
+material,8,crepe
+material,9,wool
+material,10,twill
+material,11,imitation leather
+material,12,linen
+material,13,mesh
+material,14,satin
+material,15,polyester
+material,16,chiffon
+material,17,faux fur
+material,18,leather
+material,19,velour
+material,20,imitation suede
+material,21,lyocell
+material,22,fleece
+material,23,modal
+material,24,canvas
+material,25,corduroy
+material,26,silk
+material,27,cashmere
+material,28,nylon
+material,29,suede
+material,30,velvet
+material,31,shearling
+material,32,tulle
+material,33,acrylic
+material,34,tencel
+product_group,1,Garment Upper body
+product_group,2,Garment Lower body
+product_group,3,Garment Full body
+product_group,4,Swimwear
+product_group,5,Underwear
+product_group,6,Accessories
+product_group,7,Shoes
+product_group,8,Socks & Tights
+product_group,9,Nightwear
+product_type,0,Unknown
+product_type,1,Trousers
+product_type,2,Dress
+product_type,3,Sweater
+product_type,4,T-shirt
+product_type,5,Top
+product_type,6,Blouse
+product_type,7,Vest top
+product_type,8,Bra
+product_type,9,Bikini top
+product_type,10,Swimwear bottom
+product_type,11,Shorts
+product_type,12,Underwear bottom
+product_type,13,Skirt
+product_type,14,Shirt
+product_type,15,Leggings/Tights
+product_type,16,Jacket
+product_type,17,Socks
+product_type,18,Blazer
+product_type,19,Hoodie
+product_type,20,Cardigan
+product_type,21,Swimsuit
+product_type,22,Bag
+product_type,23,Jumpsuit/Playsuit
+product_type,24,Belt
+product_type,25,Underwear Tights
+product_type,26,Earring
+product_type,27,Boots
+product_type,28,Pyjama set
+product_type,29,Scarf
+product_type,30,Necklace
+product_type,31,Coat
+product_type,32,Sandals
+product_type,33,Bodysuit
+product_type,34,Sunglasses
+product_type,35,Sneakers
+product_type,36,Pyjama bottom
+product_type,37,Other accessories
+product_type,38,Underwear body
+product_type,39,Polo shirt
+product_type,40,Hair/alice band
+product_type,41,Hat/beanie
+product_type,42,Heeled sandals
+product_type,43,Night gown
+product_type,44,Flat shoe
+product_type,45,Hair ties
+product_type,46,Ballerinas
+product_type,47,Sarong
+product_type,48,Hair string
+product_type,49,Wedge
+product_type,50,Hair clip
+product_type,51,Ring
+product_type,52,Robe
+product_type,53,Pumps
+product_type,54,Dungarees
+product_type,55,Gloves
+product_type,56,Cap/peaked
+product_type,57,Hat/brim
+product_type,58,Other shoe
+product_type,59,Flip flop
+product_type,60,Slippers
+product_type,61,Underwear set
+product_type,62,Swimwear set
+product_type,63,Bracelet
+product_type,64,Earrings
+product_type,65,Underdress
+product_type,66,Costumes
+product_type,67,Outdoor Waistcoat
+product_type,68,Heels
+product_type,69,Outdoor trousers
+product_type,70,Watch
+product_type,71,Nipple covers
+product_type,72,Tie
+product_type,73,Wallet
+product_type,74,Beanie
+product_type,75,Tailored Waistcoat
+product_type,76,Dog Wear
+product_type,77,Pyjama jumpsuit/playsuit
+product_type,78,Hairband
+product_type,79,Underwear corset
+product_type,80,Waterbottle
+product_type,81,Umbrella
+product_type,82,Braces
+product_type,83,Bucket hat
+product_type,84,Bra extender
+product_type,85,Felt hat
+product_type,86,Garment Set
+product_type,87,Straw hat
+product_type,88,Cap
+product_type,89,Flat shoes
+product_type,90,Alice band
+product_type,91,Long John
+product_type,92,Bootie
+product_type,93,Headband
+product_type,94,Giftbox
+product_type,95,Eyeglasses
