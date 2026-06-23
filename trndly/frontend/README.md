@@ -4,8 +4,9 @@ Desktop web app for trndly: a tool for resellers (Depop, Poshmark, vintage
 shops) that pairs trend prediction with per-item listing recommendations.
 
 The screens consume live forecasts from the FastAPI service (see
-[../docs/api.md](../docs/api.md)). Auth is still a demo no-op — that's the
-last remaining placeholder in the build.
+[../docs/api.md](../docs/api.md)). Auth is still a demo no-op — one of a few
+remaining placeholders (Settings is unwired and inventory isn't persisted;
+see below).
 
 ---
 
@@ -13,7 +14,8 @@ last remaining placeholder in the build.
 
 No build step. The app uses Babel-in-browser to transpile JSX on load.
 Run it through the FastAPI service so the frontend and API share an origin
-— that way `/trends`, `/options`, and `/health` resolve without CORS:
+— that way `/trends`, `/options`, `/forecast/fingerprint`, and `/health`
+resolve without CORS:
 
 ```sh
 # from trndly/ (the inner package dir)
@@ -39,10 +41,10 @@ never have to guess whether the service is up.
 frontend/
 ├── index.html              ← entry point. Loads CSS, React, Babel, then JS in order.
 ├── App.jsx                 ← root: <AuthProvider> + <DataProvider> wrap the app.
-├── data.js                 ← helpers + STATE_META + LOOKUP_OPTIONS seed.
-├── api.js                  ← /trends + /options + /health fetcher + reshape adapters.
+├── data.js                 ← helpers + STATE_META + LOOKUP_OPTIONS seed + deriveRecommendationFromSeries.
+├── api.js                  ← /trends + /options + /forecast/fingerprint fetchers + reshape adapters.
 ├── dataProvider.js         ← useData() hook (in-house useFetch + session-scoped inventory).
-├── auth.js                 ← DEMO AUTH — context + always-succeeds login (last placeholder).
+├── auth.js                 ← DEMO AUTH — context + always-succeeds login (placeholder).
 ├── tokens.css              ← design tokens (CSS custom properties).
 ├── colors_and_type.css     ← semantic color + typography aliases.
 ├── README.md               ← this file.
@@ -76,8 +78,8 @@ There is no bundler. `index.html` loads everything in a deliberate order:
 1. **Tokens / typography CSS** — design vars must exist before any component renders.
 2. **React + ReactDOM (UMD)** — exposes `React`, `ReactDOM` globals.
 3. **Babel Standalone** — transpiles every `<script type="text/babel">` block.
-4. **`data.js`** — plain JS, attaches helpers + LOOKUP_OPTIONS to `window`.
-5. **`api.js`** — fetchers + reshape helpers on `window`.
+4. **`data.js`** — plain JS (no `text/babel`), attaches helpers + LOOKUP_OPTIONS to `window`.
+5. **`api.js`** — plain JS, fetchers + reshape helpers on `window`.
 6. **`auth.js`** — defines `AuthProvider` + `useAuth` on `window`.
 7. **`dataProvider.js`** — defines `DataProvider` + `useData` (with the
    in-house `useFetch` hook for `/trends`, `/options`, `/health`).
@@ -90,6 +92,10 @@ Every module attaches its public surface to `window` (`Object.assign(window,
 {...})`) so siblings can pick them up by global lookup. This is the cost of
 not having a bundler. When migrating to Vite, swap each global write for a
 real ESM `export`.
+
+> Note: `data.js` and `api.js` load as plain `<script>` tags (no JSX, so no
+> Babel pass) — they run before the `text/babel` modules. Everything from
+> `auth.js` onward is `type="text/babel"`.
 
 **Cache-bust query (`?v=…`).** Babel-standalone transpiles JSX in the browser
 and caches transforms by URL — when you edit a `.jsx` file, bump its `?v=`
@@ -114,6 +120,11 @@ dataProvider.js useData() — useFetch-cached + session state for inventory
 screens         render trends, signals, status; show loading/error/empty
                 states explicitly when /trends or /health fails
 ```
+
+`/trends`, `/options`, and `/health` are fetched (and cached) by
+`dataProvider.js`'s `useFetch`; `/forecast/fingerprint` is fetched per-item
+by `ScreenItem.jsx` (also via `useFetch`, keyed on the resolved 5-D
+querystring).
 
 Inventory and per-item signals are **session-scoped** — `useState([])` /
 `useState({})` reset on every page reload. To persist, swap the empty
@@ -140,7 +151,8 @@ After `api.js` reshapes, screens see:
     `'−18% next 6mo'`).
   - `series`: `{ past: [s_lag3, s_lag2, s_lag1, s_t], future: [y_h1, …, y_h6] }`
     — the 10 numeric points that drive the sparkline. `null` if the API
-    didn't carry the lag values.
+    didn't carry the lag values (`seriesFromRow` returns null if any past or
+    future point is null).
   - **"Unknown" rows are filtered out at the api.js layer** (every dimension
     reserves `id=0` for unclassified items; surfacing them isn't actionable
     for a reseller). They're still present in the API response — the filter
@@ -148,13 +160,15 @@ After `api.js` reshapes, screens see:
 - **Options** — `{ color, productType, material, appearance, gender,
   colorSpectrum, productGroup }`. First five come from `/options`; last two
   seeded from `LOOKUP_OPTIONS` in `data.js` because the endpoint doesn't
-  expose them yet.
+  expose them yet. (`/options` returns `colors`, `categories`, `materials`,
+  `appearances`, `genders` — see `OptionsResponse` in `scheduleServer.py`.)
 - **`lookupIds`** — `{ category: { name: id } }` maps for posting IDs back
-  to the API (e.g. for `/forecast/fingerprint` queries).
+  to the API (e.g. for `/forecast/fingerprint` queries). Built by
+  `indexOptionsById` in `api.js` from the `/options` `{name, id}` pairs.
 - **`health`** — `{ status, predictions_loaded, predictions_anchor_month,
   predictions_univariate_rows, predictions_fingerprint_rows, lags_synthetic,
   error }`. Powers the sidebar status pill and the "synthetic past" footnote
-  on the Item Detail chart legend.
+  on the Item Detail chart legend. (`status` is `'healthy'` or `'degraded'`.)
 - **Inventory item** — `{ name, color, type, cost, added, state, image?,
   signals?, tags? }`. Built by `ScreenAdd` and held in `useData().inventory`.
   - `state` is the **recommendation outcome** (see below), not the trend
@@ -203,6 +217,10 @@ Threshold is `UPSIDE_THRESHOLD = 0.025` in `data.js` (the peak must beat
 anchor by at least 2.5% for any "hold" recommendation; otherwise storage
 cost isn't worth it).
 
+> The `List now` inventory group also catches a legacy `falling` state, so
+> items added before the recommendation rework still bucket correctly
+> (see `TIMELINE_GROUPS` in `ScreenInventory.jsx`).
+
 ---
 
 ## Failure modes (and how the UI surfaces them)
@@ -215,8 +233,8 @@ states (loading / error / empty / data):
 | Highlights      | `/trends`         | 4 row skeletons                 | error card with `/health` advice           | "no trends to highlight"       |
 | Trends          | `/trends`         | 6 card skeletons                | error card (same copy)                     | "no features match this filter" |
 | Inventory       | (session-local)   | —                               | —                                          | "no items yet" + Add CTA       |
-| Item detail     | (session-local)   | —                               | —                                          | "no item selected" / "no feature signals" |
-| Sidebar pill    | `/health` (15s poll) | grey "connecting"           | red "API · offline" (tooltip = error msg)  | amber "API · degraded" if bundle missing |
+| Item detail     | `/forecast/fingerprint` (per-item) + session-local | — | (falls back to synthesized series on 404)  | "no item selected" / "no feature signals" |
+| Sidebar pill    | `/health` (15s poll) | grey "API · connecting"      | red "API · offline" (tooltip = error msg)  | amber "API · degraded" if bundle missing |
 
 Error copy is backend-agnostic — it surfaces whatever the API itself
 returned, so the same messages work for parquet-missing today and
@@ -226,7 +244,8 @@ cloud-SQL-down later.
 
 ## Demo seam — auth
 
-`auth.js` is the only file still demo-mode:
+`auth.js` is demo-mode (and one of the remaining placeholders, alongside
+Settings and inventory persistence):
 
 - `useAuth()` returns `{ user, login, logout }`. `user` is `null` when
   signed out, `{ name, email }` when signed in.
@@ -240,6 +259,10 @@ cloud-SQL-down later.
 `ScreenAdd.jsx`'s image dropzone is also non-network on purpose — it
 reads the file into a `FileReader` data URL for visual preview. Wire it
 to real storage when you wire inventory persistence.
+
+`ScreenSettings.jsx` is a placeholder too: four section cards (Account,
+Notifications, Data sources, Appearance), all flagged "coming soon" and
+unwired.
 
 ---
 
@@ -270,9 +293,10 @@ to real storage when you wire inventory persistence.
 3. Extend `/options` to include `colorSpectrum` and `productGroup`, then
    delete the `LOOKUP_OPTIONS` fallback in `data.js`.
 4. Wire `ScreenAdd.jsx` image upload + form submit to real endpoints.
-5. Move the no-build setup to Vite. Convert each
+5. Wire up `ScreenSettings.jsx` (currently a placeholder).
+6. Move the no-build setup to Vite. Convert each
    `Object.assign(window, {…})` to a real ESM `export`. Drop the
    `babel-standalone` script tag from `index.html`.
-6. Adopt a chart library (Recharts/Visx). Replace the SVG primitives in
+7. Adopt a chart library (Recharts/Visx). Replace the SVG primitives in
    `components/Chart.jsx` while preserving the past/now/predicted color
    conventions documented in the design system.

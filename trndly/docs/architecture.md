@@ -70,7 +70,8 @@ at the bottom captures the GCP target we're working toward.
 
 Inference is **precomputed monthly**. The API is a read-only layer over
 the predictions parquet — there are no live `model.predict()` calls in
-the request path.
+the request path. The `BUNDLE` global is loaded once at startup from the
+latest predictions parquets via the FastAPI lifespan hook.
 
 ---
 
@@ -107,11 +108,17 @@ trndly/
     └── predictions/        — predictions_*_<YYYY-MM>.parquet (per monthly tick)
 ```
 
+> Note: `pipelines/paths.py` is the canonical path registry; its module
+> docstring mentions a `pipelines/serving/` directory that does **not**
+> exist in the repo — the shipped service lives at
+> `backend/services/scheduleServer.py`. Treat that docstring line as
+> stale.
+
 ---
 
 ## The monthly tick (`python -m pipelines.monthly run`)
 
-Stages in order:
+Stages in order (`pipelines/monthly/cli.py`, `FULL_ORDER`):
 
 
 | #   | Stage       | Inputs                                         | Outputs                                                                                 |
@@ -134,26 +141,66 @@ python -m pipelines.monthly run --skip-scrape   # use existing items_*.csv
 **Cadence:** manual for now. The CLI is the one place that drives the
 chain. Cloud Scheduler / Vertex AI wiring is in the `Future` section.
 
-**Promotion rule:** for each model independently, if candidate
-`holdout_wmae <= incumbent.holdout_wmae`, promote (write new
-`champion_metrics.json`). On a tie, candidate wins.
+**Model:** each model is a multi-output `RandomForestRegressor`
+(`n_estimators=200`, `min_samples_leaf=2`, `max_depth=None`,
+`random_state=42`) predicting `y_h1..y_h6`. A persistence baseline
+(ŷ_h = `share_t`) is computed as a sanity floor. `train.py` overwrites
+the canonical joblibs in `data/models/` every run; `predict.py` then
+loads those same joblibs (logged as "champion models").
 
-**Trend state classification** (`pipelines/monthly/state.py`):
+**Promotion rule** (`evaluate.py`, the *local-MVP* champion): for each
+model independently, if candidate `holdout_wmae <= incumbent.holdout_wmae`,
+promote (copy `model_training_run.json` → `champion_metrics.json`). With
+no incumbent recorded, the candidate is promoted. On a tie, candidate
+wins. The champion is a **local `champion_metrics.json` file**, not an
+MLflow registry alias.
 
-- `peak`: argmax(y_h0..h6) ≤ 1 AND series declines by horizon 6
-- `rising`: y_h6 > 1.15 × y_h0
-- `falling`: y_h6 < 0.85 × y_h0
-- `flat`: otherwise
+> Caveat (acknowledged in `evaluate.py`): because `train.py` has already
+> overwritten the joblibs before `evaluate.py` runs, a candidate that
+> *loses* the comparison does **not** get its weights reverted — evaluate
+> only refuses to advance the champion-metrics pointer. Auto-revert is a
+> `Future` item.
 
-Numbers are placeholders flagged for tuning on real data.
+**Trend state classification** (`pipelines/monthly/state.py`) — a
+forward-first hybrid mapping a `(past3 lags + anchor + 6 forward)`
+trajectory to `rising | peak | flat | falling`. The rising/falling
+verdict is decided off the **forward window only** (`share_t → y_h6`);
+past lags feed only the peak detector. Rules are checked in this order
+(first match wins):
+
+- `peak` (checked first): the in-band high — over the band
+  `{share_lag1, share_t, y_h1, y_h2}` (`share_lag1` only when past lags
+  are supplied) — is a *real* high (strictly above `share_t`, or tied
+  with `share_lag1` below `share_t`), **and** the drop from that high to
+  `y_h6` is at least `PEAK_MIN_DROP` of the high, **and** the forecast
+  declines from anchor (`y_h6 < share_t`).
+- `rising`: `y_h6 > RISING_RATIO × share_t`
+- `falling`: `y_h6 < FALLING_RATIO × share_t`
+- `flat`: otherwise. Any non-finite value or zero denominator → `flat`.
+
+Module-level constants:
+
+```python
+RISING_RATIO  = 1.08
+FALLING_RATIO = 0.92
+PEAK_MIN_DROP = 0.08
+```
+
+These thresholds are a deliberate design choice (the previous iteration
+used an end-to-end lag3→h6 ratio, which conflated past growth with
+forecast direction), not unreviewed placeholders. They can still be
+re-tuned as more live months accrue.
 
 ---
 
 ## Predictions parquet (binding contract)
 
-Two parquets per monthly tick. Schema validators in `pipelines/contracts.py`.
+Two parquets per monthly tick. Schema validators in `pipelines/contracts.py`
+(`validate_predictions_univariate_frame`, `validate_predictions_fingerprint_frame`).
+The validators enforce column presence + order, no nulls in any column,
+`state ∈ {rising, peak, flat, falling}`, and non-empty `stat` strings.
 
-`**predictions_univariate_<YYYY-MM>.parquet`** — 13 columns:
+**`predictions_univariate_<YYYY-MM>.parquet`** — 13 columns:
 
 ```
 anchor_month, model_version,
@@ -162,7 +209,7 @@ y_h1, y_h2, y_h3, y_h4, y_h5, y_h6,
 state, stat
 ```
 
-`**predictions_fingerprint_<YYYY-MM>.parquet**` — 20 columns:
+**`predictions_fingerprint_<YYYY-MM>.parquet`** — 20 columns:
 
 ```
 anchor_month, model_version,
@@ -172,8 +219,14 @@ y_h1, ..., y_h6,
 state, stat
 ```
 
-Rows where the cube lacks t-3..t-1 lag history are skipped — predictions
-parquet only contains rows for which a forecast was producible.
+`predict.py` scores the entire universe at the latest *eligible* anchor
+(`_find_eligible_anchor`: the latest month with 3 contiguous prior
+months in the merged cube). Rows where the cube lacks t-3..t-1 lag
+coverage at that anchor are silently skipped — the predictions parquet
+only contains rows for which a forecast was producible. When the latest
+live month is isolated (no real priors), `scripts/backfill_anchor_lags.py`
+is a manual stopgap that synthesizes seasonal priors so the live month
+becomes eligible.
 
 ---
 
@@ -186,8 +239,8 @@ triggers a model call.
 | Route                       | Behavior                                                                                                           |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `GET /`                     | redirect → `/ui/`                                                                                                  |
-| `GET /health`               | bundle status: `predictions_loaded`, `predictions_anchor_month`, row counts                                        |
-| `GET /options`              | dropdown vocabularies, `[{name, id}]` per category (`colors`, `categories`, `materials`, `appearances`, `genders`) |
+| `GET /health`               | bundle status: `predictions_loaded`, `predictions_anchor_month`, row counts, `lags_synthetic`                      |
+| `GET /options`              | dropdown vocabularies (read live from `lookup.csv`), `[{name, id}]` per category (`colors`, `categories`, `materials`, `appearances`, `genders`) |
 | `GET /trends`               | every univariate prediction row. Optional filters `?dimension=&state=`                                             |
 | `GET /forecast/fingerprint` | one fingerprint forecast. Query: 5 `*_id` ints. 404 if no precomputed match                                        |
 | `/ui/*`                     | static React app (`trndly/frontend/`)                                                                              |
@@ -195,20 +248,28 @@ triggers a model call.
 
 Swagger UI at `/docs`. OpenAPI JSON at `/openapi.json`.
 
-The `BUNDLE` global is loaded at startup via the lifespan hook. Restart
-the container (or re-run `pipelines.monthly predict` then restart) to
-refresh.
+`/options` is read directly from `lookup.csv` on each request (so the UI
+stays in sync with the canonical ID universe). The `BUNDLE` global — the
+two predictions frames plus the joined lag shares — is loaded at startup
+via the lifespan hook. At load time the service also joins observed
+shares at the anchor and its three prior months (`share_lag3`,
+`share_lag2`, `share_lag1`, `share_t`) from `merged_*.parquet`, and sets
+`BUNDLE.lags_synthetic` if any of those lag months came from the backfill
+stopgap (surfaced via `/health`). Restart the container (or re-run
+`pipelines.monthly predict` then restart) to refresh.
 
 ---
 
 ## Frontend
 
-Stack: **React 18** + **JSX-via-Babel** (no build step). Data fetching is a
-tiny in-house `useFetch` hook inside `dataProvider.js` — keyed cache, optional
-poll, optional refocus revalidation. SWR was the original choice (see
-[rationale.md](rationale.md)), but SWR 2.x ships ESM only with no UMD bundle,
-which doesn't fit the no-build setup; the in-house hook covers what we
-actually use in ~50 lines.
+Stack: **React 18** + **JSX-via-Babel** (no build step). React, ReactDOM,
+and `@babel/standalone` load from unpkg via `<script>` tags in
+`index.html`; application files load as `<script type="text/babel">`.
+Data fetching is a tiny in-house `useFetch` hook inside `dataProvider.js`
+— keyed module-level cache, optional poll, optional refocus revalidation.
+SWR was the original choice (see [rationale.md](rationale.md)), but SWR
+2.x ships ESM only with no UMD bundle, which doesn't fit the no-build
+setup; the in-house hook covers what we actually use in ~50 lines.
 
 `frontend/dataProvider.js` provides a single `useData()` hook exposing:
 
@@ -224,8 +285,9 @@ actually use in ~50 lines.
 - `options` / `lookupIds` — `GET /options`, falling back to the
   `LOOKUP_OPTIONS` seed in `data.js` only for `colorSpectrum` /
   `productGroup` (the two vocabularies the endpoint doesn't expose yet).
-- `health` — `GET /health` (15s poll); drives the sidebar API status pill
-  + the chart-legend "synthetic past" footnote when `lags_synthetic` is set.
+- `health` — `GET /health` (15s poll, revalidate-on-focus); drives the
+  sidebar API status pill + the chart-legend "synthetic past" footnote
+  when `lags_synthetic` is set.
 
 `api.js` reshapes API responses (`mapTrendsToTrendData`,
 `mapOptionsToLookupOptions`, `indexOptionsById`) into the shapes the
@@ -250,10 +312,10 @@ chart shows. Source priority:
 
 `deriveRecommendationFromSeries(series)` in `data.js` then returns one of
 five outcomes (`list now / hold 1mo / hold 2mo / hold 3+ / more data needed`)
-based on the argmax in the forward window vs. anchor (with a 2.5% minimum
-upside threshold). Per-feature signal cards on Item Detail are labels
-only — they do not aggregate into the recommendation, but they ARE the
-data source the synthesis step consumes.
+based on the argmax in the forward window vs. anchor, with a 2.5% minimum
+upside threshold (`UPSIDE_THRESHOLD = 0.025`). Per-feature signal cards on
+Item Detail are labels only — they do not aggregate into the
+recommendation, but they ARE the data source the synthesis step consumes.
 
 ### Trend label vocabulary vs. recommendation vocabulary
 
@@ -274,6 +336,21 @@ The two never coerce into each other.
 
 ## Testing
 
+The suite is **256 collected tests** (253 run by default; 3 `live`
+network tests are deselected) across **107 `def test_` functions** — 55
+in `tests/scrapers/`, 36 in `tests/monthly/`, and 16 at the root
+(`test_paths.py` + `test_trndly.py`). The gap between functions and
+collected count is parametrization (`test_feature_lookups.py` and
+`test_state.py` dominate). `pytest.ini` sets `addopts = -m "not live"`
+(live retailer tests opt-in via `pytest -m live`) and
+`asyncio_mode = strict`.
+
+**CI:** `.github/workflows/tests.yml` (at the **repo root**, one level
+above the `trndly/` package) runs `pytest tests -v --junitxml=pytest-report.xml`
+on every push and PR to `main`, plus `workflow_dispatch`, on Python 3.11
+with `working-directory: trndly`, and uploads the junit report as an
+artifact. Tests are gated — a non-zero exit blocks the run.
+
 
 | Layer                 | Where                    | Notes                                                    |
 | --------------------- | ------------------------ | -------------------------------------------------------- |
@@ -284,7 +361,7 @@ The two never coerce into each other.
 | Live cube validators  | `tests/test_trndly.py`   | concat-compatibility with historical                     |
 | Tick unit tests       | `tests/monthly/`         | state classifier, evaluate logic, predict E2E            |
 | Scrapers              | `tests/scrapers/`        | Mock-based; some require `pytest-asyncio`/`pytest-httpx` |
-| API endpoints         | (manual / curl)          | Smoke covered in `monthly_tick.md`                       |
+| API endpoints         | (manual / curl)          | No automated FastAPI integration tests yet; smoke covered in `monthly_tick.md` |
 
 
 ---
@@ -299,7 +376,7 @@ architecture is designed to swap each piece in without restructuring.
 `paths.py` is the single chokepoint. Migration adds a backend abstraction
 (e.g., `fsspec`-resolved paths or a `gs://`-aware helper) without touching
 consumer code. `gcsfs` is already a transitive dependency. Target bucket
-layout (per existing infra):
+layout (the bucket `gs://trndly-mlops-us/` already exists):
 
 - `gs://trndly-mlops-us/data/predictions/<YYYY-MM>/`
 - `gs://trndly-mlops-us/data/processed/`
@@ -311,11 +388,28 @@ Replace `python -m pipelines.monthly run` with a Vertex Custom Container
 training job, wrapped by Cloud Scheduler firing on the 1st of each
 month. The CLI's stage order doesn't change.
 
-### MLflow registry: local file → managed tracking server
+### MLflow registry: local file → managed champion alias
 
-Currently `champion_metrics.json` is a local file. Real `champion`-alias
-management uses `MlflowClient.set_registered_model_alias`. Plumbing
-notes live in `pipelines/monthly/evaluate.py`.
+A self-hosted MLflow tracking + model registry server **already exists**
+on a GCP VM (`MLFLOW_TRACKING_URI=http://34.169.170.34:5000`, Postgres
+backend store, GCS-backed artifacts under `gs://trndly-mlops-us/mlflow/`).
+It is used **today** during model development and hyperparameter sweeps
+(`notebooks/_gen_4_hyperparameter_search.py` logs runs to `MLFLOW_TRACKING_URI`
+when that env var is set — the GCP VM — otherwise to a local `file:../mlruns`
+store). What is
+**not** yet wired up:
+
+- The monthly tick's champion management. `evaluate.py` is explicitly the
+  local-MVP version — the champion is the local `champion_metrics.json`
+  file, not a registry alias. The target is
+  `MlflowClient.set_registered_model_alias(name=..., alias='champion',
+  version=...)` against the registry model (`listing_timeline_experiments@champion`),
+  with a `runs/` archive + auto-revert when a candidate loses. Plumbing
+  notes live in `pipelines/monthly/evaluate.py`.
+- The serving path. The `MLFLOW_*` variables in
+  `backend/services/.env` are **leftovers** from an older
+  registry-backed serving design and are **not referenced** by
+  `scheduleServer.py`; the service reads precomputed parquets only.
 
 ### Frontend hosting: same-origin uvicorn → Firebase Hosting + Cloud Run API
 
@@ -327,10 +421,18 @@ API, CORS allowlist between them.
 
 Add `Authorization: Bearer <token>` validation middleware to the API.
 Inventory becomes per-user (Firestore-backed instead of session state).
+(`frontend/auth.js` is a demo stub — `login()` always succeeds and
+returns a hardcoded demo user.)
 
 ### Containers: single Dockerfile → multi-image
 
-`trndly/Dockerfile` is a starting point. Split into:
+`trndly/Dockerfile` is a starting point, but it currently only ships the
+**API**: it copies `backend/services` and runs `uvicorn scheduleServer:app`.
+Its `COPY pipelines/training /app/pipelines/training` line targets a
+directory that **does not exist** in the repo (the real packages are
+`pipelines/monthly` and `pipelines/collectors`), so it silently copies
+nothing — fix or remove that line when splitting the image. Planned
+split:
 
 - `trndly-collectors`: scrapers + `build_live_cube` (Cloud Run Job)
 - `trndly-monthly`: full tick, runs on Vertex (Cloud Run Job)

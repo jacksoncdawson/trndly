@@ -1,14 +1,34 @@
 # trndly API reference
 
 The FastAPI service at `backend/services/scheduleServer.py` exposes a
-small read-only API over the precomputed predictions parquet. All routes
-are `GET`; no request triggers a model call.
+small read-only API over the precomputed predictions parquet. All data
+routes are `GET`; no request triggers a model call. (The service loads
+both predictions parquets once at startup and only reads them — all
+inference is precomputed monthly by `pipelines.monthly.predict`.)
 
 Default base URL when running locally: `http://127.0.0.1:8000` (or the
 port passed to uvicorn). The static UI mounts at `/ui/`; everything
-below is same-origin so no CORS setup is required.
+below is same-origin so no CORS setup is required. `GET /` issues a
+307 redirect to `/ui/` (Starlette's `RedirectResponse` default).
 
-OpenAPI JSON: `GET /openapi.json` — Swagger UI: `GET /docs`.
+OpenAPI JSON: `GET /openapi.json` — Swagger UI: `GET /docs` (FastAPI
+defaults; not overridden).
+
+**MLflow boundary.** `backend/services/.env` loads a handful of
+`MLFLOW_*` variables (including a tracking URI at
+`http://34.169.170.34:5000`). These are **leftovers from an older,
+registry-backed serving design and are not referenced anywhere in
+`scheduleServer.py`** — this service never calls MLflow or a live model.
+The real GCP-hosted MLflow server is used only during model development
+and hyperparameter sweeps (`notebooks/_gen_4_hyperparameter_search.py`),
+never in the request path.
+
+**When predictions aren't loaded.** If the startup load fails (e.g. no
+`predictions_*.parquet` on disk), `/health` reports
+`status: "degraded"` and the data routes (`/trends`,
+`/forecast/fingerprint`) return `503 Service Unavailable` with the load
+error in `detail`. `/options` independently returns `503` if
+`data/reference/lookup.csv` is missing.
 
 ---
 
@@ -19,6 +39,8 @@ Liveness + bundle status.
 ```bash
 curl -s http://localhost:8000/health
 ```
+
+Healthy response:
 
 ```json
 {
@@ -32,8 +54,25 @@ curl -s http://localhost:8000/health
 }
 ```
 
-If `predictions_loaded` is `false`, `error` carries the load failure
-reason (e.g., "no `predictions_*.parquet` found — run `python -m pipelines.monthly run`").
+Degraded response (no predictions found at startup):
+
+```json
+{
+  "status": "degraded",
+  "predictions_loaded": false,
+  "predictions_anchor_month": null,
+  "predictions_univariate_rows": null,
+  "predictions_fingerprint_rows": null,
+  "lags_synthetic": false,
+  "error": "no predictions_univariate_*.parquet found; run `python -m pipelines.monthly run`"
+}
+```
+
+When `predictions_loaded` is `false`, `status` flips to `"degraded"` and
+`error` carries the load failure reason. The loader reports the first
+missing parquet, so the message is one of `no predictions_univariate_*.parquet
+found; run \`python -m pipelines.monthly run\`` or the matching
+`predictions_fingerprint_*` variant.
 
 `lags_synthetic` is `true` when one or more of the anchor's 3 prior lag
 months in the merged cube came from
@@ -47,8 +86,8 @@ legend when this flag is set.
 ## `GET /options`
 
 Vocabularies for UI dropdowns. Each category returns `[{name, id}]` so
-the frontend can POST IDs (or assemble the fingerprint query string) by
-mapping back from the user's name selection.
+the frontend can assemble the fingerprint query string by mapping back
+from the user's name selection. Rows are sorted by `name`.
 
 ```bash
 curl -s http://localhost:8000/options
@@ -64,9 +103,13 @@ curl -s http://localhost:8000/options
 }
 ```
 
-Source: `data/reference/lookup.csv`. Filters by `category` column to
-the five dimensions the UI exposes (drops `color_spectrum` and
-`product_group` — they're internal).
+Source: `data/reference/lookup.csv`. Filters by the `category` column to
+the five dimensions the UI exposes — `color_master` → `colors`,
+`product_type` → `categories`, `material` → `materials`,
+`graphical_appearance` → `appearances`, `gender` → `genders`. The
+`color_spectrum` and `product_group` categories exist in `lookup.csv`
+but are not returned here (the frontend seeds those from its local
+`data.js` fallback). Returns `503` if `lookup.csv` is missing.
 
 ---
 
@@ -78,8 +121,11 @@ Every univariate prediction row, optionally filtered. One row per
 **Query params:**
 | Param | Type | Notes |
 |---|---|---|
-| `dimension` | str | optional. e.g. `color_master`, `material`, `product_type`, `graphical_appearance`, `gender`, `product_group`, `color_spectrum` |
+| `dimension` | str | optional. e.g. `color_master`, `material`, `product_type`, `graphical_appearance`, `gender` (the dimensions emitted by `predict`) |
 | `state` | str | optional. one of `rising`, `peak`, `flat`, `falling` |
+
+Both filters are exact-match against the parquet columns; unknown values
+simply yield an empty list.
 
 ```bash
 curl -s 'http://localhost:8000/trends?dimension=color_master&state=rising'
@@ -110,10 +156,12 @@ emits rows where the lag history is complete, so this is rare.
 
 **"Unknown" rows.** Every dimension reserves `level_id = 0` for items the
 scraper couldn't categorize (e.g. `color_master:0 = Unknown`,
-`material:0 = Unknown`, etc.). The API returns these rows uniformly, but
-the React frontend filters them out at the `api.js` reshape boundary —
-they're real data but they're not actionable for a reseller. API clients
-that DO care about unclassified buckets can read them directly.
+`material:0 = Unknown`, etc.). The API returns these rows uniformly. The
+React frontend drops them at the `api.js` reshape boundary
+(`mapTrendsToTrendData` skips any row whose `level_name` is `"Unknown"`,
+case-insensitive) — they're real data but not actionable for a reseller.
+API clients that DO care about unclassified buckets can read them
+directly.
 
 ---
 
@@ -209,4 +257,5 @@ tuning").
 The `BUNDLE` global is loaded once at startup via the FastAPI lifespan
 hook. To pick up a new monthly tick's output, **restart the service**.
 There's no hot-reload endpoint — predictions change at most monthly,
-and a Cloud Run revision rollout is the natural refresh.
+and a Cloud Run revision rollout is the natural refresh (aspirational —
+the service currently runs locally; cloud deployment is future work).

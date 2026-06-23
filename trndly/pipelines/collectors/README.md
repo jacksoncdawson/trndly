@@ -2,18 +2,18 @@
 
 API-first scrapers for **Gap**, **Hollister**, **Uniqlo**, and **American
 Eagle** that produce raw per-(product × color) rows in
-`items_<retailer>.csv`. A separate aggregator (`build_live_cube.py`) reads
-every items file and builds two parquets — a 5-D fingerprint cube and a
-long-format univariate cube — under `data/processed/`. Schemas mirror the
-historical cubes from `notebooks/1_aggregate_historical.ipynb` so
-`pipelines.monthly.aggregate` can `pd.concat` historical + live rows into a single merged
-universe.
+`items_<retailer>.csv` (written under `data/raw/items/`). A separate
+aggregator (`build_live_cube.py`) reads every items file and builds two
+parquets — a 5-D fingerprint cube and a long-format univariate cube —
+under `data/processed/`. Schemas mirror the historical cubes from
+`notebooks/1_aggregate_historical.ipynb` so `pipelines.monthly.aggregate`
+can `pd.concat` historical + live rows into a single merged universe.
 
 ## Architecture
 
 ```
 gap_scraper.py      ─┐
-uniqlo_scraper.py    ├─►  items_<retailer>.csv  (one row per product × color)
+uniqlo_scraper.py    ├─►  data/raw/items/items_<retailer>.csv  (one row per product × color)
 american_eagle_..    │           │
 hollister_scraper.py ┘           ▼
                           build_live_cube.py
@@ -37,26 +37,37 @@ hollister_scraper.py ┘           ▼
 Each scraper:
 
 1. **Phase 1** — paginates the retailer's internal listing API (or
-  server-rendered HTML for Hollister) to get every product in scope.
+   server-rendered HTML for Hollister) to get every product in scope.
    Per-target dedup; per-page retries with exponential backoff + jitter.
 2. **Phase 1.5** *(optional, default ON)* — for products whose title
-  doesn't carry an explicit fabric keyword, fetch the PDP and extract
+   doesn't carry an explicit fabric keyword, fetch the PDP and extract
    the composition string ("78% Polyester, 17% Lyocell, 5% Spandex").
 3. **Phase 2** — project each (product × color) combo into the shared
-  18-column items schema. Stream-write to a partial CSV; atomic-rename
+   18-column items schema. Stream-write to a partial CSV; atomic-rename
    on clean exit.
 
 `build_live_cube.py` reads every `items_*.csv`, derives `month` from
-`scraped_at` (truncated to month-start), groups by the 5 historical
-fingerprint dims (`product_type_id`, `gender_id`, `color_master_id`,
-`graphical_appearance_id`, `material_id`), and writes both cubes with
-`source='live'` Categoricals. The univariate cube emits one row per
-`(month, dimension, level_id)` for the same 5 dims — `color_spectrum`
-and `product_group` are dropped from live output (mostly noise / fully
-derivable from `product_type`).
+`scraped_at` (truncated to month-start), collapses unisex SKUs (see
+below), groups by the 5 historical fingerprint dims (`product_type_id`,
+`gender_id`, `color_master_id`, `graphical_appearance_id`,
+`material_id`), and writes both cubes with `source='live'` Categoricals.
+The univariate cube emits one row per `(month, dimension, level_id)` for
+the same 5 dims — `color_spectrum` and `product_group` are dropped from
+live output (mostly noise / fully derivable from `product_type`).
+
+**Unisex collapse (pre-aggregation).** The scrapers only ever emit
+`gender='women'` or `gender='men'` rows. `build_live_cube.collapse_unisex()`
+runs *before* the cube grouping: any `(retailer, style_id, cc_id)` that
+appears with **both** `women` and `men` is collapsed into a single row
+with `gender='unisex'` / `gender_id=2` (the `women` row is kept and
+rewritten; the `men` row is dropped). The `retailer` is part of the
+dedup key so two retailers sharing an SKU number never collide. This is
+why the live cube's gender dimension has a third (`unisex`) level that
+never appears in the raw items CSVs.
 
 ## items_.csv schema (18 columns)
 
+Written to `data/raw/items/items_<retailer>.csv`.
 
 | Column                     | Source                                                           | Notes                                                    |
 | -------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------- |
@@ -66,24 +77,25 @@ derivable from `product_type`).
 | `cc_id`                    | retailer's color/swatch id                                       | unique per (product, color)                              |
 | `web_product_type`         | retailer category label                                          | Gap-only ("mens pants", "womens bras"); empty for others |
 | `title`                    | retailer product name                                            | source for product_type / material extraction            |
-| `gender`                   | derived from target                                              | `women` / `men`                                          |
+| `gender`                   | derived from target                                              | `women` / `men` (only `unisex` appears later, in the cube) |
 | `color_raw`                | retailer color label                                             | rich form when available (e.g. "Tapestry navy blue")     |
 | `product_type_raw`         | `extract_product_type(title)` (with `web_product_type` fallback) | from `feature_lookups.PRODUCT_TYPE_KEYWORDS`             |
 | `material_raw`             | PDP composition (if enriched) → title fallback                   | percentage-aware                                         |
 | `graphical_appearance_raw` | `extract_graphical_appearance(color, then title)`                | defaults to `Solid`                                      |
-| `*_id` columns (7)         | per-feature-value lookup IDs                                     | resolves against `data/processed/lookup.csv`             |
+| `*_id` columns (7)         | per-feature-value lookup IDs                                     | resolves against `data/reference/lookup.csv`             |
 
 
 The `*_id` columns are the canonical universe for the cubes. `lookup.csv`
-is the single source of truth; `feature_lookups._assert_lookup_csv_matches_dicts()`
-runs at module import and raises if the hand-written `*_TO_ID` dicts
-drift from the CSV. The companion `_warn_unreachable_lookup_ids()`
-emits an `UnreachableLookupIDWarning` if a lookup ID becomes unreachable
-from the dicts and isn't in `_DELIBERATELY_UNREACHABLE_LOOKUP_IDS`.
+(at `data/reference/lookup.csv`) is the single source of truth;
+`feature_lookups._assert_lookup_csv_matches_dicts()` runs at module
+import and raises if the hand-written `*_TO_ID` dicts drift from the CSV.
+The companion `_warn_unreachable_lookup_ids()` emits an
+`UnreachableLookupIDWarning` if a lookup ID becomes unreachable from the
+dicts and isn't in `_DELIBERATELY_UNREACHABLE_LOOKUP_IDS`.
 
 **Full per-dimension audit — which IDs each pipeline source actually
 populates, and which are deliberately unreachable from live — lives in
-[`data/processed/SCHEMA.md`](../../data/processed/SCHEMA.md).** Read that
+[`data/reference/SCHEMA.md`](../../data/reference/SCHEMA.md).** Read that
 before adding/removing buckets so you don't accidentally collapse a
 dimension or shadow an existing keyword.
 
@@ -117,11 +129,13 @@ to produce `merged_*.parquet`.
 
 ## Scrapers in this folder
 
+> Wall-clock and row-count figures below are deliberately rough (`~`) —
+> they track live catalog inventory and drift run to run.
 
 | Script                                                 | Bot protection               | Listing source                               | Rough wall-clock                                             |
 | ------------------------------------------------------ | ---------------------------- | -------------------------------------------- | ------------------------------------------------------------ |
-| [gap_scraper.py](gap_scraper.py)                       | none                         | `api.gap.com/commerce/search/products/v2/cc` | **~17s** for ~5,200 rows                                     |
-| [uniqlo_scraper.py](uniqlo_scraper.py)                 | none                         | `uniqlo.com/us/api/commerce/v5/en/products`  | **~30s** for ~3,000 rows (with PDP enrichment)               |
+| [gap_scraper.py](gap_scraper.py)                       | none                         | `api.gap.com/commerce/search/products/v2/cc` | **~17s** for ~5,000 rows                                     |
+| [uniqlo_scraper.py](uniqlo_scraper.py)                 | none                         | `uniqlo.com/us/api/commerce/v5/en/products`  | **~30s** for ~2,800 rows (with PDP enrichment)              |
 | [american_eagle_scraper.py](american_eagle_scraper.py) | Akamai + JWT                 | `ae.com/ugp-api/browse/v1/category/{cat_id}` | **~2-3min** (JWT bootstrap + 9 cat fan-out at concurrency 3) |
 | [hollister_scraper.py](hollister_scraper.py)           | Akamai (httpx defaults pass) | SSR HTML with embedded Apollo state          | **~5min** for ~21,000 rows                                   |
 
@@ -129,8 +143,8 @@ to produce `merged_*.parquet`.
 
 | Helper                                                 | Role                                                                                                                        |
 | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| [build_live_cube.py](build_live_cube.py)               | Aggregate every `items_*.csv` into per-month `live_<role>_<YYYY-MM>.parquet` files                                          |
-| [feature_lookups.py](feature_lookups.py)               | Shared keyword maps + ID dicts for `extract_color`, `extract_material`, etc. Validates against `lookup.csv` at import time. |
+| [build_live_cube.py](build_live_cube.py)               | Collapse unisex, then aggregate every `items_*.csv` into per-month `live_<role>_<YYYY-MM>.parquet` files                    |
+| [feature_lookups.py](feature_lookups.py)               | Shared keyword maps + ID dicts for `extract_color`, `extract_material`, etc. Validates against `data/reference/lookup.csv` at import time. |
 
 
 
@@ -138,9 +152,10 @@ The `_deferred/` directory holds modules that are functionally complete
 but parked because no consumer reads them today. See
 [_deferred/README.md](_deferred/README.md). Currently:
 [_deferred/google_trends_collector.py](_deferred/google_trends_collector.py)
-— Google Trends search-interest collector that the previous combine flow
-blended into `trend_signals.csv`. To revive as a parallel signal, see
-HANDOFF.md item #10.
+— a Google Trends search-interest collector that a previous combine flow
+blended into `trend_signals.csv`. It is the only code in the repo that
+assigns `DEFAULT_MISSING_SCORE`. To revive it as a parallel signal, start
+from [_deferred/README.md](_deferred/README.md).
 
 ## Setup
 
@@ -171,7 +186,8 @@ python gap_scraper.py --max-products-per-page 5 --no-enrich-pdp
 python -m pipelines.monthly.scrape
 ```
 
-After all scrapers have written their `items_<retailer>.csv`:
+After all scrapers have written their `items_<retailer>.csv` (into
+`data/raw/items/`):
 
 ```bash
 python build_live_cube.py
@@ -203,7 +219,8 @@ Per-scraper unit tests live at [trndly/tests/scrapers/](../../tests/scrapers/).
 Mocked HTTP via [pytest-httpx](https://pypi.org/project/pytest-httpx/);
 opt-in real-network smoke tests behind `pytest -m live`. Each scraper
 test file covers pagination, `_combo_to_row`, PDP fabric extraction,
-and resume semantics.
+and resume semantics. (The scraper suite collects 164 tests, 3 of which
+are `live`-marked and deselected by default.)
 
 ```bash
 cd trndly
@@ -221,94 +238,100 @@ test inventory + fixture refresh policy.
 ## Operational notes
 
 - **Listing-API drift is normal.** Gap and Uniqlo report `total`* fields
-that drift by ~3–5% between page fetches due to inventory churn or
-ranking shuffles across cursor windows. Drop in real catalog content
-is rare; we report drift in the per-retailer summary as `OK (drift)`.
+  that drift by ~3–5% between page fetches due to inventory churn or
+  ranking shuffles across cursor windows. Drop in real catalog content
+  is rare; we report drift in the per-retailer summary as `OK (drift)`.
 - **AE rate-limits aggressive concurrency.** At `--concurrency 8`,
-Akamai 403s reach ~37%. Default 3 is safe; the retry+backoff handles
-bursts. The Playwright bootstrap captures the FULL set of browser
-headers (`sec-ch-ua-`*, `sec-fetch-*`, `aesite`, etc.), not just the
-JWT — Akamai validates the full fingerprint.
+  Akamai 403s reach ~37%. Default 3 is safe; the retry+backoff handles
+  bursts (AE uses a `1.5**attempt` backoff and adds 403 to its retryable
+  status set). The Playwright bootstrap captures the FULL set of browser
+  headers (`sec-ch-ua-`*, `sec-fetch-*`, `aesite`, etc.), not just the
+  JWT — Akamai validates the full fingerprint.
 - **Hollister fingerprint is load-bearing.** Plain `httpx` over HTTP/1.1
-with a desktop Chrome User-Agent passes Akamai's edge check. Do NOT
-set `http2=True`; do NOT switch to `curl` — both are blocked.
+  with a desktop Chrome User-Agent passes Akamai's edge check. Do NOT
+  set `http2=True`; do NOT switch to `curl` — both are blocked.
+  Hollister also adds 403 to its retryable status set.
 - **Resume after crash** is supported on every scraper. The streaming
-writer keeps a `<items>_partial.csv` open during the run and atomic-
-renames to the final path on clean exit. With `--resume`, prior
-`(style_id, cc_id, gender)` keys in the partial file are skipped on
-the next invocation.
+  writer keeps a `<items>_partial.csv` open during the run and atomic-
+  renames to the final path on clean exit. With `--resume`, prior
+  `(style_id, cc_id, gender)` keys in the partial file are skipped on
+  the next invocation.
 - **Live cube semantics: snapshot, not running tally.** Within-month
-re-runs replace prior `(month, fingerprint, source='live')` rows in
-the merged universe (the `keep='last'` dedup in pipelines.monthly.aggregate enforces this). Items
-dropped from the catalog between runs are dropped from the cube.
+  re-runs replace prior `(month, fingerprint, source='live')` rows in
+  the merged universe (the `keep='last'` dedup in
+  `pipelines.monthly.aggregate` enforces this). Items dropped from the
+  catalog between runs are dropped from the cube.
 
 ## Known limitations
 
 - **Material extraction is keyword-priority** (with a percentage-aware
-pre-pass). Some compositions still mis-bucket; net unknown rate is
-≤ 2% across all four retailers.
+  pre-pass). Some compositions still mis-bucket; net unknown rate is
+  ≤ 2% across all four retailers (current snapshots: Gap ~1.6%, Uniqlo
+  ~0%, AE ~0.2%, Hollister ~0.5%).
 - `**color_master` unknowns ~3.5% on AE.** AE markets denim wash colors
-("Bordeaux", "Heather Frost", "Mint", "Bordeaux") that the keyword
-list in `feature_lookups.py` covers — but ~67 catalog rows labeled
-literally "Multi" are genuinely multi-colored and stay Unknown by
-design (no canonical `color_master` value for "multi").
+  ("Bordeaux", "Heather Frost", "Mint") that the keyword list in
+  `feature_lookups.py` covers — but a few dozen catalog rows labeled
+  literally "Multi" are genuinely multi-colored and stay Unknown by
+  design (no canonical `color_master` value for "multi").
 - `**graphical_appearance` is dominated by "Solid"** (~50–75% per
-retailer). Most apparel is solid-colored; the keyword set is additive
-in `feature_lookups.GRAPHICAL_APPEARANCE_KEYWORDS` if a retailer
-starts using a new pattern term.
-- **Future-timeframe forecasting deferred.** The univariate cube only
-carries `current` shares per (month, dimension, level_id);
-`feature_contract.load_trend_lookup_from_univariate` returns
-`DEFAULT_MISSING_SCORE` for `next_week` / `next_month` /
-`three_months` / `six_months`. Real per-fingerprint forecasting from
-the historical cube's seasonality lives is a separate problem (see
-HANDOFF.md).
+  retailer). Most apparel is solid-colored; the keyword set is additive
+  in `feature_lookups.GRAPHICAL_APPEARANCE_KEYWORDS` if a retailer
+  starts using a new pattern term.
+- **Future-timeframe forecasting deferred.** The live univariate cube
+  only carries `current` shares per `(month, dimension, level_id)`;
+  there is no forward-timeframe (`next_week` / `next_month` /
+  `three_months` / `six_months`) signal produced here. The only code
+  that ever emitted forward-window scores was the deferred Google Trends
+  collector (`_deferred/google_trends_collector.py`, which falls back to
+  `DEFAULT_MISSING_SCORE` when pytrends returns nothing). Real
+  per-fingerprint forecasting from the historical cube's seasonality is a
+  separate, not-yet-built problem.
 
 ## Per-retailer notes
 
 ### Gap
 
 - API: `api.gap.com/commerce/search/products/v2/cc`. Two targets
-(women/men shop-all). `totalColors` field is the completeness oracle.
+  (women/men shop-all). `totalColors` field is the completeness oracle.
 - Page size capped server-side at 200.
 - PDP fabric: regex against escaped JSON `"label":"Fabric & care"`
-block in PDP HTML.
+  block in PDP HTML.
 - Adds three Gap-specific columns to items: `style_id` (Gap's `styleId`),
-`cc_id` (Gap's `ccId`), `web_product_type` (Gap's `webProductType` —
-used as a fallback signal for `extract_product_type`).
+  `cc_id` (Gap's `ccId`), `web_product_type` (Gap's `webProductType` —
+  used as a fallback signal for `extract_product_type`).
 
 ### Uniqlo
 
 - API: `uniqlo.com/us/api/commerce/v5/en/products`. Two targets
-(women/men shop-all keyed by `genderId`). `pagination.total` is the
-completeness oracle.
+  (women/men shop-all keyed by `genderId`). `pagination.total` is the
+  completeness oracle.
 - Page size capped server-side at 100.
 - PDP fabric: regex against the inline Next.js JSON's `"composition"`
-field. Decoded from the JSON-string escape level.
+  field. Decoded from the JSON-string escape level.
 
 ### American Eagle
 
 - API: `ae.com/ugp-api/browse/v1/category/{cat_id}` for listing,
-`/product/{id}` for material. `meta.totalProducts` is the
-completeness oracle.
+  `/product/{id}` for material. `meta.totalProducts` is the
+  completeness oracle.
 - Page size hard-locked at 30 server-side.
-- 9 category targets (no clean shop-all); cross-PLP overlap heavy, so
-cross-target dedup on `(product_id, cc_id, gender)` is essential.
+- 9 category targets (new-arrivals + tops/bottoms/dresses/outerwear per
+  gender; no clean shop-all); cross-PLP overlap heavy, so cross-target
+  dedup on `(product_id, cc_id, gender)` is essential.
 - One-time Playwright bootstrap captures the JWT bearer token and the
-Akamai cookies + sec-* request headers. Subsequent fetches are pure
-`httpx`.
+  Akamai cookies + sec-* request headers. Subsequent fetches are pure
+  `httpx`.
 - Concurrency default 3 (Akamai 403s become common above 4).
 
 ### Hollister
 
 - No separate JSON API — the catalog is embedded in the SSR HTML's
-Apollo GraphQL cache. Two shop-all targets (`/shop/us/womens` and
-`/shop/us/mens`).
+  Apollo GraphQL cache. Two shop-all targets (`/shop/us/womens` and
+  `/shop/us/mens`).
 - Page size hard-locked at 90; pagination via `?start=N`.
 - `productTotalCount` (in the embedded Apollo state) is the
-completeness oracle.
+  completeness oracle.
 - PDP fabric: regex against `"fabricDetails":"Body:60% Cotton, ..."`
-strings in the PDP HTML (multiple panel labels per product are joined
-before extraction).
+  strings in the PDP HTML (multiple panel labels per product are joined
+  before extraction).
 - HTTP/1.1 only; HTTP/2 is blocked by Akamai.
-

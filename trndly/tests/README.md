@@ -3,6 +3,11 @@
 Unit + integration tests for trndly. Mocked HTTP via `pytest-httpx`;
 opt-in real-network smoke tests behind `pytest -m live`.
 
+Authoritative count: **256 tests collected** (107 `def test_` functions
+expanded by `parametrize`). The default run executes **253** — the 3
+`live` smoke tests are deselected unless you opt in. (The repo-root README's
+"220+" is a rounded figure; 256 is the real collected total.)
+
 ## Running
 
 ```bash
@@ -23,27 +28,51 @@ cd /Users/jackcdawson/Desktop/trndly/trndly
 
 The default-skip is configured in `pytest.ini` (`addopts = -m "not live"`).
 
+## Continuous integration
+
+`.github/workflows/tests.yml` runs the default (non-`live`) suite on every
+push and pull request to `main`, plus manual `workflow_dispatch`. It uses
+Python 3.11, working-directory `trndly`, and runs:
+
+```bash
+pytest tests -v --junitxml=pytest-report.xml
+```
+
+The junit report is uploaded as a build artifact (`pytest-report-3.11`).
+A non-zero pytest exit fails the job, so tests gate merges to `main`. Live
+tests are not run in CI (network + Akamai fragility).
+
 ## Layout
 
 ```
 tests/
 ├── conftest.py                  shared fixtures (path setup + per-retailer loaders)
-├── pytest.ini  (../)            marker registration + asyncio mode
-├── test_trndly.py               cube + lookup + feature_contract tests
-├── tests_trndly.py  (../../)    legacy root-level test file (3 tests)
+├── pytest.ini  (../)            marker registration + asyncio mode (in trndly/)
+├── test_trndly.py               cube + lookup + feature_contract tests (13)
+├── test_paths.py                paths.py constants/globs resolve (parametrized)
 ├── fixtures/
 │   ├── gap/                     listing_page1..3.json + pdp_html.txt
 │   ├── uniqlo/                  listing_page1.json + pdp_html.txt
 │   ├── hollister/               ssr_apollo_state.html + pdp_html.txt
 │   └── ae/                      bootstrap_headers.json + listing_page1.json + pdp_response.json
+├── monthly/                     monthly-tick stage tests
+│   ├── test_state.py            classify_state() rules (peak/rising/falling/flat)
+│   ├── test_evaluate.py         local-MVP champion promotion (champion_metrics.json)
+│   └── test_predict.py          universe prediction / anchor eligibility
 └── scrapers/
     ├── test_feature_lookups.py  parametric tests for extract_color/material/product_type/...
+    ├── test_http_utils.py       request_with_retry backoff + StreamingItemWriter durability/resume
+    ├── test_build_live_cube.py  collapse_unisex + cube share invariants
     ├── test_gap.py              pagination + _combo_to_row + PDP fabric + resume
     ├── test_uniqlo.py           same coverage matrix
-    ├── test_hollister.py        +1: Apollo state parsing (3 cases)
-    ├── test_ae.py               +1: mock _bootstrap_session
-    └── test_live.py             marked @pytest.mark.live — opt-in only
+    ├── test_hollister.py        + Apollo-state parsing (positive + 2 negative)
+    ├── test_ae.py               + mocked _bootstrap_session (no real Playwright)
+    └── test_live.py             marked @pytest.mark.live — opt-in only (3 tests)
 ```
+
+Approximate collected counts by area: `tests/scrapers` 164 (3 of them
+`live`), `tests/monthly` 47, `tests/test_paths.py` 32, `tests/test_trndly.py`
+13 — 256 total.
 
 ## Per-scraper coverage matrix
 
@@ -55,17 +84,24 @@ Every scraper test file covers (modulo retailer-specific shape):
    the 18 `items_<retailer>.csv` columns is populated correctly with IDs
    resolved via `feature_lookups`.
 3. **PDP fabric extraction** — mock the PDP URL, assert the regex / JSON
-   path returns the expected composition string.
+   path returns the expected composition string (plus a no-match case).
 4. **Resume semantics** — write a partial CSV, instantiate
    `StreamingItemWriter(resume=True)`, assert `already_have(...)` reports
    prior keys.
 
 Scraper-specific extras:
-- **Hollister** adds `_parse_apollo_state` tests (positive + 2 negative)
-  and `_extract_combos_from_apollo` end-to-end.
+- **Hollister** adds `_parse_apollo_state` tests (positive + 2 negative:
+  missing marker, malformed JSON) and an `_extract_combos_from_apollo`
+  end-to-end check.
 - **AE** adds a `_bootstrap_session` mock test (we don't run real
   Playwright in tests — too slow/fragile; the fixture is a captured
-  header bundle).
+  header bundle) plus a PDP-composition-overrides-title case.
+
+Shared scraper infrastructure lives in `test_http_utils.py`
+(`request_with_retry` backoff + the 403-unlock set for Hollister/AE, and
+`StreamingItemWriter` atomic-write / resume / crash-recovery) and
+`test_build_live_cube.py` (`collapse_unisex` + per-month share-sum
+invariants).
 
 ## Live tests (`pytest -m live`)
 
@@ -91,8 +127,11 @@ drift). Drop into `tests/fixtures/<retailer>/` and add a loader fixture
 to `conftest.py`.
 
 PDP HTML fixtures must contain the exact backslash-escape patterns the
-scraper regexes match against. For Gap specifically the ampersand must
-be encoded as `&` (not `&` literal) — see
+scraper regexes match against. For Gap specifically the "Fabric & care"
+label lives inside a serialized JS string, so the ampersand must appear as
+the JSON unicode escape `&` (i.e. the fixture literally contains
+`Fabric & care`, not `Fabric & care` and not `Fabric &amp; care`) —
+this matches the `gap_scraper` PDP regex. See
 `tests/fixtures/gap/pdp_html.txt`.
 
 ## Refresh policy
