@@ -25,10 +25,10 @@ how to invoke each stage, what to expect, and how to debug a failure.
    The monthly tick's champion management is fully local: promotion is
    decided by comparing `model_training_run.json` against
    `champion_metrics.json` on disk (see the `evaluate` stage). The
-   self-hosted MLflow server (`MLFLOW_TRACKING_URI=http://34.169.170.34:5000`,
-   Postgres backend, GCS artifacts under `gs://trndly-mlops-us/mlflow/`)
-   is used only during **model development / hyperparameter sweeps**
-   (`notebooks/_gen_4_hyperparameter_search.py`), not by any stage below.
+   self-hosted MLflow server used during **model development / hyperparameter
+   sweeps** (`notebooks/_gen_4_hyperparameter_search.py`) has since been
+   retired and is being rebuilt private (see `serving-redesign.md`); it was
+   never used by any stage below.
    The `MLFLOW_*` vars in `backend/services/.env` are likewise leftovers
    from an older registry-backed serving design and are not read by the
    tick or the serving layer. *(See "MVP vs. target" at the bottom — the
@@ -334,9 +334,9 @@ deferred to cloud deployment and are NOT how the tick works today:
   candidate manifest is copied when any model is promoted; no auto-revert
   of joblibs. *Target:* MLflow model-registry alias
   (`MlflowClient.set_registered_model_alias(name=..., alias='champion',
-  version=...)`) against the cloud registry on the GCP VM
-  (`http://34.169.170.34:5000`, model `listing_timeline_experiments@champion`),
-  with a runs/ archive + auto-revert on demotion.
+  version=...)`) against the rebuilt private MLflow registry (Cloud Run +
+  Cloud SQL + GCS, see `serving-redesign.md`), with a runs/ archive +
+  auto-revert on demotion.
 - **Anchor lag backfill.** *Now:* `scripts/backfill_anchor_lags.py` is a
   manual stopgap run outside the tick when the latest live month is
   isolated. *Target:* automated synthetic-lag synthesis within the tick.

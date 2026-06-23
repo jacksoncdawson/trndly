@@ -26,21 +26,19 @@ captures the target end state. Concretely:
 - **Storage migration: local parquet → GCS.** `paths.py` is the single
   chokepoint — today it is pure local `Path(__file__).resolve()` logic
   with no `fsspec`/`gs://` resolver. Swap with an `fsspec`-backed
-  resolver. `gcsfs` already in `requirements.txt`. Existing infra:
-  `gs://trndly-mlops-us`.
+  resolver. `gcsfs` already in `requirements.txt`. Buckets are provisioned
+  via Terraform per the build plan (`trndly/docs/serving-redesign.md`).
 - **Cadence: manual CLI → Cloud Scheduler + Vertex Custom Container.**
   Replace `python -m pipelines.monthly run` with a Vertex job, fire
   monthly via Cloud Scheduler.
 - **MLflow registry: local file → managed tracking.** `evaluate.py`
   currently writes `champion_metrics.json` locally (it explicitly calls
   itself the "local-MVP version"); swap for
-  `MlflowClient.set_registered_model_alias`. The real self-hosted MLflow
-  tracking + registry already exists on a GCP VM
-  (`MLFLOW_TRACKING_URI=http://34.169.170.34:5000`, Postgres backend
-  store, GCS artifacts under `gs://trndly-mlops-us/mlflow/`) but is used
-  **only during model development / HP sweeps**
-  (`notebooks/_gen_4_hyperparameter_search.py`), not in the monthly tick
-  or the serving request path.
+  `MlflowClient.set_registered_model_alias`. The development MLflow server
+  has been **retired** and is being rebuilt private (Cloud Run + Cloud SQL
+  + GCS) per `trndly/docs/serving-redesign.md`; it was used only during
+  model development / HP sweeps (`notebooks/_gen_4_hyperparameter_search.py`),
+  never in the monthly tick or the serving request path.
 - **Frontend hosting: same-origin uvicorn → Firebase Hosting + Cloud
   Run API.** Add CORS allowlist.
 - **Auth: none → Firebase Auth.** Per-user inventory in Firestore.
@@ -124,10 +122,10 @@ A retired registered model still lives in the cloud MLflow registry.
 Note the name is ambiguous from the repo: the HP-sweep notebook
 references the legacy name `listing_timeline`, while the serving
 leftover config (`backend/services/.env`) references
-`listing_timeline_experiments`. The registry itself is on the GCP VM
-(`http://34.169.170.34:5000`) and cannot be inspected from this repo —
-list the registered models there first, then clean up via the UI or
-`MlflowClient.delete_registered_model(name=...)` with the confirmed name.
+`listing_timeline_experiments`. The development MLflow server has been
+retired (its registry is gone with it), so this cleanup is moot until the
+private replacement is stood up and re-seeded — see
+`trndly/docs/serving-redesign.md`.
 
 ### Test infrastructure: missing `pytest-asyncio` (and venv Python version)
 

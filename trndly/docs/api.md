@@ -14,14 +14,12 @@ below is same-origin so no CORS setup is required. `GET /` issues a
 OpenAPI JSON: `GET /openapi.json` — Swagger UI: `GET /docs` (FastAPI
 defaults; not overridden).
 
-**MLflow boundary.** `backend/services/.env` loads a handful of
-`MLFLOW_*` variables (including a tracking URI at
-`http://34.169.170.34:5000`). These are **leftovers from an older,
-registry-backed serving design and are not referenced anywhere in
-`scheduleServer.py`** — this service never calls MLflow or a live model.
-The real GCP-hosted MLflow server is used only during model development
-and hyperparameter sweeps (`notebooks/_gen_4_hyperparameter_search.py`),
-never in the request path.
+**MLflow boundary.** `backend/services/.env` holds a handful of
+`MLFLOW_*` variables that are **leftovers from an older, registry-backed
+serving design and are not referenced anywhere in `scheduleServer.py`** —
+this service never calls MLflow or a live model. (That development MLflow
+server has since been retired; `.env` is slated for removal — see
+[serving-redesign.md](serving-redesign.md).)
 
 **When predictions aren't loaded.** If the startup load fails (e.g. no
 `predictions_*.parquet` on disk), `/health` reports

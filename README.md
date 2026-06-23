@@ -135,12 +135,12 @@ point is model development:
   an older registry-backed serving design and are not referenced in the
   request path.
 - **Model development / HP sweeps** — `notebooks/_gen_4_hyperparameter_search.py`
-  logs runs to a **real self-hosted MLflow tracking server + model
-  registry** on a GCP VM (`MLFLOW_TRACKING_URI=http://34.169.170.34:5000`,
-  Postgres backend store, GCS-backed artifacts at
-  `gs://trndly-mlops-us/mlflow/`). This is used only during development,
-  never by the tick or the API. (Notebook runs may also use a local
-  SQLite `mlflow.db`, which is gitignored and not committed.)
+  logs runs to a self-hosted MLflow tracking server when `MLFLOW_TRACKING_URI`
+  is set (otherwise a local SQLite `mlflow.db`, gitignored). That development
+  server has since been **retired**; a hardened, private replacement (Cloud Run
+  + Cloud SQL + GCS) is planned — see
+  [docs/serving-redesign.md](trndly/docs/serving-redesign.md). It was never
+  used by the tick or the API.
 
 ## API surface
 

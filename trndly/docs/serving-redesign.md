@@ -1,175 +1,218 @@
-# Serving Redesign — Decision Record & Implementation Plan
+# trndly — Build Plan
 
-**Status:** Accepted (2026-06-23) · **Scope of "now":** static-first serving (Steps 1–4 + Terraform the bucket). Dynamic tier (auth + inventory) is designed here but deferred to a follow-on slice.
+**Serving redesign · Pipeline hardening · MLflow rebuild · Infrastructure-as-Code**
+
+**Status:** Accepted (2026-06-23), revised after an adversarial review pass. Design + sequence locked; implementation not started. Covers the full build: the tick, static serving, a private MLflow, model-lifecycle wiring, the dynamic tier, security/incident remediation — all infra as Terraform.
 
 ---
 
-## 1. Context
+## 1. Context & current reality
 
 trndly serves **precomputed monthly forecasts** from two models:
+- **Univariate "general trends"** — one row per `(dimension, level_id)`.
+- **Fingerprint "item configurations"** — one row per 5-D fingerprint; the current 6-month forecast + trend state for a specific item config.
 
-- **Univariate "general trends"** — one row per `(dimension, level_id)`; global trend exploration.
-- **Fingerprint "item configurations"** — one row per 5-D fingerprint `(product_type_id, gender_id, color_master_id, graphical_appearance_id, material_id)`; the current 6-month forecast + trend state for a specific item config.
+The monthly tick (`scrape → build_cube → aggregate → features → train → evaluate → predict`) does **all** inference offline and writes Parquet. No live inference in serving.
 
-The monthly tick (`scrape → aggregate → features → train → evaluate → predict`) does **all** inference offline and writes the results to Parquet. There is **no live model inference in the serving path**.
-
-### Verified current reality (2026-06-23)
+### Verified reality (live-checked 2026-06-23)
 
 | Fact | Detail |
 |------|--------|
-| Served data size | **~0.2 MB total** — 119 univariate rows + 3,830 fingerprint rows + 191 lookup entries; byte-identical for every user; changes once a month |
-| Current serving | Read-only FastAPI (`backend/services/scheduleServer.py`) loads parquet from local disk at startup, exposes `/health`, `/options`, `/trends`, `/forecast/fingerprint`, mounts a **buildless** React SPA (Babel-in-browser, no `package.json`) at `/ui` |
-| Database | **None.** `requirements.txt` has no Postgres/Supabase/ORM/boto3 |
-| Auth | **Demo stub** (`frontend/auth.js`: any login succeeds, in-memory) |
-| Inventory | **Ephemeral** React `useState` — lost on reload |
-| Dockerfile | **Broken** (copies a nonexistent `pipelines/training`; never copies `data/` or `frontend/`; the service can't boot) |
-| Existing cloud | Self-hosted MLflow tracking+registry on a GCP VM (Postgres + GCS artifacts) — **dev-only, not in the serving path** |
+| Served data size | **~0.2 MB** — 119 univariate + 3,830 fingerprint + 191 lookup rows; global; changes monthly |
+| Serving today | Read-only FastAPI (`backend/services/scheduleServer.py`) over local parquet; mounts a **buildless** React SPA at `/ui` |
+| Data in repo | Only `predictions_*.parquet` are committed. **`lookup.csv` (`data/reference/`) and `merged_*.parquet` (`data/processed/`) are gitignored** (`.gitignore:42`) — they are NOT in a clean checkout (matters for the publisher + golden test) |
+| Database / Auth / Inventory | None / demo stub (`frontend/auth.js`) / ephemeral `useState` |
+| Dockerfile | **Broken**; being **deleted** (+ its orphaned `.dockerignore`) |
+| GCP project | `ml-ops-491417` (#117350290566). **Billing linked** to edu acct `01E4BE-D797BA-7C7744` |
+| Old MLflow VM | **DELETED.** Ran unauthenticated on `0.0.0.0/0:5000` and was **compromised** (registry polluted w/ OAST-callback models; MLflow-CVE SSRF/RCE). Backend was **SQLite** (not Postgres); artifacts **local on the VM** (not GCS). → rebuilt clean (Phase 3) |
+| Incident remediation | ✅ (2026-06-23) Key revoked, all SAs deleted, VM/firewall destroyed, old bucket `trndly-mlops-us` audited (clean) + **renamed to `trndly-data`**, dead IP/port/bucket scrubbed from README/TODO/docs. Remaining: delete `backend/services/.env` when FastAPI leaves serving (Phase 2). See §2.5 |
 
-### The problem
-
-A hosted app server whose entire job is to read 0.2 MB into memory at boot and echo it back is the wrong shape for this workload — and it's exactly what the broken Dockerfile keeps failing to containerize. The data is a **static-asset publishing problem**, not a request-time-compute problem. The **only** genuinely dynamic, per-user, write-heavy surface is **inventory + auth**, which is greenfield.
-
----
-
-## 2. Decision
-
-**Static-first serving on GCP + a thin Firebase tier for the one dynamic surface. Delete the FastAPI serving app and the Dockerfile.**
-
-1. The **monthly tick becomes the publisher**: after writing Parquet, a new publish step emits browser-ready JSON to **GCS behind a CDN (Firebase Hosting)**.
-2. The **only database** is **Firebase Auth + Firestore**, for per-user inventory + real auth.
-3. **FastAPI is removed from the serving path** — kept only as a local dev convenience + living contract reference. **The Dockerfile is deleted, not fixed.**
-4. All new cloud infra is **authored as Terraform (greenfield)** in an `infra/` module.
-5. **Stay on GCP** — matches the existing MLflow/GCS footprint, the credits, and what `architecture.md`/`TODO.md` already describe under "Future" (Firebase Hosting + Firebase Auth + Firestore).
-
-> This resolves the original "fix the Dockerfile" task: we don't fix it — the serving container's reason to exist goes away.
+**The serving problem:** a hosted app server reading 0.2 MB at boot and echoing it is the wrong shape — it's a static-publish problem. Only inventory + auth are genuinely dynamic.
 
 ---
 
-## 3. Why (rationale)
+## 2. Decisions (consolidated)
 
-- **The data settles it.** ~0.2 MB, global, static-until-next-tick. That is a CDN/static-publish problem. A hosted server here is the part of today's architecture that doesn't earn its keep.
-- **The one piece of real server logic is monthly-static.** `scheduleServer._attach_lag_shares()` (the join that attaches `share_lag3/2/1/t` so charts get the full 10-point series) is a pure function of the monthly Parquet. It belongs in the tick — computed once per month, not once per container boot.
-- **The fingerprint-miss fallback is already client-side.** `synthesizeFingerprintSeries()` in `frontend/api.js` synthesizes a forecast from the in-memory trends on a 404 — no backend call.
-- **Only inventory + auth justify a database.** They are the sole dynamic, per-user, mutable state. Everything else is read-only global data.
-- **GCP over AWS** is the operationally honest, deadline-safe, already-scoped choice. The static-publish DE story is cloud-agnostic and carries the résumé on its own; the AWS/Snowflake mapping is articulated verbally (see §8), not built off-stack.
+1. **Static-first serving.** The tick becomes a **publisher** emitting browser-ready JSON; served as static files on **Firebase Hosting**. **FastAPI leaves serving; the Dockerfile is deleted.**
+2. **One database** for the one dynamic surface: **Firebase Auth + Firestore** (deferred to Phase 5).
+3. **MLflow rebuilt clean on Cloud Run** — *private* (no `allUsers` invoker) + **Cloud SQL Postgres** + **GCS artifacts (proxied)** + a **dedicated minimal SA**. The model-tracking tool + champion-registry home.
+4. **All infrastructure is Terraform** (`infra/`, greenfield). Content/image deploys (`firebase deploy`, `gsutil`, image push) are CLI/CI.
+5. **Security + incident remediation are first-class** (§2.5, §5).
+6. **Stay on GCP.** Résumé claims out of scope until the build is done.
+
+### 2.5 Incident remediation (do NOW — Phase 1/2, not "future hardening")
+- ✅ **DONE (2026-06-23):** `VERTEX_API_KEY` revoked + **all service accounts deleted**; VM + firewall already destroyed. The live exposure is closed. Still pending: **delete `backend/services/.env`** when FastAPI leaves serving (Phase 2) + make `scheduleServer`'s `load_dotenv` optional/removed.
+- ✅ **DONE (2026-06-23):** repo scrubbed of the dead IP/port/old-bucket and the false "Postgres" claim across `README.md`, `TODO.md`, `docs/{api,monthly_tick,architecture}.md` (replaced with accurate retired/rebuilt-private prose).
+- ✅ **DONE (2026-06-23):** old bucket `trndly-mlops-us` audited (only old `data/synthetic/`, **no `mlflow/` remnants**, no public IAM), **renamed to `trndly-data`** (fresh bucket w/ uniform access + public-access-prevention; old deleted). NOTE: the MLflow rebuild's artifacts bucket is provisioned **fresh via Terraform in Phase 3** — not this legacy bucket.
+
+---
+
+## 3. Why
+- **Data settles serving.** 0.2 MB, global, static-until-tick = CDN/static-publish. The one real server computation — `scheduleServer._attach_lag_shares()` (attaches `share_lag3/2/1/t` for the 10-point chart series) — is a pure monthly function, so it moves into the tick. The fingerprint-miss fallback is already client-side.
+- **Cloud Run over a VM for MLflow.** A VM is what got popped. Cloud Run is managed (nothing to patch), scales to ~zero, private by default; access via IAM, no public endpoint.
+- **Terraform everything.** Greenfield IaC, reproducible (a suspect resource is `destroy`+re-apply, not forensics), real "I provision GCP with Terraform" story.
 
 ---
 
 ## 4. Target architecture
 
+### Serving (static)
 ```
-   Monthly tick (unchanged through `predict`)
-        │  writes data/predictions/predictions_*_<YYYY-MM>.parquet
-        ▼
-   NEW: pipelines/monthly/publish.py  (the publisher)
-        │  reuse _attach_lag_shares() + contracts.py validators
-        │  emit browser-ready JSON
-        ▼
-   GCS bucket  ──fronted by──▶  Firebase Hosting / Cloud CDN
-        trends_<YYYY-MM>.json        (119 rows, lag-shares + y_h1..h6 baked in)
-        fingerprint_<YYYY-MM>.json   (3,830 rows, single bundle — 0.1 MB)
-        options_<YYYY-MM>.json       (exact nested shape /options returns today)
-        health_<YYYY-MM>.json        (anchor_month, counts, lags_synthetic, latest pointer)
-        + the static SPA
-        ▼
-   Buildless React SPA  ── reads static JSON (same shapes api.js already consumes)
-        │  client-side ?dimension/?state filtering (unchanged)
-        │  fingerprint 404 → synthesizeFingerprintSeries (unchanged)
-        ▼
-   Firebase Auth (UMD/compat CDN bundle)  +  Firestore
-        per-user inventory keyed by uid; security rules enforce isolation
-        (the ONLY database; the only dynamic surface)
+tick → predict → predictions_*_<YYYY-MM>.parquet
+   ▼
+pipelines/serving/  (NEW shared module: _attach_lag_shares + lag/_opt_float + Pydantic schemas,
+   │                 lifted out of scheduleServer so publish.py AND a slimmed scheduleServer import it)
+   ▼
+pipelines/monthly/publish.py   ← reads predictions_* + merged_* + reference/lookup.csv
+   │ emits versioned trends_/fingerprint_/options_/health_<YYYY-MM>.json
+   │ AND canonical trends.json/fingerprint.json/options.json/health.json (what the SPA fetches)
+   ▼
+firebase deploy → Firebase Hosting (CDN, SSL)   ← SPA + JSON, same-origin; Cache-Control busts the canonical files
+   ▼
+Buildless React SPA  ── fetches canonical JSON (api.js shapes preserved for /trends, /options, /health)
+   │  FINGERPRINT IS THE EXCEPTION: today api.js does a parameterized `/forecast/fingerprint?ids` query;
+   │  it must be rewritten to load fingerprint.json once, index by the 5-D key, return hit-or-null,
+   │  and route null into the existing synthesizeFingerprintSeries fallback (replacing the 404 catch).
+   ▼
+Firebase Auth + Firestore (Phase 5)  ← per-user inventory keyed by uid; rules enforce isolation
+```
+**Parity note:** `contracts.py` validators do **NOT** cover `share_lag*`/`share_t` (those are serve-time, only in `scheduleServer`'s Pydantic models) — so "reuse contracts.py" does **not** validate the lag-join. The golden-file diff (Phase 1.4) is the authoritative lag-join gate, with an explicit float tolerance (the merge mean-pools duplicate `(month,key)` rows, so re-derivation can differ by float noise). `options_*.json` is sourced from **`lookup.csv`** (191 rows), independently of the predictions parquets.
+
+**`scheduleServer.py` fate:** retained but **slimmed** — imports the shared `pipelines/serving/` module, no longer loads `.env`. It's a local dev convenience + the schema reference; the shared module (not the server) is the single source of truth.
+
+### MLflow + model lifecycle
+```
+Artifact Registry ← dedicated MLflow image (Cloud Build): mlflow==<pin> + psycopg2-binary + google-cloud-storage + gunicorn
+   ▼
+Cloud Run v2 "mlflow"  (PRIVATE: no allUsers run.invoker; service_account = sa-mlflow)
+   ├─ args: mlflow server --backend-store-uri postgresql+psycopg2://USER:PASS@/DB?host=/cloudsql/<CONN>
+   │        --serve-artifacts --artifacts-destination gs://<artifacts>/mlflow --host 0.0.0.0 --port $PORT
+   ├─ Cloud SQL via template.volumes.cloud_sql_instance + volume_mounts (socket at /cloudsql)
+   ├─ DB password via env value_source.secret_key_ref (Secret Manager)  [sa-mlflow needs secretAccessor]
+   └─ artifacts PROXIED through the server → only sa-mlflow has GCS objectAdmin; clients need only run.invoker
+   ▲
+   callers set MLFLOW_TRACKING_URI + present an IAM ID token (audience = service URL)
 ```
 
-**Serving (both models, static).** The publisher does today's startup work once per month — runs `_attach_lag_shares()` against `merged_univariate/merged_fingerprint`, computes the `lags_synthetic` flag, drops unknown columns, validates via `contracts.py` — and writes the four JSON artifacts above. `options_*.json` is reshaped into the **exact** nested `{colors, categories, materials, appearances, genders}` shape `scheduleServer` returns today, so `api.js` `mapOptionsToLookupOptions` / `indexOptionsById` are untouched. Frontend filtering stays client-side over the 119-row array.
+---
 
-**Inventory + auth (the only dynamic surface).** Firebase Auth replaces the `auth.js` `DEMO_USER` stub (loaded as the Firebase UMD/compat CDN bundle to honor the no-npm constraint). Per-user inventory lives in a Firestore collection keyed by the authenticated `uid`, with security rules enforcing `request.auth.uid` ownership. `dataProvider.js` swaps `useState([])` for a scoped Firestore read and routes `addItem()` to a Firestore write; inventory survives reload. **Forecasts are never duplicated into Firestore** — each inventory item's 5-D tags resolve to its forecast by fetching the static fingerprint JSON (or synthesizing on 404), exactly as today.
-
-**FastAPI.** Removed from serving. Kept as a local dev convenience + **contract reference**: its Pydantic models stay the schema the publisher must emit, and `_attach_lag_shares()` is imported by the publisher so the logic can't drift. No hosted app server, no `/ui` mount, no CORS coupling.
-
-**Dockerfile.** Deleted.
+## 5. Security posture (non-negotiable)
+- **No public + unauthenticated compute, ever.** MLflow Cloud Run: no `allUsers` `run.invoker` binding (that's how v2 enforces private — there is no `--no-allow-unauthenticated` in HCL). Static serving is public but **read-only static files, no compute behind them**.
+- **Least-privilege dedicated SAs.** `sa-mlflow` = Cloud SQL Client + objectAdmin on **the one artifacts bucket** (bucket-scoped `storage_bucket_iam_member`) + `secretmanager.secretAccessor` on the DB-password secret. Never the default Compute SA.
+- **Secrets in Secret Manager**, injected at deploy. (Caveat: `google_sql_user.password` still lands in TF state in plaintext — so the state bucket being private+versioned is what protects it; noted, not ignored.)
+- **Private by default.** Cloud SQL: no authorized networks (the Cloud Run connector is IAM-gated); upgrade path is private-IP + VPC connector. Artifacts/state buckets: uniform bucket-level access + public-access-prevention enforced.
+- **Reproducible = recoverable.** All infra in Terraform → suspect resource is `destroy`+re-apply.
+- **MLflow pinned + patched** in a dedicated image. (Dropped: "basic-auth on top of IAM" — IAM `run.invoker` is the real control; a shared basic-auth secret tends to get hardcoded, the exact anti-pattern this section forbids.)
 
 ---
 
-## 5. Scope: now vs. deferred
+## 6. Infrastructure as Code (Terraform)
 
-| Phase | What | In this slice? |
-|------|------|----------------|
-| **A — Static serving** | Publisher + static JSON + repoint frontend + GCS/CDN + delete FastAPI/Dockerfile (Steps 1–4) | ✅ **Now** |
-| **A — IaC** | Terraform the GCS bucket + Firebase Hosting site | ✅ **Now** |
-| **B — Dynamic tier** | Firebase Auth + Firestore inventory (Steps 5–6) | ⏭ **Next slice** |
-| **B — IaC** | Terraform Firestore (db + rules) + Identity Platform config | ⏭ **Next slice** |
-| **C — Optional/later** | Cloud Scheduler + Vertex/Cloud Run tick cadence; BigQuery/Snowflake external table over the GCS parquet (analytics signal, **not** serving) | 🔮 Later |
+**`infra/` root module**, applied **incrementally per phase**. Remote state in a **GCS bucket kept in a SEPARATE bootstrap config** (applied once, `prevent_destroy = true`) — so Terraform never manages the backend it depends on. State holds the DB password + SA details → the state bucket is private, versioned, uniform-access, public-access-prevention enforced, IAM-bound only to the Terraform runner.
 
-Phase A is deadline-safe and fully reversible. It kills the server, tells the whole *"precomputed batch = static-publish, not hosted-inference"* DE story, and commits to **no** risky auth/inventory rebuild. Phase B (the hard greenfield part: sessions, security rules, isolation) is a clean follow-on, presentable in interviews as designed-and-scoped.
+**Provider split (corrected):** `google-beta` is needed **only** for `google_firebase_project` / `_web_app` / `_hosting_site`. `google_identity_platform_config`, `google_firestore_database`/`_index`, `google_firebaserules_*`, Cloud Run/SQL/Storage/Secret Manager all live in the **stable `google` provider** — don't beta-pin them.
 
----
+| Concern | Key resources | Phase |
+|---|---|---|
+| APIs | `google_project_service` for: run, sqladmin, firestore, firebasehosting, identitytoolkit, secretmanager, artifactregistry, **cloudbuild**, **servicenetworking** (if private-IP SQL), **vpcaccess** (if VPC connector) | 0 |
+| State | separate bootstrap `google_storage_bucket` (versioned, private, `prevent_destroy`) | 0 |
+| Build identity | `roles/artifactregistry.writer` on the repo for the Cloud Build SA (push stays CLI) | 0 |
+| Static serving | `google_firebase_project`/`_web_app`/`_hosting_site` (**beta**) | 2 |
+| MLflow runtime | `google_artifact_registry_repository`, `google_cloud_run_v2_service` (Cloud SQL volume, secret env, `sa-mlflow`), `google_cloud_run_v2_service_iam_member` (run.invoker — to named principals/`sa-tick`, never allUsers) | 3 |
+| MLflow backend | `google_sql_database_instance`, `_database`, `_user`, `google_secret_manager_secret`/`_version` (DB pw) | 3 |
+| MLflow identity/artifacts | `google_storage_bucket` (fresh artifacts bucket, UBLA+PAP), `google_service_account` `sa-mlflow`, scoped IAM bindings | 3 |
+| Dynamic tier | `google_firestore_database`/`_index`, `google_firebaserules_ruleset`/`_release`, `google_identity_platform_config` (stable) | 5 |
 
-## 6. The concrete moves (solid terms)
-
-### Phase A — static serving
-
-1. **Add `pipelines/monthly/publish.py`.** Import and reuse `scheduleServer._attach_lag_shares()` (or lift it into a shared module) + `contracts.py` validators so the lag-join + `lags_synthetic` logic is **byte-identical** to today's startup join. Emit `trends_<YYYY-MM>.json`, `fingerprint_<YYYY-MM>.json`, `options_<YYYY-MM>.json`, `health_<YYYY-MM>.json` to **local disk first**. Wire it into the tick after `predict` (and as a standalone `python -m pipelines.monthly publish`).
-2. **Golden-file test the publisher** *(the linchpin)*. Curl the running FastAPI (`/trends`, `/options`, `/forecast/fingerprint`, `/health`) into fixtures, then assert each emitted JSON equals the API's response for the same anchor. This pins correctness before any cloud is involved — if the lag-join diverges by even a rounding, charts shift.
-3. **Repoint the frontend at static artifacts.** Point `apiFetcher` / `window.API_BASE` at the JSON files (same-origin from disk for local verification). Confirm Trends, Add Item, Item Detail, and the 404→synthesis fallback render **identically**. The 15s `/health` poll becomes an on-mount read (data is static-until-tick).
-4. **Publish to GCS + CDN.** Upload artifacts + the SPA to the Terraformed bucket behind Firebase Hosting; cache-bust per tick (versioned `<YYYY-MM>` key + a `latest` pointer, or explicit invalidation). **Delete the Dockerfile.** → live, server-less demo.
-
-**IaC (Phase A):** `infra/` Terraform module — `google_storage_bucket` (+ `google_storage_bucket_iam_member` for public/CDN read), `google_firebase_project`, `google_firebase_hosting_site` (google-beta). Content deploys stay in `firebase deploy`/`gsutil` (run by the tick/CI), **not** Terraform.
-
-### Phase B — dynamic tier (next slice)
-
-5. **Firebase Auth.** Load the UMD/compat bundle via `<script>`; replace `auth.js` `login()/logout()`/session read with Firebase calls; store the user from token claims. Gate **nothing** on the static endpoints (identical for everyone) — only inventory.
-6. **Firestore inventory.** Collection keyed by `uid`; security rules for per-user isolation; rewire `dataProvider.js` initial state to a scoped read and `addItem()` to a write. Verify inventory survives reload and is isolated across two test users.
-
-**IaC (Phase B):** `google_firestore_database` + `google_firestore_index` + `google_firebaserules_ruleset`/`_release` for the rules; `google_identity_platform_config` (google-beta) for Auth. Document honestly that a couple of Firebase Auth provider toggles remain console steps.
+**Terraform = infra. CLI/CI = content & images:** `firebase deploy` (SPA + JSON), `gsutil` (objects), Cloud Build / image push. Reference IAM bindings by attribute (SA email, bucket name) not literals so the DAG resolves. A few Firebase Auth provider toggles remain console steps. (Confirm exact beta-provider resource names at apply time.)
 
 ---
 
-## 7. Consequences & caveats
+## 7. Build sequence
 
-- **Lag-join parity is a correctness risk.** "Reuse `_attach_lag_shares` so the JSON is identical" is the whole game — the Step-2 golden-file test is **not optional**.
-- **Cache invalidation is new.** A tick must reliably bust the CDN (versioned key + `latest` pointer, or explicit invalidation) or users see last month's trends. Low effort, but genuinely new.
-- **Buildless-frontend SDK tax.** Firebase Auth/Firestore must come from UMD/compat CDN bundles wired as `window` globals in strict `<script>` order — no modules, no `process.env`. A CDN version mismatch can break the app silently. (The README already warns about this.)
-- **Hybrid surface.** Two serving mechanisms (static CDN for reads, Firestore for the dynamic surface). Justify in one line: *"static-until-tick global data is a CDN problem; per-user mutable state is a DB problem."*
-- **Deferring Phase B** means the live demo still can't truly log in or persist inventory (pre-existing gaps, not regressions). Frame the demo around Trends/forecast exploration (fully functional statically) and present persistence as the scoped next slice.
-- **Scale assumption.** This is portfolio-scale. If fingerprint coverage exploded well past today's 0.32% of the 1.2M universe, or live per-request inference were ever needed, revisit toward a queryable store. Nothing in current reality is close.
+Ordered by dependency. **Why this order:** local-first de-risks the riskiest swap before any cloud; the user-facing static demo lands before internal tooling; MLflow is independent infra; lifecycle wiring needs MLflow; the dynamic tier (riskiest greenfield) is last.
+
+| Phase | Goal | Depends on |
+|------|------|-----------|
+| **0 — Foundations** | Billing ✅ + TF skeleton (separate state bootstrap, providers, APIs, build identity) | — |
+| **1 — Tick hardening + publisher + remediation** | Immutable raw, build_cube extraction, **local champion guard**, `publish.py`, golden test, frontend repoint (incl. fingerprint rewrite), incident remediation — a working **local** static demo | — (local) |
+| **2 — Static serving live** | Firebase Hosting (TF) + deploy; delete FastAPI/Dockerfile/.dockerignore; CI deploy job | 1, 0 |
+| **3 — MLflow rebuilt (private)** | Cloud Run + Cloud SQL + GCS + `sa-mlflow` (TF); image; validate private access | 0 |
+| **4 — Lifecycle wiring** | `train` logs → `evaluate` flips `champion` alias → `predict` loads it (supersedes the local guard) | 3 |
+| **5 — Dynamic tier (deferred)** | Firestore + Auth (TF) → persistent inventory + login | 0 |
+
+**Parallelism:** Phases 0+1 overlap. **Phase 3 depends only on Phase 0** (no shared code with 1/2) and its long pole (Cloud SQL provisioning + image build) should **start as soon as Phase 0 lands, in parallel with the Phase-1 local work.** Phase 2 depends on 1 (the JSON) + 0 (Firebase project). 4 requires 3. 5 last.
 
 ---
 
-## 8. AWS / Snowflake mapping (for interviews)
+## 8. Concrete moves (per phase)
 
-The architecture is cloud-agnostic in shape; built on GCP, but articulate the transfer:
+### Phase 0 — Foundations
+- Billing linked ✅. Scaffold `infra/`: providers; **separate** state-bucket bootstrap (`prevent_destroy`, then `terraform init -migrate-state`); `google_project_service` for the API set above; Cloud Build SA + `artifactregistry.writer`.
 
-| GCP (built) | AWS/Snowflake (equivalent) |
+### Phase 1 — Tick hardening + publisher + remediation *(all local)*
+1. **Immutable raw landing zone.** Scrapers write `items_<retailer>_<YYYY-MM>.csv` (within-month re-run overwrites that month). **Touch-set:** `items_csv_path_for` + `ITEMS_FILE_GLOB`/`discover_items_files` in `build_live_cube.py` + `_universe_smoke.py` (globs `items_*.csv`). Keep a **back-compat glob** (match both `items_<retailer>.csv` and `items_<retailer>_<YYYY-MM>.csv`) during transition.
+2. **Extract `build_cube` from `scrape`** (it's an *extraction*, not a promotion — today `build_live_cube` runs *inside* `run_scrape`, and `cli.py` FULL_ORDER has **no** build_cube stage). Remove the `_run_one('build_live_cube.py')` tail from `scrape.py`; add `run_build_cube()` + module; insert `build_cube` into FULL_ORDER (between scrape and aggregate); add a subparser + `--skip-build-cube`/`--skip-scrape` interaction. Fix the §1 header's stage order to match the code once done.
+3. **Local champion guard (pull-forward — closes the cached-wrong-weights bug NOW).** In `evaluate.py`: archive each run's joblibs to `data/models/runs/<ts>/` and, on a candidate **loss**, **revert** the canonical joblibs to the prior champion's (today `train` overwrites them and `evaluate` doesn't revert, so `predict` bakes losing weights into the parquet the publisher then CDN-caches for a month). MLflow-independent; Phase 4's alias later supersedes it.
+4. **`pipelines/serving/` shared module + `pipelines/monthly/publish.py`.** Lift `_attach_lag_shares` + lag/`_opt_float` + the Pydantic schemas out of `scheduleServer` into a new `pipelines/serving/` package (`__init__.py`); have **both** `publish.py` and a slimmed `scheduleServer` import it. `publish.py` reads `predictions_*` + `merged_*` + `reference/lookup.csv`, emits versioned `*_<YYYY-MM>.json` **and** canonical `*.json` (+ define **"latest pointer" concretely**: the canonical month-less files the SPA fetches at today's fixed paths, cache-busted via Hosting `Cache-Control`).
+5. **Golden-file test (the linchpin — make it runnable).** It cannot curl a live server (CI runs only `pytest tests`) and its inputs are gitignored. So: **commit fixtures** under `tests/serving/fixtures/` (capture once locally), and **un-ignore + commit the ~5 KB `lookup.csv` and a tiny `merged_*` snapshot** the publisher needs (or have the publisher fetch them from GCS). Test = `tests/serving/test_publish.py` imports `publish.py` functions directly and asserts emitted JSON == committed fixture, **with a float tolerance** on the lag columns. State plainly that `contracts.py` does not cover `share_lag*`.
+6. **Repoint the frontend (AFTER 4→5 pass).** Point `apiFetcher`/`window.API_BASE` at the canonical JSON. **Fingerprint rewrite (the one real client change):** rewrite `fetchFingerprintSignals` + the `/forecast/fingerprint` URL builder (`frontend/api.js`, `frontend/screens/ScreenItem.jsx`) to fetch `fingerprint.json` once, index by the 5-D key, return hit-or-null, route null into `synthesizeFingerprintSeries`. `/trends`/`/options`/`/health` shapes are preserved. Verify all screens render identically.
+7. **Remediation (§2.5):** rotate `VERTEX_API_KEY`; scrub repo of the IP/port/bucket; (delete `.env` happens in Phase 2 with FastAPI).
+
+### Phase 2 — Static serving live
+- **TF:** Firebase project + Hosting site. **Deploy** SPA + canonical JSON via `firebase deploy` (publisher writes JSON into the deploy dir). **CI:** add a deploy job (or a documented manual `firebase deploy` runbook) naming the Hosting token / Workload-Identity SA; wire the `tests/serving` golden test as a **gate**.
+- **Delete** `Dockerfile` + the orphaned `.dockerignore`; drop FastAPI from serving (slimmed `scheduleServer` stays as the local contract ref, no `.env`); **delete `backend/services/.env`**.
+
+### Phase 3 — MLflow rebuilt (private)
+- **Image:** dedicated `Dockerfile.mlflow` (NOT the tick's `requirements.txt`): `mlflow==<pin>`, `psycopg2-binary`, `google-cloud-storage` (the proxied GCS path needs it; the repo ships `gcsfs`, which is wrong here), `gunicorn`; `CMD` binds `--host 0.0.0.0 --port $PORT`. Build via Cloud Build → Artifact Registry.
+- **TF (Cloud Run v2 HCL, not gcloud flags):** Cloud SQL (`google_sql_database_instance` — public IP, **no authorized networks**, or private-IP+VPC per §6) + DB + user; password in Secret Manager. Cloud Run v2 service: `template.volumes.cloud_sql_instance` + `volume_mounts` (socket `/cloudsql/<CONN>`); `template.service_account = sa-mlflow`; DB pw via `env.value_source.secret_key_ref`; MLflow command via `template.containers.args` = `mlflow server --backend-store-uri postgresql+psycopg2://…?host=/cloudsql/<CONN> --serve-artifacts --artifacts-destination gs://<artifacts>/mlflow --host 0.0.0.0 --port $PORT` (**`--artifacts-destination`, NOT `--default-artifact-root`** — the latter makes clients write GCS directly, breaking the proxy/least-priv design). **Private = simply no `allUsers` `run.invoker` binding.** Fresh artifacts bucket (UBLA + PAP). `sa-mlflow` bindings: Cloud SQL Client, objectAdmin on the artifacts bucket only, secretAccessor on the DB secret.
+- **Validate:** `gcloud run services proxy mlflow` → hit UI/API locally; confirm an experiment + a logged run round-trips through Cloud SQL + GCS.
+
+### Phase 4 — Lifecycle wiring *(supersedes the local guard)*
+1. Extract the model-registration logic from `notebooks/_gen_4_hyperparameter_search.py` into `pipelines/training/registry.py` (`__init__.py`). **Note:** that notebook flips only the **`candidate`** alias and treats `champion` as a *manual* promotion. So Phase 4 introduces a **NEW champion auto-flip policy** in `evaluate.py` (decided on `holdout_wmae`, keeping the existing `cand ≤ incb` tie-break + per-model independence) — this is a policy change layered on the candidate-registration code, **not** a mechanical lift.
+2. `train.py` logs each RF as a new version of `trndly_univariate`/`trndly_fingerprint` — gated behind `MLFLOW_TRACKING_URI` present, so the offline path still works.
+3. `evaluate.py` flips the `champion` alias on a win.
+4. `predict.py` loads the **champion** version.
+5. **Auth to private MLflow (must be named):** dev — operator runs `gcloud run services proxy mlflow` and sets `MLFLOW_TRACKING_URI` to the local proxy; automation — run the tick as a **Cloud Run Job** whose SA holds `run.invoker`, attaching an **ID token** (audience = service URL) via `MLFLOW_TRACKING_TOKEN`/`fetch_id_token`. Until automation lands, the champion-flip only happens on a developer-run tick. **`--allow-unauthenticated`/`allUsers` is explicitly forbidden as a shortcut.**
+- **CI:** MLflow-touching tests gated behind `MLFLOW_TRACKING_URI`-absent so CI passes without MLflow. Add `tests/monthly/test_registry.py` (present-vs-absent branches, mocked `MlflowClient`).
+
+### Phase 5 — Dynamic tier *(deferred)*
+- **TF:** Firestore (db + indexes + rules) + Identity Platform (Auth). Firestore rules **must** scope every read/write to `request.auth.uid == uid` (never just `!= null`), gated by an **emulator/rules unit test + two-user isolation check** (not a manual "verify"). Pin the Firebase compat UMD SDK to an exact version (+ SRI).
+- **Firebase Auth** (UMD/compat bundle) replaces the `auth.js` stub; gate only inventory. **Firestore inventory** keyed by `uid`; rewire `dataProvider.js`.
+
+---
+
+## 9. Consequences & caveats
+- **Lag-join parity is the #1 risk** — `contracts.py` does NOT validate it; the golden-file diff (with float tolerance) is the gate. Mandatory.
+- **Cache invalidation is new** — canonical files + Hosting `Cache-Control`, or users see last month's trends.
+- **Buildless-frontend SDK tax** — Firebase SDKs as pinned UMD/compat bundles in strict `<script>` order; version mismatch breaks silently.
+- **MLflow on Cloud Run** — cold starts (fine interactively); proxied artifacts so only `sa-mlflow` touches GCS; private = no `allUsers` invoker; the tick needs an ID token (not a generic access token).
+- **TF state holds secrets** — the DB password renders into state; the private+versioned state bucket is the control.
+- **Deferring Phase 5** — the live demo can't truly log in / persist inventory yet (pre-existing gaps); frame the demo around the fully-functional Trends/forecast exploration.
+
+---
+
+## 10. Locked sub-decisions
+- **Fingerprint serving:** single `fingerprint.json` bundle (not sharded); client does the 5-D lookup.
+- **Cloud:** GCP; **MLflow compute:** Cloud Run (private), not a VM.
+- **Warehouse:** none in the serving path; optional analytics external table later.
+- **IaC:** Terraform for all infra (greenfield); content/images via CLI/CI; state in a separate bootstrap.
+- **Sparse fingerprint coverage** (~3,830 observed of a mostly-meaningless 1.2M max) is **intrinsic** — preserve the miss→synthesis path; quality is a model-performance question.
+
+---
+
+## 11. Deferred / out of scope (now)
+- **Résumé accuracy** — evaluate post-build (the GCP-MLflow claim needs revisiting; lead on the verifiable pipeline/contracts/256-tests/CI).
+- **Model performance** — champion quality / drift / synthesis quality — separate phase after wiring.
+- **Tick cadence automation** (Cloud Scheduler + Cloud Run Job + the MLflow ID-token path) — a clean follow-on; note it's also what unblocks unattended Phase-4 champion-flips.
+
+---
+
+## AWS / Snowflake mapping (for interviews)
+| GCP (built) | AWS/Snowflake |
 |---|---|
-| predictions Parquet in GCS | S3; a Snowflake/BigQuery **external table** over the same Parquet (analytics layer, not serving) |
+| predictions Parquet in GCS | S3; Snowflake/BigQuery external table (analytics, not serving) |
 | Firebase Hosting + CDN | S3 + CloudFront |
-| Firestore | DynamoDB |
-| Firebase Auth | Cognito |
-| Cloud Scheduler + Vertex/Cloud Run (later) | EventBridge + Step Functions/ECS |
-
----
-
-## 9. Locked sub-decisions
-
-- **Fingerprint serving:** single `fingerprint.json` bundle (0.1 MB, one fetch) — not sharded.
-- **Warehouse:** **no** Snowflake/BigQuery in the serving path; optional analytics external table later, framed honestly.
-- **Cloud:** GCP (AWS-native considered and rejected — would fork the pipeline across two clouds for résumé optics only).
-- **IaC:** Terraform, authored greenfield in `infra/`; content deploys via CLI/CI.
-
----
-
-## 10. Pipeline hardening (decided additions, from the data-flow review)
-
-These came out of reviewing the end-to-end data lineage. They're small, they all live in the tick, and together they make the lineage **reproducible end-to-end** (immutable raw → rederivable everything).
-
-| Change | Why | Lands with | Effort |
-|---|---|---|---|
-| **Immutable per-month raw landing zone** — scrapers write `items_<retailer>_<YYYY-MM>.csv` (or `raw/items/<YYYY-MM>/`); within-month re-runs overwrite *that month's* file (acceptable); `build_live_cube` reads the current month's set | Today the raw `items_<retailer>.csv` is a fixed name overwritten every scrape — source data is destroyed monthly and past cubes can't be rederived if cube logic changes. Raw should be the immutable layer. | Phase A build pass | S |
-| **Split `build_cube` out of `scrape`** — promote `build_live_cube` to its own tick stage: `scrape → build_cube → aggregate → …` | Separates the flaky ~10-min network step from the deterministic ~3s transform; creates a retry/cache boundary (rerun the transform without re-hitting four retailer APIs); matches the orchestration + 3-image plan | Phase A build pass | S |
-| **Champion gate must govern the *served* weights** — today `train` overwrites `*_model.joblib` **before** `evaluate` runs, so a rejected candidate can still be the model `predict` loads. Make the champion pointer determine the served model | Correctness: a model that *lost* the holdout-wMAE comparison must not serve forecasts | Best landed **with the MLflow registry wiring** (roadmap #1): "champion" = a registry alias → an immutable version; real promotion + rollback; `predict` loads the champion version. Interim local fallback: archive joblibs per run (`data/models/runs/<ts>/`) + revert on a loss | M |
-
-Notes:
-- The first two are pure pipeline hygiene and pair naturally with building the publisher (Phase A).
-- The third is the one item that touches **model lifecycle** rather than serving — sequence it alongside the registry work, not the static-publish slice.
-- **Not changing:** sparse fingerprint coverage (~3,830 observed configs of a mostly-meaningless 1.2M cartesian max). This is intrinsic — the model has no inputs for unobserved combos — so the frontend marginal-product synthesis fallback is the principled cold-start. The static-publish design must preserve the miss→synthesis path (it does). Synthesis *quality* is a model-performance question, deferred.
+| Cloud Run (MLflow) | ECS/Fargate or App Runner behind IAM |
+| Cloud SQL Postgres | RDS Postgres |
+| Firestore / Firebase Auth | DynamoDB / Cognito |
+| Cloud Scheduler + Cloud Run Job (later) | EventBridge + Step Functions/ECS |

@@ -375,12 +375,12 @@ architecture is designed to swap each piece in without restructuring.
 
 `paths.py` is the single chokepoint. Migration adds a backend abstraction
 (e.g., `fsspec`-resolved paths or a `gs://`-aware helper) without touching
-consumer code. `gcsfs` is already a transitive dependency. Target bucket
-layout (the bucket `gs://trndly-mlops-us/` already exists):
+consumer code. `gcsfs` is already a transitive dependency. Illustrative target bucket
+layout (buckets are provisioned via Terraform per the build plan,
+[serving-redesign.md](serving-redesign.md)):
 
-- `gs://trndly-mlops-us/data/predictions/<YYYY-MM>/`
-- `gs://trndly-mlops-us/data/processed/`
-- `gs://trndly-mlops-us/mlflow/`
+- `gs://<data-bucket>/data/predictions/<YYYY-MM>/`
+- `gs://<data-bucket>/data/processed/`
 
 ### Cloud cadence: manual CLI → Cloud Scheduler + Vertex job
 
@@ -390,13 +390,12 @@ month. The CLI's stage order doesn't change.
 
 ### MLflow registry: local file → managed champion alias
 
-A self-hosted MLflow tracking + model registry server **already exists**
-on a GCP VM (`MLFLOW_TRACKING_URI=http://34.169.170.34:5000`, Postgres
-backend store, GCS-backed artifacts under `gs://trndly-mlops-us/mlflow/`).
-It is used **today** during model development and hyperparameter sweeps
-(`notebooks/_gen_4_hyperparameter_search.py` logs runs to `MLFLOW_TRACKING_URI`
-when that env var is set — the GCP VM — otherwise to a local `file:../mlruns`
-store). What is
+A self-hosted MLflow tracking + model registry server was used during
+development (`notebooks/_gen_4_hyperparameter_search.py` logs runs to
+`MLFLOW_TRACKING_URI` when set, otherwise a local `file:../mlruns` store).
+That dev server has since been **retired**; the planned replacement is a
+**private, managed MLflow** (Cloud Run + Cloud SQL + GCS) — see
+[serving-redesign.md](serving-redesign.md). What is
 **not** yet wired up:
 
 - The monthly tick's champion management. `evaluate.py` is explicitly the
