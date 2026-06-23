@@ -271,8 +271,8 @@ for the full method.
 ```bash
 cd /Users/jackcdawson/Desktop/trndly/trndly
 
-# Full monthly tick (scrape → aggregate → features → train → evaluate
-# → predict). ~15 min including scrape.
+# Full monthly tick (scrape → build_cube → aggregate → features → train →
+# evaluate → predict). ~15 min including scrape.
 .venv/bin/python -m pipelines.monthly run
 
 # Skip scrape stage (use existing items_*.csv). ~1 min.

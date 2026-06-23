@@ -57,7 +57,7 @@ python -m venv .venv
 .venv/bin/python notebooks/_run_notebook.py notebooks/0_clean_historical.ipynb
 .venv/bin/python notebooks/_run_notebook.py notebooks/1_aggregate_historical.ipynb
 
-# Monthly tick: scrape → aggregate → features → train → evaluate → predict
+# Monthly tick: scrape → build_cube → aggregate → features → train → evaluate → predict
 .venv/bin/python -m pipelines.monthly run
 
 # Or skip scrape if items_*.csv already on disk

@@ -332,54 +332,100 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    out_dir = Path(args.output_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
+def run_build_cube(
+    input_paths: list | None = None,
+    *,
+    signals_dir: str | Path | None = None,
+    out_dir: str | Path | None = None,
+    verbose: bool = False,
+) -> dict:
+    """Build the live fingerprint + univariate cubes from ``items_*.csv``.
 
-    if args.input:
-        input_paths = [Path(p).expanduser().resolve() for p in args.input]
+    This is the ``build_cube`` stage entry point for the monthly tick
+    (``python -m pipelines.monthly build_cube``). It used to run *inside*
+    ``scrape``; it is now its own stage between ``scrape`` and ``aggregate``.
+
+    When ``input_paths`` is None, items are auto-discovered from ``signals_dir``
+    (default ``RAW_ITEMS_DIR``) via the immutable-raw discovery (monthly files
+    preferred over legacy). Writes ``live_*_<YYYY-MM>.parquet`` to ``out_dir``
+    (default ``PROCESSED_DIR``). Returns a summary dict; raises
+    ``FileNotFoundError`` when no items files are found.
+    """
+    out = Path(out_dir).expanduser().resolve() if out_dir else PROCESSED_DIR
+    out.mkdir(parents=True, exist_ok=True)
+
+    if input_paths:
+        resolved = [Path(p).expanduser().resolve() for p in input_paths]
     else:
-        input_paths = discover_items_files(Path(args.signals_dir).expanduser().resolve())
-        if not input_paths:
-            print(
-                f"ERROR: no {ITEMS_FILE_GLOB} files in {args.signals_dir}.\n"
-                f"Run a retailer scraper first."
+        base = (
+            Path(signals_dir).expanduser().resolve()
+            if signals_dir
+            else DEFAULT_SIGNALS_DIR
+        )
+        resolved = discover_items_files(base)
+        if not resolved:
+            raise FileNotFoundError(
+                f"no {ITEMS_FILE_GLOB} files in {base}; run a retailer scraper first."
             )
-            sys.exit(1)
 
-    print("Building live cubes from:")
-    for p in input_paths:
-        print(f"  {p.name}")
-    items = load_items(input_paths)
-    months = sorted(items["month"].unique().tolist())
-    print(
-        f"\nLoaded {len(items):,} articles across {len(months)} month(s); "
-        f"months={[pd.Timestamp(m).strftime('%Y-%m') for m in months]}"
-    )
+    if verbose:
+        print("Building live cubes from:")
+        for p in resolved:
+            print(f"  {p.name}")
 
+    items = load_items(resolved)
     n_before = len(items)
     items = collapse_unisex(items)
     n_collapsed = n_before - len(items)
-    if n_collapsed:
-        print(
-            f"Collapsed {n_collapsed:,} (M+W)-pair rows into "
-            f"{n_collapsed} unisex rows ({n_before:,} → {len(items):,})."
-        )
 
     fingerprint = build_fingerprint_cube(items)
     univariate = build_univariate_cube(items)
+    written = write_per_month_cubes(fingerprint, univariate, out)
 
-    written = write_per_month_cubes(fingerprint, univariate, out_dir)
-    for fp_path, uv_path in written:
-        n_fp = (fingerprint["month"] == pd.Timestamp(fp_path.stem.split("_")[-1] + "-01")).sum()
-        n_uv = (univariate["month"] == pd.Timestamp(uv_path.stem.split("_")[-1] + "-01")).sum()
-        print(f"\nWrote {n_fp:>6} fingerprint rows  → {fp_path}")
-        print(f"Wrote {n_uv:>6} univariate rows   → {uv_path}")
+    months = sorted(
+        {pd.Timestamp(m).strftime("%Y-%m") for m in fingerprint["month"].unique()}
+    )
+    summary = {
+        "months": months,
+        "n_articles": int(len(items)),
+        "n_collapsed": int(n_collapsed),
+        "fingerprint_rows": int(len(fingerprint)),
+        "univariate_rows": int(len(univariate)),
+        "files": [(str(fp), str(uv)) for fp, uv in written],
+    }
 
-    print("\nUnivariate share-sum invariant per (month, dimension):")
-    sums = univariate.groupby(["month", "dimension"], observed=True)["share_articles"].sum()
-    print(f"  min={sums.min():.6f}  max={sums.max():.6f}  (expected ≈ 1.0)")
+    if verbose:
+        if n_collapsed:
+            print(
+                f"Collapsed {n_collapsed:,} (M+W)-pair rows into unisex "
+                f"({n_before:,} → {len(items):,})."
+            )
+        for fp_path, uv_path in written:
+            print(f"Wrote → {fp_path}")
+            print(f"Wrote → {uv_path}")
+        sums = univariate.groupby(
+            ["month", "dimension"], observed=True
+        )["share_articles"].sum()
+        print(
+            "Univariate share-sum invariant per (month, dimension): "
+            f"min={sums.min():.6f} max={sums.max():.6f} (expected ≈ 1.0)"
+        )
+
+    return summary
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        run_build_cube(
+            input_paths=args.input,
+            signals_dir=args.signals_dir,
+            out_dir=args.output_dir,
+            verbose=True,
+        )
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

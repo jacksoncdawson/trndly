@@ -48,22 +48,28 @@ how to invoke each stage, what to expect, and how to debug a failure.
 .venv/bin/python -m pipelines.monthly run
 ```
 
-Stage order: `scrape → aggregate → features → train → evaluate → predict`.
+Stage order: `scrape → build_cube → aggregate → features → train → evaluate → predict`.
 Wall-clock: ~15 minutes, dominated by the scrape stage (~9–10 min with
 PDP enrichment).
 
-The `run` subcommand takes exactly one option, `--skip-scrape` (see
-below). It does **not** forward scraper flags — to control the scrapers
-(subset of retailers, PDP enrichment, skipping the cube build) call the
-standalone scrape module directly (see the `scrape` stage section).
+The `run` subcommand takes two options, `--skip-scrape` and
+`--skip-build-cube` (see below). It does **not** forward scraper flags — to
+control the scrapers (subset of retailers, PDP enrichment) call the standalone
+scrape module directly (see the `scrape` stage section).
 
-### Skip the scrape
+### Skip stages
 
-If `data/raw/items/items_*.csv` and the corresponding
-`data/processed/live_*_<YYYY-MM>.parquet` are already on disk:
+If `data/raw/items/items_*.csv` are already on disk, skip the scrape:
 
 ```bash
 .venv/bin/python -m pipelines.monthly run --skip-scrape
+```
+
+If the `data/processed/live_*_<YYYY-MM>.parquet` cubes are also current, skip
+the rebuild too:
+
+```bash
+.venv/bin/python -m pipelines.monthly run --skip-scrape --skip-build-cube
 ```
 
 This typically takes ~1–2 minutes (train usually dominates).
@@ -72,6 +78,7 @@ This typically takes ~1–2 minutes (train usually dominates).
 
 ```bash
 .venv/bin/python -m pipelines.monthly scrape
+.venv/bin/python -m pipelines.monthly build_cube
 .venv/bin/python -m pipelines.monthly aggregate
 .venv/bin/python -m pipelines.monthly features
 .venv/bin/python -m pipelines.monthly train
@@ -91,16 +98,16 @@ exits non-zero on any stage failure.
 
 ### `scrape` — `pipelines.monthly.scrape`
 
-Subprocesses each retail scraper sequentially:
+Subprocesses each retail scraper sequentially, writing the immutable
+per-month raw landing zone (within-month re-runs overwrite that month):
 
-1. `gap_scraper.py`     → `data/raw/items/items_gap.csv`
-2. `uniqlo_scraper.py`  → `data/raw/items/items_uniqlo.csv`
-3. `american_eagle_scraper.py` → `data/raw/items/items_american_eagle.csv`
-4. `hollister_scraper.py` → `data/raw/items/items_hollister.csv`
+1. `gap_scraper.py`     → `data/raw/items/items_gap_<YYYY-MM>.csv`
+2. `uniqlo_scraper.py`  → `data/raw/items/items_uniqlo_<YYYY-MM>.csv`
+3. `american_eagle_scraper.py` → `data/raw/items/items_american_eagle_<YYYY-MM>.csv`
+4. `hollister_scraper.py` → `data/raw/items/items_hollister_<YYYY-MM>.csv`
 
-Then runs `build_live_cube.py` which unions the four CSVs and writes
-`data/processed/live_{fingerprint,univariate}_<YYYY-MM>.parquet` for the
-current month.
+Building the live cubes is the **separate `build_cube` stage** below — it used
+to run inside `scrape`.
 
 **Flags (standalone module only).** The monthly-CLI `scrape` subcommand
 above takes no options. To control the scrapers, invoke the module
@@ -113,11 +120,20 @@ directly:
 - `--retailers gap,uniqlo` — run a subset (default: all four)
 - `--no-enrich-pdp` — skip PDP material enrichment for ~3× speedup at
   the cost of ~14% material unknown (default is `--enrich-pdp`)
-- `--skip-build-cube` — stop after the scrapers; useful when iterating
 
 > Note the dotted path: the flags live on `pipelines.monthly.scrape`
 > (the module), **not** on `pipelines.monthly scrape` (the monthly-CLI
 > subcommand). The latter ignores everything but `-h`.
+
+### `build_cube` — `pipelines.collectors.build_live_cube`
+
+Unions the discovered `items_*.csv` (immutable monthly files preferred over
+legacy via `discover_items_files`), collapses unisex SKUs, and writes one
+snapshot per month: `data/processed/live_{fingerprint,univariate}_<YYYY-MM>.parquet`.
+Within-month re-runs overwrite that month's cube.
+
+To override inputs/outputs, invoke the module directly with
+`--input` / `--signals-dir` / `--output-dir`.
 
 ### `aggregate` — `pipelines.monthly.aggregate`
 

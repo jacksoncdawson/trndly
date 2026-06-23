@@ -3,16 +3,18 @@
 Usage:
     python -m pipelines.monthly run                  # full chain
     python -m pipelines.monthly scrape               # individual stages
+    python -m pipelines.monthly build_cube
     python -m pipelines.monthly aggregate
     python -m pipelines.monthly features
     python -m pipelines.monthly train
     python -m pipelines.monthly evaluate
     python -m pipelines.monthly predict
 
-    python -m pipelines.monthly run --skip-scrape    # already have items_*.csv
+    python -m pipelines.monthly run --skip-scrape       # already have items_*.csv
+    python -m pipelines.monthly run --skip-build-cube   # already have live_*.parquet
 
 Stage order in ``run``:
-    scrape → aggregate → features → train → evaluate → predict
+    scrape → build_cube → aggregate → features → train → evaluate → predict
 
 Non-zero exit on any stage failure.
 """
@@ -36,6 +38,9 @@ def _call_stage(name: str) -> object:
     if name == "scrape":
         from pipelines.monthly.scrape import run_scrape
         return run_scrape()
+    if name == "build_cube":
+        from pipelines.collectors.build_live_cube import run_build_cube
+        return run_build_cube()
     if name == "aggregate":
         from pipelines.monthly.aggregate import run_aggregate
         return run_aggregate()
@@ -55,17 +60,23 @@ def _call_stage(name: str) -> object:
 
 
 FULL_ORDER: tuple[str, ...] = (
-    "scrape", "aggregate", "features", "train", "evaluate", "predict",
+    "scrape", "build_cube", "aggregate", "features", "train", "evaluate", "predict",
 )
 
 
-def run_full(*, skip_scrape: bool = False) -> dict:
+def run_full(*, skip_scrape: bool = False, skip_build_cube: bool = False) -> dict:
     """Run all stages in order. Returns {stage: summary}."""
+    skips: set[str] = set()
+    if skip_scrape:
+        skips.add("scrape")
+    if skip_build_cube:
+        skips.add("build_cube")
+
     summary: dict[str, object] = {}
     overall_t0 = time.time()
     for stage in FULL_ORDER:
-        if skip_scrape and stage == "scrape":
-            logger.info("skipping stage: scrape")
+        if stage in skips:
+            logger.info("skipping stage: %s", stage)
             continue
         logger.info("=== stage: %s ===", stage)
         t0 = time.time()
@@ -82,7 +93,11 @@ def parse_args() -> argparse.Namespace:
     full = sub.add_parser("run", help="run the full chain end-to-end")
     full.add_argument(
         "--skip-scrape", action="store_true",
-        help="skip the scrape stage (use existing items_*.csv + live cubes)",
+        help="skip the scrape stage (use existing items_*.csv)",
+    )
+    full.add_argument(
+        "--skip-build-cube", action="store_true",
+        help="skip the build_cube stage (use existing live_*_<YYYY-MM>.parquet)",
     )
 
     for stage in FULL_ORDER:
@@ -100,7 +115,10 @@ def main() -> None:
     args = parse_args()
     try:
         if args.command == "run":
-            run_full(skip_scrape=args.skip_scrape)
+            run_full(
+                skip_scrape=args.skip_scrape,
+                skip_build_cube=args.skip_build_cube,
+            )
         else:
             _call_stage(args.command)
     except Exception:

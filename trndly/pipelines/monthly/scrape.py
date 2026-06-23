@@ -1,22 +1,23 @@
-"""Run all retail scrapers sequentially, then build the live cubes.
+"""Run all retail scrapers sequentially.
 
 Replaces the prior bash orchestrator at ``pipelines/collectors/run_all.sh``.
 Each scraper is invoked as a subprocess (their ``main()`` functions own
 ``sys.argv`` and ``asyncio.run`` so importing in-process risks event-loop
-collisions). After all named scrapers finish, ``build_live_cube.py`` is
-subprocessed to aggregate ``items_*.csv`` → ``live_*_<YYYY-MM>.parquet``.
+collisions).
+
+Building the live cubes from the scraped ``items_*.csv`` is a SEPARATE stage
+(``build_cube``) in the monthly tick — it used to run inside this stage but is
+now its own step between ``scrape`` and ``aggregate``. Run it after scraping:
+``python -m pipelines.monthly build_cube``.
 
 Outputs:
-    data/raw/items/items_<retailer>.csv  (one per retailer)
-    data/processed/live_fingerprint_<YYYY-MM>.parquet
-    data/processed/live_univariate_<YYYY-MM>.parquet
+    data/raw/items/items_<retailer>_<YYYY-MM>.csv  (one per retailer, per month)
 
 Wall-clock with --enrich-pdp (default):
     gap            ~17s   (~5,200 rows)
     uniqlo         ~30s   (~3,000 rows)
     american_eagle ~3min  (Playwright JWT bootstrap + Akamai-throttled fan-out)
     hollister      ~5min  (~21,000 rows; ~250s for ~2,200 PDP enrichments)
-    build_cube     ~3s
     ─────────
     total          ~9-10 min
 
@@ -59,15 +60,15 @@ def run_scrape(
     retailers: list[str] | None = None,
     *,
     enrich_pdp: bool = True,
-    skip_build_cube: bool = False,
 ) -> None:
-    """Run named retailers' scrapers, then build_live_cube.
+    """Run named retailers' scrapers.
 
     Args:
         retailers: subset of SCRAPERS to run. None or empty means all.
         enrich_pdp: passed as ``--enrich-pdp`` (True) or ``--no-enrich-pdp``.
-        skip_build_cube: skip the trailing ``build_live_cube.py`` invocation.
-            Useful when iterating on a single scraper.
+
+    Building the live cubes is the separate ``build_cube`` stage — run
+    ``pipelines.monthly.build_cube`` (or the ``run`` chain) afterwards.
     """
     selected = list(retailers) if retailers else list(SCRAPERS)
     unknown = set(selected) - set(SCRAPERS)
@@ -82,9 +83,6 @@ def run_scrape(
     overall_t0 = time.time()
     for r in selected:
         _run_one(f"{r}_scraper.py", extra_args=extra)
-
-    if not skip_build_cube:
-        _run_one("build_live_cube.py")
 
     logger.info("scrape end: total %.1fs", time.time() - overall_t0)
 
@@ -112,11 +110,6 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="skip PDP material enrichment for ~3x speedup (~14%% material unknown)",
     )
-    p.add_argument(
-        "--skip-build-cube",
-        action="store_true",
-        help="skip the trailing build_live_cube.py invocation",
-    )
     return p.parse_args()
 
 
@@ -131,7 +124,6 @@ def main() -> None:
     run_scrape(
         retailers=retailers,
         enrich_pdp=args.enrich_pdp,
-        skip_build_cube=args.skip_build_cube,
     )
 
 
