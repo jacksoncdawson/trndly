@@ -109,6 +109,59 @@ def test_lag_columns_populated(payloads):
     assert any(r["share_lag3"] is not None for r in rows), "share_lag3 entirely null"
 
 
+def test_attach_lag_shares_mean_pools_duplicate_month_key():
+    """Lock the #1-risk mean-pool: when the merged cube carries duplicate
+    (month, key) rows (historical+live overlap), the attached lag is their
+    arithmetic MEAN and the row count is preserved (no left-join fan-out).
+
+    The golden fixtures are source-disjoint (no dups), so this is what actually
+    discriminates .mean() from .sum() and from a missing dedup (which fans out /
+    raises on real dup data). See pipelines.serving._attach_lag_shares.
+    """
+    import pandas as pd
+
+    from pipelines.serving import _attach_lag_shares
+
+    preds = pd.DataFrame([{
+        "anchor_month": pd.Timestamp("2026-05-01"),
+        "dimension": "color_master", "level_id": 1, "y_h1": 0.1,
+    }])
+    # Two rows for the SAME (2026-04, color_master, 1) with differing shares.
+    merged = pd.DataFrame([
+        {"month": pd.Timestamp("2026-04-01"), "dimension": "color_master",
+         "level_id": 1, "share_articles": 0.10, "source": "historical"},
+        {"month": pd.Timestamp("2026-04-01"), "dimension": "color_master",
+         "level_id": 1, "share_articles": 0.30, "source": "live"},
+    ])
+    out = _attach_lag_shares(preds, merged, key_cols=["dimension", "level_id"])
+
+    assert len(out) == len(preds), "left-join fanned out on duplicate (month,key)"
+    # anchor − 1 == 2026-04 → mean(0.10, 0.30) == 0.20 (not 0.40 sum, not a dup row)
+    assert out["share_lag1"].iloc[0] == pytest.approx(0.20)
+    # No merged rows at anchor / anchor−2 / anchor−3 → NaN.
+    assert pd.isna(out["share_t"].iloc[0])
+    assert pd.isna(out["share_lag2"].iloc[0])
+
+
+def test_attach_lag_shares_mean_pools_fingerprint_key():
+    """Same mean-pool guarantee on the 5-D fingerprint key path."""
+    import pandas as pd
+
+    from pipelines.serving import FINGERPRINT_KEY_COLS, _attach_lag_shares
+
+    key = {c: 1 for c in FINGERPRINT_KEY_COLS}
+    preds = pd.DataFrame([{"anchor_month": pd.Timestamp("2026-05-01"), **key, "y_h1": 0.0}])
+    merged = pd.DataFrame([
+        {"month": pd.Timestamp("2026-02-01"), **key, "share_articles": 0.02, "source": "historical"},
+        {"month": pd.Timestamp("2026-02-01"), **key, "share_articles": 0.04, "source": "live"},
+    ])
+    out = _attach_lag_shares(preds, merged, key_cols=list(FINGERPRINT_KEY_COLS))
+
+    assert len(out) == len(preds)
+    # anchor − 3 == 2026-02 → mean(0.02, 0.04) == 0.03.
+    assert out["share_lag3"].iloc[0] == pytest.approx(0.03)
+
+
 def test_contracts_omit_lag_columns():
     """Document/lock the reason this golden gate exists: contracts.py does NOT
     validate the serve-time lag columns, so only this diff catches lag-join drift."""

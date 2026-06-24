@@ -212,8 +212,50 @@ def test_guard_unrevertable_keep_warns_and_holds(guard_env, caplog):
     with caplog.at_level(logging.WARNING):
         summary = run_evaluate()
 
-    assert summary["action"] == "kept"
+    assert summary["action"] == "unrevertable"
     assert summary["reverted"] == []
-    # Cannot revert — canonical holds the losing candidate's weights (pre-guard state).
+    assert set(summary["unrevertable"]) == {"univariate", "fingerprint"}
+    # Cannot revert — canonical holds the candidate's weights; the champion record
+    # now matches the deployed joblib (records reality so quality can self-heal).
     assert env["uni"].read_text() == "UNI-B"
+    champ = json.loads(env["champ"].read_text())
+    assert champ["univariate"]["holdout_wmae"] == 0.02
+    assert champ["univariate"]["champion_run"] == summary["run_id"]
     assert "cannot revert" in caplog.text
+
+
+def test_guard_records_reality_when_archive_missing(guard_env):
+    """A real loss whose champion archive was deleted: can't revert, so record the
+    deployed candidate as champion (not the prior champion's vanished WMAE), and
+    self-heal when a better candidate arrives."""
+    import shutil
+
+    env = guard_env
+    # Round 1: champion A.
+    _write_candidate(
+        env, ts="2026-05-01T00:00:00+00:00", uni_wmae=0.01, fp_wmae=0.001,
+        uni_blob="UNI-A", fp_blob="FP-A",
+    )
+    run_a = run_evaluate()["run_id"]
+    shutil.rmtree(env["runs"] / run_a)  # champion archive gone
+
+    # Round 2: worse candidate; revert target is missing.
+    _write_candidate(
+        env, ts="2026-06-01T00:00:00+00:00", uni_wmae=0.02, fp_wmae=0.002,
+        uni_blob="UNI-B", fp_blob="FP-B",
+    )
+    summary = run_evaluate()
+    assert set(summary["unrevertable"]) == {"univariate", "fingerprint"}
+    assert summary["reverted"] == []
+    assert env["uni"].read_text() == "UNI-B"  # couldn't revert
+    champ = json.loads(env["champ"].read_text())
+    assert champ["univariate"]["holdout_wmae"] == 0.02  # record matches deployed reality
+
+    # Round 3: a better candidate now promotes against the recorded 0.02 → self-heal.
+    _write_candidate(
+        env, ts="2026-07-01T00:00:00+00:00", uni_wmae=0.015, fp_wmae=0.0015,
+        uni_blob="UNI-C", fp_blob="FP-C",
+    )
+    s3 = run_evaluate()
+    assert "univariate" in s3["promoted"]
+    assert env["uni"].read_text() == "UNI-C"

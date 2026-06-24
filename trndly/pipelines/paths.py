@@ -199,6 +199,12 @@ def discover_items_files(signals_dir: Path | None = None) -> list[Path]:
     monthly_by_retailer: dict[str, list[Path]] = {}
     legacy_by_retailer: dict[str, Path] = {}
     for p in sorted(base.glob(ITEMS_FILE_GLOB)):
+        # Skip the scrapers' in-progress resume files (items_<retailer>_<month>_partial.csv,
+        # StreamingItemWriter). A crashed run leaves one behind; it shares the full
+        # item schema, so without this it would parse as a phantom retailer and get
+        # double-counted into the cube on the next build_cube.
+        if p.name.endswith("_partial.csv"):
+            continue
         retailer, month = _parse_items_filename(p.name)
         if retailer is None:
             continue

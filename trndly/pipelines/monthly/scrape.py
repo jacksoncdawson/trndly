@@ -89,7 +89,10 @@ def run_scrape(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run all retail scrapers + build_live_cube."
+        description=(
+            "Run all retail scrapers. Build the live cubes separately via "
+            "`python -m pipelines.monthly build_cube`."
+        )
     )
     p.add_argument(
         "--retailers",

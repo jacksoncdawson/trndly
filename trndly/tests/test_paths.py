@@ -114,3 +114,15 @@ def test_discover_items_files_prefers_monthly_over_legacy(tmp_path) -> None:
 
 def test_discover_items_files_empty_dir(tmp_path) -> None:
     assert paths.discover_items_files(tmp_path) == []
+
+
+def test_discover_items_files_ignores_partial(tmp_path) -> None:
+    # A crashed scraper leaves items_<retailer>_<month>_partial.csv next to the
+    # final file. Discovery must ignore it (else its rows double-count).
+    (tmp_path / "items_gap_2026-06.csv").write_text("x")
+    (tmp_path / "items_gap_2026-06_partial.csv").write_text("x")
+    # ...even when only the partial exists (final never landed).
+    (tmp_path / "items_uniqlo_2026-06_partial.csv").write_text("x")
+
+    found = {p.name for p in paths.discover_items_files(tmp_path)}
+    assert found == {"items_gap_2026-06.csv"}

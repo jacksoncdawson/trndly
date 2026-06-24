@@ -27,9 +27,12 @@ month. So this stage:
      archived weights (tracked as ``champion_run`` in champion_metrics.json).
 
 MLflow-independent and SUPERSEDED by Phase 4's ``champion`` registry alias once
-the private MLflow lands. Migration note: a champion_metrics.json predating this
-guard carries no ``champion_run``, so the first loss for such a model cannot be
-reverted (logged as a warning); it self-heals on the next promotion.
+the private MLflow lands. When a revert can't complete (a champion_metrics.json
+predating this guard with no ``champion_run``, or an archived run that was
+deleted), the canonical joblib still holds the candidate's weights, so we record
+the candidate as champion (matching the deployed joblib) rather than advertising
+a champion whose weights no longer exist — quality self-heals on the next
+promotion. Such models are reported under ``unrevertable`` in the summary.
 
 Usage:
     python -m pipelines.monthly.evaluate
@@ -191,6 +194,7 @@ def run_evaluate() -> dict:
     }
     promoted: list[str] = []
     reverted: list[str] = []
+    unrevertable: list[str] = []
     for k in MODEL_KEYS:
         d = decisions[k]
         if d["action"] == "promote":
@@ -202,8 +206,25 @@ def run_evaluate() -> dict:
             prior_run = (incumbent or {}).get(k, {}).get("champion_run")
             if _revert_canonical(k, prior_run):
                 reverted.append(k)
-            # Champion is unchanged for this model — carry its block forward.
-            champion[k] = (incumbent or {}).get(k, candidate[k])
+                # Champion unchanged — carry the prior champion's block forward.
+                champion[k] = (incumbent or {}).get(k, candidate[k])
+            else:
+                # The prior champion's weights are unrecoverable (missing archive,
+                # or a pre-guard incumbent with no champion_run). train.py already
+                # overwrote the canonical joblib, so the candidate's (losing)
+                # weights are what predict.py will load. Record THAT as champion so
+                # champion_metrics.json matches the deployed joblib and the next
+                # better candidate promotes (quality self-heals) — rather than
+                # advertising a prior champion whose weights no longer exist.
+                logger.warning(
+                    "%s: prior champion weights unrecoverable; recording the "
+                    "(unreverted) candidate as champion to match the deployed joblib.",
+                    k,
+                )
+                block = dict(candidate[k])
+                block["champion_run"] = run_id
+                champion[k] = block
+                unrevertable.append(k)
         emoji = "↑" if d["action"] == "promote" else "·"
         logger.info("  %s %-12s %s — %s", emoji, k, d["action"], d["reason"])
 
@@ -214,13 +235,21 @@ def run_evaluate() -> dict:
         json.dump(champion, f, indent=2)
     logger.info("wrote %s", CHAMPION_METRICS_JSON)
 
-    action = "promoted" if promoted else ("reverted" if reverted else "kept")
+    if promoted:
+        action = "promoted"
+    elif reverted:
+        action = "reverted"
+    elif unrevertable:
+        action = "unrevertable"
+    else:
+        action = "kept"
     return {
         "action": action,
         "decisions": decisions,
         "run_id": run_id,
         "promoted": promoted,
         "reverted": reverted,
+        "unrevertable": unrevertable,
     }
 
 
