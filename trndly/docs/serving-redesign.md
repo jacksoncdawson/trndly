@@ -207,6 +207,83 @@ Ordered by dependency. **Why this order:** local-first de-risks the riskiest swa
 
 ---
 
+## 12. Data layout — per-tick checkpoints (addendum, accepted 2026-06-23)
+
+Decided after Phase 1, **before any cloud work**. Replaces the in-place overwrite
+of `merged_*` / `training_*` / model artifacts. Motivation: serving moved to
+static GCS objects + CDN (immutable, versioned), not the old relational-upsert
+plan — so the pipeline should keep **immutable historical checkpoints**, never
+overwrite. The artifacts that already do this (`live_*_<YYYY-MM>`,
+`predictions_*_<YYYY-MM>`, the published `*_<YYYY-MM>.json`, `models/runs/`) are
+the template; this generalizes the convention to the whole tick.
+
+### 12.1 Principle
+Every per-tick artifact is written **immutably into a month-keyed checkpoint dir
+and never overwritten in place**. Serving and the next tick read the latest
+*successful* checkpoint. The tick is **idempotent per month**: a completed month
+is not re-run without `--force`.
+
+### 12.2 Layout
+```
+data/
+  raw/kaggle/...                                source dump (immutable)
+  raw/items/items_<retailer>_<YYYY-MM>.csv      per-month raw landing zone (immutable)
+  reference/lookup.csv                          committed
+  processed/                                    SHARED cube inputs (cumulative across ticks)
+    historical_*.parquet                        notebook 1 (immutable)
+    live_*_<YYYY-MM>.parquet                     build_cube output (per snapshot month)
+  models/                                       CURRENT champion (cross-tick)
+    {fingerprint,univariate}_model.joblib       canonical = the champion weights predict loads
+    champion.json                               per-model pointer {model: {month, holdout_wmae, run}}
+  ticks/<YYYY-MM>/                              one IMMUTABLE checkpoint per tick
+    merged_{fingerprint,univariate}.parquet
+    training_{fingerprint,univariate}.parquet   training_run.json
+    model/{fingerprint,univariate}_model.joblib  model_training_run.json   (THIS tick's candidate)
+    predictions_{fingerprint,univariate}.parquet
+    published/{trends,options,health,fingerprint}.json
+    manifest.json                               git sha, stage timings, source months, decisions, anchor
+    _SUCCESS                                    written ONLY after publish completes (idempotency marker)
+```
+The **"latest" for serving** = the max-month `ticks/<M>/` containing `_SUCCESS`
+(no separate pointer to drift). `frontend/data/` (the SPA/CDN copy) is refreshed
+from the latest tick's `published/` on each successful run.
+
+### 12.3 Champion handling (a simplification this refactor unlocks)
+Per-tick model isolation removes the *"train clobbers the canonical joblib"* bug
+at the root — the exact reason Phase 1.3 needed an archive + revert:
+- `train` writes the candidate to `ticks/<M>/model/` — it **never** touches
+  `data/models/` (canonical).
+- `evaluate` compares the candidate vs `champion.json`; on a per-model **win** it
+  copies `ticks/<M>/model/<m>.joblib` → `data/models/<m>.joblib` and points
+  `champion.json[m]` at `<M>`; on a **loss** it does nothing (canonical stays the
+  champion). **No revert needed** — `predict` always loads the champion.
+- `predict` loads `data/models/` (champion) → scores M's anchor → `ticks/<M>/predictions`.
+
+This **supersedes `models/runs/<id>/` + the revert logic** from Phase 1.3 (now
+month-keyed and overwrite-proof). Still superseded later by Phase 4's MLflow
+`champion` alias.
+
+### 12.4 Idempotency
+- Tick month = current calendar month (default) or `--month YYYY-MM`.
+- `run` is a **no-op when `ticks/<month>/_SUCCESS` exists**, unless `--force`
+  (re-run + overwrite that month's checkpoint). This is the "don't overwrite a
+  good month by accident" guard.
+- Individual stages stay runnable for debugging; they write into `ticks/<month>/`.
+
+### 12.5 GCS mapping
+`gs://<data-bucket>/ticks/<YYYY-MM>/…` — immutable, **Object Versioning on** as a
+backstop, bucket private (UBLA + PAP). The CDN (Firebase Hosting) serves only the
+latest tick's `published/` JSON. No warehouse, no DB, no upsert.
+
+### 12.6 Migration (one-time)
+- Delete the stale `predictions_*_2020-08` (pre-backfill fallback-anchor output).
+- Rename the committed seed `items_<retailer>.csv` → `items_<retailer>_2026-05.csv`.
+- `historical_*` / `live_*` stay in `processed/`; the first run under the new code
+  seeds `ticks/<month>/`. `transactions.parquet` (214 MB) is a notebook-only
+  intermediate — left in `processed/` for now (notebook-coupled), flagged to move.
+
+---
+
 ## AWS / Snowflake mapping (for interviews)
 | GCP (built) | AWS/Snowflake |
 |---|---|
