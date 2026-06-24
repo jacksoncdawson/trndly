@@ -282,6 +282,102 @@ def latest_predictions_fingerprint_parquet() -> Path | None:
     return paths[-1] if paths else None
 
 
+# --------------------------------------------------------------------------- #
+# Per-tick checkpoints (plan §12)                                               #
+# --------------------------------------------------------------------------- #
+#
+# Each monthly tick writes an IMMUTABLE checkpoint under data/ticks/<YYYY-MM>/
+# (merged → training → model candidate → predictions → published), never
+# overwriting a prior month. `historical_*` / `live_*` stay in processed/ as
+# shared cumulative inputs; the cross-tick champion lives in models/.
+
+TICKS_DIR: Path = DATA_DIR / "ticks"
+_TICK_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+
+MODEL_ROLES: tuple[str, ...] = ("fingerprint", "univariate")
+
+# Cross-tick champion pointer: {model: {month, holdout_wmae, ...}}, written by
+# evaluate on a promotion. The canonical champion weights predict loads are
+# FINGERPRINT_MODEL_JOBLIB / UNIVARIATE_MODEL_JOBLIB above.
+CHAMPION_JSON: Path = MODELS_DIR / "champion.json"
+
+
+def champion_joblib_for(role: str) -> Path:
+    """Canonical champion joblib (the weights predict loads) for a model role."""
+    return FINGERPRINT_MODEL_JOBLIB if role == "fingerprint" else UNIVARIATE_MODEL_JOBLIB
+
+
+def current_tick_month() -> pd.Timestamp:
+    """Default tick month: the current calendar month, normalized to the 1st."""
+    return pd.Timestamp.now().normalize().replace(day=1)
+
+
+def tick_dir(month) -> Path:
+    """Checkpoint directory for one tick, e.g. ``data/ticks/2026-06``."""
+    return TICKS_DIR / _format_month(month)
+
+
+def tick_merged_path(month, role: str) -> Path:
+    return tick_dir(month) / f"merged_{role}.parquet"
+
+
+def tick_training_path(month, role: str) -> Path:
+    return tick_dir(month) / f"training_{role}.parquet"
+
+
+def tick_training_run_json(month) -> Path:
+    return tick_dir(month) / "training_run.json"
+
+
+def tick_model_dir(month) -> Path:
+    """This tick's CANDIDATE model dir (not the champion)."""
+    return tick_dir(month) / "model"
+
+
+def tick_model_joblib(month, role: str) -> Path:
+    return tick_model_dir(month) / f"{role}_model.joblib"
+
+
+def tick_model_training_run_json(month) -> Path:
+    return tick_model_dir(month) / "model_training_run.json"
+
+
+def tick_predictions_path(month, role: str) -> Path:
+    return tick_dir(month) / f"predictions_{role}.parquet"
+
+
+def tick_published_dir(month) -> Path:
+    return tick_dir(month) / "published"
+
+
+def tick_manifest_json(month) -> Path:
+    return tick_dir(month) / "manifest.json"
+
+
+def tick_success_marker(month) -> Path:
+    return tick_dir(month) / "_SUCCESS"
+
+
+def tick_is_complete(month) -> bool:
+    """True when this tick's ``_SUCCESS`` marker exists (publish finished)."""
+    return tick_success_marker(month).exists()
+
+
+def discover_ticks() -> list[Path]:
+    """Every ``ticks/<YYYY-MM>/`` directory, sorted by month."""
+    if not TICKS_DIR.exists():
+        return []
+    return sorted(
+        p for p in TICKS_DIR.iterdir() if p.is_dir() and _TICK_MONTH_RE.match(p.name)
+    )
+
+
+def latest_successful_tick() -> Path | None:
+    """Most recent ``ticks/<YYYY-MM>/`` with a ``_SUCCESS`` marker (or None)."""
+    done = [p for p in discover_ticks() if (p / "_SUCCESS").exists()]
+    return done[-1] if done else None
+
+
 def ensure_data_dirs() -> None:
     """
     Create every writable subdirectory of DATA_DIR if it doesn't exist.
@@ -295,5 +391,6 @@ def ensure_data_dirs() -> None:
         PROCESSED_DIR,
         MODELS_DIR,
         PREDICTIONS_DIR,
+        TICKS_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)
