@@ -33,16 +33,99 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from pipelines.paths import RAW_ITEMS_DIR, items_csv_path_for
 
 logger = logging.getLogger(__name__)
 
 SCRAPERS: tuple[str, ...] = ("gap", "uniqlo", "american_eagle", "hollister")
 
 COLLECTORS_DIR: Path = Path(__file__).resolve().parents[1] / "collectors"
+
+# Scrape-completeness guard (the 2026-06 Hollister incident: a 403/marker-drift
+# made the scraper write a header-only CSV and exit 0, so a retailer that was
+# ~66% of the catalog silently vanished and the tick published anyway). A scrape
+# yielding < this fraction of the prior month's rows aborts the tick. Override
+# via env for a legitimately large seasonal drop; 0 rows is ALWAYS fatal.
+MIN_SCRAPE_RETAIN_FRAC: float = float(
+    os.environ.get("TRNDLY_MIN_SCRAPE_RETAIN_FRAC", "0.6")
+)
+_ITEMS_MONTH_RE = re.compile(r"^items_.+_(\d{4}-\d{2})\.csv$")
+
+
+def _count_data_rows(path: Path) -> int:
+    """Number of data rows (lines minus the header) in an items CSV; 0 if absent
+    or header-only."""
+    if not path.exists():
+        return 0
+    with path.open(newline="") as fh:
+        n_lines = sum(1 for _ in fh)
+    return max(0, n_lines - 1)
+
+
+def _prior_month_rows(retailer: str, current_month: str) -> tuple[str, int] | None:
+    """Row count of ``retailer``'s most recent items CSV strictly before
+    ``current_month`` (``'YYYY-MM'``), or ``None`` if there is no prior month."""
+    best_month: str | None = None
+    best_path: Path | None = None
+    for p in RAW_ITEMS_DIR.glob(f"items_{retailer}_*.csv"):
+        if p.name.endswith("_partial.csv"):
+            continue  # in-progress StreamingItemWriter resume file
+        m = _ITEMS_MONTH_RE.match(p.name)
+        if not m:
+            continue
+        month = m.group(1)
+        if month >= current_month:
+            continue
+        if best_month is None or month > best_month:
+            best_month, best_path = month, p
+    if best_path is None:
+        return None
+    return best_month, _count_data_rows(best_path)
+
+
+def _check_scrape_completeness(retailer: str) -> None:
+    """Fail the tick if a retailer's freshly-scraped CSV is empty or collapsed
+    vs the prior month — a silent header-only scrape must never reach publish."""
+    out_path = items_csv_path_for(retailer)
+    month_m = _ITEMS_MONTH_RE.match(out_path.name)
+    current_month = month_m.group(1) if month_m else ""
+    rows = _count_data_rows(out_path)
+
+    if rows == 0:
+        raise RuntimeError(
+            f"{retailer}: scrape produced 0 data rows ({out_path.name} is "
+            f"header-only) — aborting the tick. A retailer scrape must not "
+            f"silently collapse to empty (the 2026-06 Hollister incident); "
+            f"investigate the scraper, then re-run."
+        )
+
+    prior = _prior_month_rows(retailer, current_month)
+    if prior is not None:
+        prev_month, prev_rows = prior
+        if prev_rows > 0 and rows < MIN_SCRAPE_RETAIN_FRAC * prev_rows:
+            raise RuntimeError(
+                f"{retailer}: scrape produced {rows} rows, below "
+                f"{MIN_SCRAPE_RETAIN_FRAC:.0%} of the prior month "
+                f"({prev_month}: {prev_rows}) — likely a partial/blocked "
+                f"scrape. Aborting the tick; investigate, then re-run (or set "
+                f"TRNDLY_MIN_SCRAPE_RETAIN_FRAC if the drop is real)."
+            )
+        logger.info(
+            "    %s completeness OK: %d rows (prior %s: %d)",
+            retailer, rows, prev_month, prev_rows,
+        )
+    else:
+        logger.info(
+            "    %s completeness OK: %d rows (no prior month to compare)",
+            retailer, rows,
+        )
 
 
 def _run_one(script: str, *, extra_args: list[str] | None = None) -> None:
@@ -83,6 +166,8 @@ def run_scrape(
     overall_t0 = time.time()
     for r in selected:
         _run_one(f"{r}_scraper.py", extra_args=extra)
+        # Fail loud on a collapsed/empty scrape before it can poison the cube.
+        _check_scrape_completeness(r)
 
     logger.info("scrape end: total %.1fs", time.time() - overall_t0)
 
