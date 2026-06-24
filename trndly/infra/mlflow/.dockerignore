@@ -1,0 +1,4 @@
+# The image COPYs nothing (all deps are pip-installed), so send an empty build
+# context. The Dockerfile itself is read via `--file Dockerfile.mlflow`,
+# independently of this ignore list, so excluding everything here is safe.
+*

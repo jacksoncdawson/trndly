@@ -18,5 +18,10 @@ terraform {
       source  = "hashicorp/google-beta"
       version = "~> 6.0"
     }
+    # Phase 3 — generates the MLflow Cloud SQL password (→ Secret Manager).
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.0"
+    }
   }
 }

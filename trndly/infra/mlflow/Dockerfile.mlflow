@@ -1,0 +1,24 @@
+# Private MLflow server image (plan §8 Phase 3). Built via Cloud Build →
+# Artifact Registry, run on Cloud Run v2 (private; service_account = sa-mlflow).
+#
+# google-cloud-storage (NOT gcsfs) is required: the server runs with
+# --serve-artifacts, proxying artifact reads/writes to GCS itself, and that code
+# path uses google-cloud-storage. The tick's requirements.txt ships gcsfs, which
+# is wrong for this server — this is a DEDICATED image, not the tick's deps.
+#
+# The image is intentionally generic: the Cloud Run service supplies the full
+# `mlflow server ...` invocation via template.containers.args. The base
+# python image sets no ENTRYPOINT, so those args run as the container command.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN pip install --no-cache-dir \
+    mlflow==3.14.0 \
+    psycopg2-binary \
+    google-cloud-storage \
+    gunicorn
+
+# Cloud Run sends traffic to $PORT (8080); the service's args bind --port 8080.
+EXPOSE 8080

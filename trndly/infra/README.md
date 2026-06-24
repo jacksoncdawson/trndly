@@ -9,9 +9,17 @@ The root module is applied **incrementally per phase**:
 | Phase | Adds | Files |
 |-------|------|-------|
 | 0 — Foundations | Project APIs + Cloud Build identity | `apis.tf`, `build_identity.tf` |
-| 2 — Static serving | Firebase project + Hosting site (beta provider) | *(added later)* |
-| 3 — MLflow (private) | Cloud Run v2 + Cloud SQL + GCS artifacts + `sa-mlflow` | *(added later)* |
+| 2 — Static serving | Firebase project + Hosting site (beta provider); keyless CI deploy identity (WIF) | `firebase.tf`, `ci_identity.tf` |
+| 3 — MLflow (private) | Cloud Run v2 + Cloud SQL + GCS artifacts + `sa-mlflow` + image | `mlflow.tf`, `mlflow/Dockerfile.mlflow` |
 | 5 — Dynamic tier | Firestore + Identity Platform / Firebase Auth | *(added later)* |
+
+> **Phased applies, one root module.** All of the above live in the single root
+> module, so a bare `terraform apply` would create every phase at once. The
+> per-phase cost gates use `terraform apply -target=…` (see
+> [`../docs/runbooks/deploy-hosting.md`](../docs/runbooks/deploy-hosting.md) and
+> [`../docs/runbooks/mlflow-deploy.md`](../docs/runbooks/mlflow-deploy.md)); the
+> final full `apply` reconciles the last resources + drops the project-level
+> Cloud Build writer grant in favor of the repo-scoped one.
 
 ## Layout
 
