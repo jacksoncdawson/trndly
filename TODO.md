@@ -1,7 +1,7 @@
 # TODO
 
 Forward-looking work list for the trndly forecaster pipeline.
-Last updated: 2026-05-10 (audited 2026-06-22).
+Last updated: 2026-06-23 (audited 2026-06-23).
 
 For the shipped state, read [README.md](README.md) and
 [trndly/docs/architecture.md](trndly/docs/architecture.md). For
@@ -32,7 +32,7 @@ captures the target end state. Concretely:
   Replace `python -m pipelines.monthly run` with a Vertex job, fire
   monthly via Cloud Scheduler.
 - **MLflow registry: local file → managed tracking.** `evaluate.py`
-  currently writes `champion_metrics.json` locally (it explicitly calls
+  currently writes a local `champion.json` pointer (it explicitly calls
   itself the "local-MVP version"); swap for
   `MlflowClient.set_registered_model_alias`. The development MLflow server
   has been **retired** and is being rebuilt private (Cloud Run + Cloud SQL
@@ -103,18 +103,6 @@ American Eagle's Akamai JWT has ~30-min TTL.
 should detect a 401 mid-run and re-invoke `_bootstrap_session` instead
 of failing the whole scrape. Today there is no 401 detection in the
 fetch loop, so the user has to re-run from scratch.
-
-### `evaluate.py` candidate-rollback on regression
-
-When a candidate model loses to the incumbent on holdout WMAE,
-`evaluate.py` keeps `champion_metrics.json` pointing at the old model
-but the canonical joblibs in `data/models/` were already overwritten by
-`train.py` with the (worse) candidate. (This trade-off is explicitly
-acknowledged in the `evaluate.py` module docstring.) Recovery requires
-retraining from a prior month or restoring from backup. Add an
-archive-on-train + revert-on-loss path: `train.py` writes to
-`data/models/runs/<timestamp>/`, `evaluate.py` swaps the canonical
-symlink/copy on promotion.
 
 ### MLflow registry hygiene
 
@@ -307,7 +295,7 @@ cd /Users/jackcdawson/Desktop/trndly/trndly
 | Live cube share-sums fail invariant | `build_live_cube.py` upstream got NaN IDs | `validate_live_*_frame` in `pipelines/contracts.py` raises with details |
 | `/options` returns empty arrays | `data/reference/lookup.csv` missing or wrong category | Check `lookup.csv` `category` column values |
 | `/trends` returns `[]` | No predictions parquet, or anchor month has no rows | Run `python -m pipelines.monthly predict`; restart API |
-| API returns 503 with "predictions bundle not loaded" | No predictions parquet found at startup | `ls data/predictions/`; run the monthly tick |
+| API returns 503 with "predictions bundle not loaded" | No predictions parquet found at startup | `ls data/ticks/*/predictions_*.parquet`; run the monthly tick |
 | `predict` exits "no univariate predictions produced" | Latest cube month has no 3 contiguous prior months | See "Sparse cube → empty predictions" above |
 | `async def functions are not natively supported` (17 failures) | `pytest-asyncio` missing and/or venv on Python 3.14 | Install `pytest-asyncio`; rebuild venv on Python 3.11 |
 

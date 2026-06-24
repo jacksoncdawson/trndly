@@ -315,7 +315,7 @@ anchor, run `python scripts/backfill_anchor_lags.py` first.)
 not unusual. (This warning is emitted by the `train` stage, not
 `evaluate`.)
 
-**Fix:** investigate via `data/models/model_training_run.json`. The
+**Fix:** investigate via `data/ticks/<YYYY-MM>/model/model_training_run.json`. The
 candidate is still promoted by `evaluate` if it beats the *prior*
 champion; the baseline warning is informational only.
 

@@ -2,7 +2,7 @@
 Build live counterparts to the historical fingerprint + univariate cubes.
 
 Each retail scraper writes a raw per-(style_id × cc_id) row file named
-`items_<retailer>.csv` in `data/raw/items/` — one row per
+`items_<retailer>_<YYYY-MM>.csv` in `data/raw/items/` — one row per
 "article" (style + color variant), matching H&M's article-level grain.
 This module unions all four files, derives a month from `scraped_at`,
 and writes per-snapshot-month parquets to `data/processed/`:
@@ -41,7 +41,7 @@ Usage
 
     # Override input set:
     python build_live_cube.py \\
-        --input data/raw/items/items_gap.csv
+        --input data/raw/items/items_gap_2026-05.csv
 
     # Custom output directory:
     python build_live_cube.py --output-dir /tmp/cube_test/
@@ -108,7 +108,7 @@ DIMENSION_CATEGORIES: list[str] = [
 # --------------------------------------------------------------------------- #
 
 def load_items(paths: list[Path]) -> pd.DataFrame:
-    """Read every items_<retailer>.csv and union them. Adds a `month` column
+    """Read every items_<retailer>_<YYYY-MM>.csv and union them. Adds a `month` column
     derived from scraped_at (month-start). Source tagging happens in the
     cube builders.
     """

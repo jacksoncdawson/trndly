@@ -37,7 +37,7 @@ in `trndly/`.
     ├── notebooks/             — 0 (Kaggle clean), 1 (historical agg), 4 (HP sweep)
     ├── EDA/                   — exploratory data/training/transaction notebooks
     ├── tests/                 — unit, contract, and integration tests
-    ├── data/                  — raw / reference / processed / models / predictions
+    ├── data/                  — raw / reference / processed / models / ticks
     └── docs/                  — architecture, API reference, monthly-tick runbook
 ```
 
@@ -80,17 +80,21 @@ Then open `http://localhost:8000/ui/` for the React app or
 
 ## The monthly tick
 
-`python -m pipelines.monthly run` drives six stages end-to-end:
+`python -m pipelines.monthly run` drives the full chain end-to-end. Every
+per-tick artifact lands in an immutable checkpoint `data/ticks/<YYYY-MM>/`
+(plan §12); `historical_*`/`live_*` stay in `data/processed/` as shared
+inputs, and the cross-tick champion lives in `data/models/`.
 
 
-| Stage       | What it does                                         | Output                                                       |
-| ----------- | ---------------------------------------------------- | ------------------------------------------------------------ |
-| `scrape`    | Subprocess each retailer scraper + `build_live_cube` | `data/raw/items/`, `data/processed/live_*_<YYYY-MM>.parquet` |
-| `aggregate` | Concat historical + live cubes with dedup            | `data/processed/merged_*.parquet`                            |
-| `features`  | Calendar-strict windowing (lags + 6 targets)         | `data/processed/training_*.parquet`                          |
-| `train`     | Fit RandomForest, write run metrics, persist joblibs | `data/models/*.joblib`, `model_training_run.json`            |
-| `evaluate`  | Compare candidate vs incumbent WMAE; auto-promote    | `data/models/champion_metrics.json` (on promotion)           |
-| `predict`   | Score the universe, classify state, write parquet    | `data/predictions/predictions_*_<YYYY-MM>.parquet`           |
+| Stage       | What it does                                            | Output                                                                                       |
+| ----------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `scrape`    | Subprocess each retailer scraper + `build_live_cube`    | `data/raw/items/items_<retailer>_<YYYY-MM>.csv`, `data/processed/live_*_<YYYY-MM>.parquet`    |
+| `aggregate` | Concat historical + live cubes with dedup               | `data/ticks/<YYYY-MM>/merged_*.parquet`                                                       |
+| `features`  | Calendar-strict windowing (lags + 6 targets)            | `data/ticks/<YYYY-MM>/training_*.parquet`, `training_run.json`                                |
+| `train`     | Fit RandomForest, persist this tick's **candidate**     | `data/ticks/<YYYY-MM>/model/*.joblib`, `model_training_run.json`                              |
+| `evaluate`  | Compare candidate vs champion WMAE; promote-copy on win | winner's joblib → `data/models/`, repoint `data/models/champion.json`                         |
+| `predict`   | Score the universe (champion), classify state           | `data/ticks/<YYYY-MM>/predictions_*.parquet`                                                  |
+| `publish`   | Emit browser-ready JSON for the SPA/CDN                 | `data/ticks/<YYYY-MM>/published/*.json` + refreshed `frontend/data/*.json`                    |
 
 The tick is self-contained and writes everything to local disk — no
 cloud calls. (See **MLflow & cloud infra** below for what *does* talk to
@@ -111,13 +115,16 @@ full operator runbook (prereqs, debugging, common failures).
 ### Champion model management (local-MVP)
 
 `evaluate` is explicitly the **local-MVP** version: the champion is a
-local `data/models/champion_metrics.json` file, not an MLflow registry
-alias. Promotion rule: `candidate.holdout_wmae <= incumbent.holdout_wmae`
-→ promote (or promote if no incumbent recorded). Note that `train`
-overwrites the joblib models before `evaluate` runs, so a candidate that
-loses the comparison is not auto-reverted — only the champion-metrics
-pointer is left unchanged. Registry-backed champion aliasing is the
-target architecture (see [docs/architecture.md](trndly/docs/architecture.md)),
+local `data/models/champion.json` pointer, not an MLflow registry alias.
+Promotion rule (per model): `candidate.holdout_wmae <= incumbent.holdout_wmae`
+→ promote (or promote if no incumbent recorded). Per plan §12, `train`
+writes its candidate joblibs to `data/ticks/<YYYY-MM>/model/` and **never**
+touches the canonical `data/models/`; on a win `evaluate` copies the
+candidate over the canonical joblib and repoints `champion.json` at that
+month, on a loss it does nothing. Because a losing candidate never reaches
+`data/models/`, there is **no revert** — `predict` always loads the
+canonical champion. Registry-backed champion aliasing is the target
+architecture (see [docs/architecture.md](trndly/docs/architecture.md)),
 not the current behavior.
 
 ## MLflow & cloud infra
@@ -125,9 +132,10 @@ not the current behavior.
 The tick and the serving path are **fully local**; the only cloud touch
 point is model development:
 
-- **Monthly tick** — no MLflow. `train` writes joblibs +
-  `model_training_run.json`; `evaluate` manages a local
-  `champion_metrics.json`. There are no `mlflow.*` calls anywhere in
+- **Monthly tick** — no MLflow. `train` writes the tick's candidate
+  joblibs + `model_training_run.json` under `data/ticks/<YYYY-MM>/model/`;
+  `evaluate` promote-copies the winner into `data/models/` and manages a
+  local `champion.json` pointer. There are no `mlflow.*` calls anywhere in
   `pipelines/monthly/`.
 - **Serving** (`backend/services/scheduleServer.py`) — reads precomputed
   predictions parquets from local disk; no live model calls. The
@@ -198,7 +206,7 @@ Python 3.11, uploading a junit report as an artifact.
 
 - Storage migration: local parquet → GCS / BigQuery
 - Cloud cadence: manual CLI → Cloud Scheduler + Vertex Custom Container job
-- Champion management: local `champion_metrics.json` → MLflow registry alias (`set_registered_model_alias`) on the GCP-backed registry, with auto-revert on demotion
+- Champion management: local `champion.json` pointer → MLflow registry alias (`set_registered_model_alias`) on the GCP-backed registry
 - Frontend hosting split: Firebase Hosting (static) + Cloud Run (API)
 - Auth: Firebase Auth + per-user inventory in Firestore
 - Container split: separate images for collectors / monthly tick / API

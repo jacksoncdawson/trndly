@@ -24,7 +24,7 @@ at the bottom captures the GCP target we're working toward.
                 │  pipelines/collectors/                       │
                 │    {gap,uniqlo,american_eagle,hollister}_    │
                 │  scraper.py                                │
-                │      └─► data/raw/items/items_<retailer>.csv │
+                │      └─► data/raw/items/items_<retailer>_<YYYY-MM>.csv
                 │  build_live_cube.py                          │
                 │      └─► data/processed/live_*_<YYYY-MM>.parquet
                 └──────────────────────────────────────────────┘
@@ -36,16 +36,17 @@ at the bottom captures the GCP target we're working toward.
                 │    aggregate — historical + live → merged_*  │
                 │    features  — calendar-strict windows       │
                 │    train     — RF fit, write joblibs         │
-                │    evaluate  — auto-promote on WMAE          │
-                │    predict   — score universe → predictions/ │
+                │    evaluate  — promote-copy winner → models/ │
+                │    predict   — score universe → ticks/<M>/   │
+                │    publish   — emit JSON → frontend/data/    │
                 │    cli       — `python -m pipelines.monthly run`
                 └──────────────────────────────────────────────┘
                               │
                               ▼
                 ┌──────────────────────────────────────────────┐
-                │  data/predictions/                           │
-                │    predictions_univariate_<YYYY-MM>.parquet  │
-                │    predictions_fingerprint_<YYYY-MM>.parquet │
+                │  data/ticks/<YYYY-MM>/ (immutable checkpoint)│
+                │    predictions_{univariate,fingerprint}.parquet
+                │    published/*.json  → frontend/data/*.json  │
                 └──────────────────────────────────────────────┘
                               │
                               ▼
@@ -380,8 +381,8 @@ consumer code. `gcsfs` is already a transitive dependency. Illustrative target b
 layout (buckets are provisioned via Terraform per the build plan,
 [serving-redesign.md](serving-redesign.md)):
 
-- `gs://<data-bucket>/data/predictions/<YYYY-MM>/`
-- `gs://<data-bucket>/data/processed/`
+- `gs://<data-bucket>/ticks/<YYYY-MM>/` — immutable per-tick checkpoint (predictions + `published/`), per plan §12.5
+- `gs://<data-bucket>/processed/` — shared cube inputs (`historical_*` / `live_*`)
 
 ### Cloud cadence: manual CLI → Cloud Scheduler + Vertex job
 
