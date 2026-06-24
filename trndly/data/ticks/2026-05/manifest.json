@@ -1,1 +1,5 @@
-{"month":"2026-05","anchor_month":"2026-05","note":"seed checkpoint migrated from data/predictions"}
+{
+  "month": "2026-05",
+  "anchor_month": "2026-05",
+  "note": "Seed checkpoint: the 2026-05 tick consolidated into the per-tick layout (plan §12). predictions + this manifest are committed; merged/training/model/published are git-ignored (regenerated locally, archived to GCS). The next run produces 2026-06."
+}

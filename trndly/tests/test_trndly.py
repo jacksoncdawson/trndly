@@ -114,7 +114,16 @@ def test_avg_price_t_is_not_a_model_feature():
     """
     import json
 
-    training_run = PROJECT_ROOT / "data" / "processed" / "training_run.json"
+    from pipelines.paths import (
+        latest_successful_tick,
+        tick_training_path,
+        tick_training_run_json,
+    )
+
+    tick = latest_successful_tick()
+    if tick is None:
+        pytest.skip("no successful tick checkpoint")
+    training_run = tick_training_run_json(tick.name)
     if not training_run.exists():
         pytest.skip(f"training_run.json missing at {training_run}")
     meta = json.loads(training_run.read_text())
@@ -124,7 +133,7 @@ def test_avg_price_t_is_not_a_model_feature():
         "See test docstring for the live-cube NaN issue this guard prevents."
     )
 
-    training_fp = PROJECT_ROOT / "data" / "processed" / "training_fingerprint.parquet"
+    training_fp = tick_training_path(tick.name, "fingerprint")
     if training_fp.exists():
         cols = pd.read_parquet(training_fp).columns.tolist()
         assert "avg_price_t" not in cols, (

@@ -45,11 +45,15 @@ env/
 !**/data/reference/lookup.csv
 **/data/raw/kaggle/
 # Per-tick checkpoints (data/ticks/<YYYY-MM>/): ignore the heavy/regenerable
-# artifacts, but keep the lightweight ones tracked (predictions_*.parquet,
-# _SUCCESS, manifest.json, published/) so a clean checkout has a seed checkpoint.
+# artifacts, keep the lightweight ones tracked (predictions_*.parquet, _SUCCESS,
+# manifest.json) so a clean checkout has a seed checkpoint. published/ is the
+# immutable per-tick archive (goes to GCS) — local only, redundant with the
+# committed frontend/data/ "latest" copy the SPA fetches.
 **/data/ticks/*/merged_*.parquet
 **/data/ticks/*/training_*.parquet
+**/data/ticks/*/training_run.json
 **/data/ticks/*/model/
+**/data/ticks/*/published/
 # Published static JSON (pipelines.monthly.publish output). Commit the canonical
 # files the SPA fetches (turnkey demo, like committed predictions); the versioned
 # *_<YYYY-MM>.json archives are regenerated each tick.
