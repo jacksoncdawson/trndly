@@ -37,7 +37,13 @@ env/
 # the committed scrape outputs. Large/regenerated subdirs stay ignored.
 **/data/
 !**/data/
-**/data/processed/
+# data/processed/: ignore the generated cubes EXCEPT the committed synthetic
+# anchor priors (ADR 0002 — backfill_*.parquet), which must be present on a
+# clean checkout so predict anchors on the latest live month, not 2020-08.
+!**/data/processed/
+**/data/processed/*
+!**/data/processed/backfill_fingerprint.parquet
+!**/data/processed/backfill_univariate.parquet
 **/data/models/
 # data/reference/: ignore contents EXCEPT the tiny committed lookup.csv (the
 # publisher's options.json source — needed on a clean checkout, ~5 KB).

@@ -120,6 +120,14 @@ HISTORICAL_FINGERPRINT_PARQUET: Path = PROCESSED_DIR / "historical_fingerprint.p
 HISTORICAL_FINGERPRINT_META_JSON: Path = PROCESSED_DIR / "historical_fingerprint.meta.json"
 HISTORICAL_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "historical_univariate.parquet"
 
+# Synthetic anchor priors (ADR 0002) — generated ONCE by
+# `scripts.backfill_anchor_lags`, marked source='backfill', and unioned in by
+# `aggregate` so the latest live month can be the prediction anchor despite the
+# ~5-year gap to the historical block. Committed (gitignore exception) so a clean
+# checkout anchors correctly. NOT regenerated per tick (that was the 2026-06 bug).
+BACKFILL_FINGERPRINT_PARQUET: Path = PROCESSED_DIR / "backfill_fingerprint.parquet"
+BACKFILL_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "backfill_univariate.parquet"
+
 # Stage 2: build_live_cube outputs — one parquet per snapshot month.
 LIVE_FINGERPRINT_GLOB: str = "live_fingerprint_*.parquet"
 LIVE_UNIVARIATE_GLOB: str = "live_univariate_*.parquet"

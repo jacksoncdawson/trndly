@@ -27,6 +27,8 @@ from pathlib import Path
 import pandas as pd
 
 from pipelines.paths import (
+    BACKFILL_FINGERPRINT_PARQUET,
+    BACKFILL_UNIVARIATE_PARQUET,
     HISTORICAL_FINGERPRINT_PARQUET,
     HISTORICAL_UNIVARIATE_PARQUET,
     discover_live_fingerprint_parquets,
@@ -47,8 +49,10 @@ def _merge_one(
     dup_cols: list[str],
     out_path: Path,
     label: str,
+    backfill_path: Path | None = None,
 ) -> int:
-    """Concat historical + every live parquet, dedup, write. Return row count."""
+    """Concat historical + every live parquet (+ the synthetic backfill priors,
+    ADR 0002, if present), dedup, write. Return row count."""
     if not historical_path.exists():
         raise FileNotFoundError(
             f"missing {label} historical at {historical_path} — run notebook 1 first."
@@ -57,19 +61,27 @@ def _merge_one(
     hist = pd.read_parquet(historical_path)
     hist["month"] = pd.to_datetime(hist["month"]).dt.as_unit("ns")
 
+    frames = [hist]
+
     if live_paths:
-        live_frames = []
         for p in live_paths:
             f = pd.read_parquet(p)
             f["month"] = pd.to_datetime(f["month"]).dt.as_unit("ns")
-            live_frames.append(f)
+            frames.append(f)
             logger.info("  loaded %d rows from %s", len(f), p.name)
-        live = pd.concat(live_frames, ignore_index=True)
     else:
         logger.info("no live %s parquets found — merged cube will be historical-only.", label)
-        live = pd.DataFrame(columns=hist.columns)
 
-    merged = pd.concat([hist, live], ignore_index=True)
+    # Synthetic anchor priors (ADR 0002): a persistent standalone artifact unioned
+    # in so the latest live month can be the anchor despite the historical gap.
+    # Months never overlap live/historical, so the (month, …, source) dedup is safe.
+    if backfill_path is not None and backfill_path.exists():
+        bf = pd.read_parquet(backfill_path)
+        bf["month"] = pd.to_datetime(bf["month"]).dt.as_unit("ns")
+        frames.append(bf)
+        logger.info("  loaded %d synthetic backfill rows from %s", len(bf), backfill_path.name)
+
+    merged = pd.concat(frames, ignore_index=True)
     merged = merged.drop_duplicates(subset=dup_cols, keep="last")
     merged.to_parquet(out_path, index=False)
     logger.info("wrote %s | rows=%d", out_path, len(merged))
@@ -92,6 +104,7 @@ def run_aggregate(month=None) -> dict[str, int]:
         dup_cols=["month", *FINGERPRINT_COLS, "source"],
         out_path=tick_merged_path(month, "fingerprint"),
         label="fingerprint",
+        backfill_path=BACKFILL_FINGERPRINT_PARQUET,
     )
     logger.info("aggregate: merging univariate cubes")
     uv_rows = _merge_one(
@@ -100,6 +113,7 @@ def run_aggregate(month=None) -> dict[str, int]:
         dup_cols=["month", "dimension", "level_id", "source"],
         out_path=tick_merged_path(month, "univariate"),
         label="univariate",
+        backfill_path=BACKFILL_UNIVARIATE_PARQUET,
     )
     return {"merged_fingerprint": fp_rows, "merged_univariate": uv_rows}
 

@@ -30,24 +30,21 @@ When historical doesn't carry a key (or the corresponding live anchor month),
 we fall back to a global ratio across all keys for that month. When even
 that isn't available, we clone share_t backwards (assume flat past).
 
-The output is written **in place** to the current tick's
-``ticks/<MONTH>/merged_univariate.parquet`` and ``merged_fingerprint.parquet`` so
-`pipelines.monthly.predict` will naturally pick the live month as the anchor on
-its next run. Backfilled rows are marked with `source = 'backfill'` (added as a
-new category) so they're traceable and can be filtered out later.
+PERSISTENCE (ADR 0002): this is a ONE-TIME generator. The synthetic rows
+(marked ``source = 'backfill'``) are written to a STANDALONE artifact —
+``data/processed/backfill_{univariate,fingerprint}.parquet`` — which
+``pipelines.monthly.aggregate`` then UNIONS into every tick's merged cube
+(historical ∪ live ∪ backfill). The priors are no longer patched in place into a
+tick's ``merged_*`` (which ``aggregate`` rebuilt and clobbered each tick — the
+root cause of the 2026-06 anchor=2020-08 incident). They self-retire once 4 real
+contiguous live months exist. Pegged to the first live scrape (e.g. 2026-05).
 
-Re-running `pipelines.monthly.aggregate` rebuilds the tick's merged cubes from
-raw sources and will clobber this backfill — that's intended. The backfill is a
-one-time hack to keep the UI honest until real live history accumulates.
-
-``--month`` selects which tick's merged cubes to operate on (default: the most
-recent tick on disk, else the current calendar month); ``--target`` is the anchor
-month to enable.
+``--target`` is the month to peg the priors to (default: auto-detect the start of
+the latest contiguous live run).
 
 Usage:
-  python -m scripts.backfill_anchor_lags                   # auto-detects latest isolated live month
-  python -m scripts.backfill_anchor_lags --target 2026-05  # explicit anchor
-  python -m scripts.backfill_anchor_lags --month 2026-06   # explicit tick
+  python -m scripts.backfill_anchor_lags                   # auto-detect the peg month
+  python -m scripts.backfill_anchor_lags --target 2026-05  # explicit peg month
   python -m scripts.backfill_anchor_lags --dry-run         # print plan, don't write
 """
 
@@ -67,10 +64,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pipelines.paths import (
-    current_tick_month,
-    discover_ticks,
-    resolve_tick_month,
-    tick_merged_path,
+    BACKFILL_FINGERPRINT_PARQUET,
+    BACKFILL_UNIVARIATE_PARQUET,
+    HISTORICAL_FINGERPRINT_PARQUET,
+    HISTORICAL_UNIVARIATE_PARQUET,
+    discover_live_fingerprint_parquets,
+    discover_live_univariate_parquets,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,23 +83,34 @@ def _month_shift(ts: pd.Timestamp, months: int) -> pd.Timestamp:
     return (ts + pd.DateOffset(months=months)).normalize().replace(day=1)
 
 
-def _detect_isolated_anchor(cube: pd.DataFrame, lags: int = 3) -> pd.Timestamp | None:
-    """Return the latest month of REAL data in `cube` that lacks `lags`
-    contiguous real prior months — i.e. the month a backfill would enable
-    as the anchor. Backfill rows from previous runs are excluded so the
-    detection is stable across re-runs.
+def _detect_backfill_anchor(cube: pd.DataFrame, lags: int = 3) -> pd.Timestamp | None:
+    """Month to peg the synthetic priors to: the **start of the latest
+    contiguous run of real months**, when that run's latest month still lacks
+    ``lags`` contiguous real priors.
+
+    Pegging at the run-start (e.g. 2026-05, the first live scrape after the
+    ~5-year gap) makes that month AND every later contiguous month eligible as
+    the anchor, and the priors self-retire once ``lags`` real months accumulate.
+    Returns ``None`` when the latest real month already has ``lags`` real priors
+    (no backfill needed) or the cube has no real rows. Backfill rows are excluded
+    so detection is stable across re-runs.
     """
     real = cube
     if "source" in cube.columns:
         real = cube[cube["source"] != "backfill"]
-    months = sorted(pd.to_datetime(real["month"]).unique(), reverse=True)
-    months_set = set(months)
-    for m in months:
-        m = pd.Timestamp(m)
-        needed = {_month_shift(m, -k) for k in range(1, lags + 1)}
-        if not needed.issubset(months_set):
-            return m
-    return None
+    months_set = {pd.Timestamp(m) for m in pd.to_datetime(real["month"]).unique()}
+    if not months_set:
+        return None
+    latest = max(months_set)
+    # If the latest month already has `lags` contiguous real priors, the cube
+    # anchors correctly on its own — nothing to backfill.
+    if {_month_shift(latest, -k) for k in range(1, lags + 1)}.issubset(months_set):
+        return None
+    # Walk back to the first month of the contiguous run ending at `latest`.
+    start = latest
+    while _month_shift(start, -1) in months_set:
+        start = _month_shift(start, -1)
+    return start
 
 
 def _seasonal_ratios(
@@ -234,85 +244,81 @@ def _normalize_shares(cube: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame
     return out
 
 
-def backfill_univariate(target: pd.Timestamp, dry_run: bool, merged_path: Path) -> None:
-    cube = pd.read_parquet(merged_path)
-    cube["month"] = pd.to_datetime(cube["month"])
-    # Drop any prior backfill so re-running is idempotent.
-    if "source" in cube.columns and (cube["source"] == "backfill").any():
-        prior = (cube["source"] == "backfill").sum()
-        logger.info("dropping %d prior backfill rows from merged_univariate", prior)
-        cube = cube[cube["source"] != "backfill"].copy()
+def _load_working_cube(historical_path: Path, live_paths: list[Path]) -> pd.DataFrame:
+    """Concat historical + every live parquet into the working cube the seasonal
+    ratios + anchor rows are derived from. ``source`` is coerced to object so the
+    'backfill' value can be added without Categorical gymnastics."""
+    hist = pd.read_parquet(historical_path)
+    hist["month"] = pd.to_datetime(hist["month"])
+    frames = [hist]
+    for p in live_paths:
+        f = pd.read_parquet(p)
+        f["month"] = pd.to_datetime(f["month"])
+        frames.append(f)
+    cube = pd.concat(frames, ignore_index=True)
+    if "source" in cube.columns:
+        cube["source"] = cube["source"].astype("object")
+    return cube
 
-    # `source` is a Categorical — extend its categories to include 'backfill'.
-    if isinstance(cube["source"].dtype, pd.CategoricalDtype):
-        cube["source"] = cube["source"].cat.add_categories(["backfill"])
 
-    logger.info("backfilling merged_univariate for anchor=%s", target.strftime("%Y-%m"))
-    synthetic = _build_backfill_rows(
-        cube,
-        anchor=target,
-        key_cols=["dimension", "level_id"],
-        extra_cols={},
+def generate_univariate(target: pd.Timestamp, dry_run: bool) -> None:
+    """Build the synthetic univariate priors for ``target`` and write ONLY those
+    rows to the standalone backfill artifact (ADR 0002). ``aggregate`` unions it."""
+    cube = _load_working_cube(
+        HISTORICAL_UNIVARIATE_PARQUET, discover_live_univariate_parquets()
     )
-    out = pd.concat([cube, synthetic], ignore_index=True)
-    # Normalize so each (synthetic_month, dimension) sums to 1.0 again.
-    out = _normalize_shares(out, group_cols=["month", "dimension"])
-    out = out.sort_values(["dimension", "level_id", "month"]).reset_index(drop=True)
+    logger.info("generating univariate backfill priors for anchor=%s", target.strftime("%Y-%m"))
+    synthetic = _build_backfill_rows(
+        cube, anchor=target, key_cols=["dimension", "level_id"], extra_cols={}
+    )
+    # Renormalize so each (synthetic_month, dimension) sums to 1.0.
+    synthetic = _normalize_shares(synthetic, group_cols=["month", "dimension"])
+    synthetic = synthetic.sort_values(["dimension", "level_id", "month"]).reset_index(drop=True)
 
     if dry_run:
-        logger.info("dry-run: would write %d rows (%d synthetic) to %s",
-                    len(out), len(synthetic), merged_path)
+        logger.info("dry-run: would write %d synthetic rows to %s",
+                    len(synthetic), BACKFILL_UNIVARIATE_PARQUET)
         return
-    out.to_parquet(merged_path, index=False)
-    logger.info("wrote %s (%d rows, +%d synthetic backfill)",
-                merged_path, len(out), len(synthetic))
+    synthetic.to_parquet(BACKFILL_UNIVARIATE_PARQUET, index=False)
+    logger.info("wrote %s (%d synthetic backfill rows, months %s)",
+                BACKFILL_UNIVARIATE_PARQUET, len(synthetic),
+                sorted({pd.Timestamp(m).strftime("%Y-%m") for m in synthetic["month"].unique()}))
 
 
-def backfill_fingerprint(target: pd.Timestamp, dry_run: bool, merged_path: Path) -> None:
-    cube = pd.read_parquet(merged_path)
-    cube["month"] = pd.to_datetime(cube["month"])
-    if "source" in cube.columns and (cube["source"] == "backfill").any():
-        prior = (cube["source"] == "backfill").sum()
-        logger.info("dropping %d prior backfill rows from merged_fingerprint", prior)
-        cube = cube[cube["source"] != "backfill"].copy()
-    if isinstance(cube["source"].dtype, pd.CategoricalDtype):
-        cube["source"] = cube["source"].cat.add_categories(["backfill"])
-
+def generate_fingerprint(target: pd.Timestamp, dry_run: bool) -> None:
+    """Build the synthetic fingerprint priors for ``target`` and write ONLY those
+    rows to the standalone backfill artifact (ADR 0002)."""
+    cube = _load_working_cube(
+        HISTORICAL_FINGERPRINT_PARQUET, discover_live_fingerprint_parquets()
+    )
     key_cols = [
         "product_type_id", "gender_id", "color_master_id",
         "graphical_appearance_id", "material_id",
     ]
-    logger.info("backfilling merged_fingerprint for anchor=%s", target.strftime("%Y-%m"))
+    logger.info("generating fingerprint backfill priors for anchor=%s", target.strftime("%Y-%m"))
     synthetic = _build_backfill_rows(
-        cube,
-        anchor=target,
-        key_cols=key_cols,
-        extra_cols={"avg_price": np.nan},
+        cube, anchor=target, key_cols=key_cols, extra_cols={"avg_price": np.nan}
     )
-    out = pd.concat([cube, synthetic], ignore_index=True)
-    out = _normalize_shares(out, group_cols=["month"])
-    out = out.sort_values(key_cols + ["month"]).reset_index(drop=True)
+    synthetic = _normalize_shares(synthetic, group_cols=["month"])
+    synthetic = synthetic.sort_values(key_cols + ["month"]).reset_index(drop=True)
 
     if dry_run:
-        logger.info("dry-run: would write %d rows (%d synthetic) to %s",
-                    len(out), len(synthetic), merged_path)
+        logger.info("dry-run: would write %d synthetic rows to %s",
+                    len(synthetic), BACKFILL_FINGERPRINT_PARQUET)
         return
-    out.to_parquet(merged_path, index=False)
-    logger.info("wrote %s (%d rows, +%d synthetic backfill)",
-                merged_path, len(out), len(synthetic))
+    synthetic.to_parquet(BACKFILL_FINGERPRINT_PARQUET, index=False)
+    logger.info("wrote %s (%d synthetic backfill rows, months %s)",
+                BACKFILL_FINGERPRINT_PARQUET, len(synthetic),
+                sorted({pd.Timestamp(m).strftime("%Y-%m") for m in synthetic["month"].unique()}))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--target", type=str, default=None,
-        help="Anchor month to enable as 'YYYY-MM'. Default: auto-detect the latest "
-             "live month that lacks 3 prior lags.",
-    )
-    parser.add_argument(
-        "--month", type=str, default=None,
-        help="Tick month ('YYYY-MM') whose merged cubes to operate on. Default: "
-             "the most recent tick on disk, else the current calendar month.",
+        help="Month to peg the synthetic priors to, as 'YYYY-MM' (typically the "
+             "first live scrape after the historical gap). Default: auto-detect "
+             "the start of the latest contiguous live run.",
     )
     parser.add_argument("--dry-run", action="store_true", help="print plan, don't write")
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -323,31 +329,25 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    if args.month:
-        tick_month = resolve_tick_month(args.month)
-    else:
-        ticks = discover_ticks()
-        tick_month = resolve_tick_month(ticks[-1].name) if ticks else current_tick_month()
-    logger.info("operating on tick %s", tick_month.strftime("%Y-%m"))
-
-    merged_uv_path = tick_merged_path(tick_month, "univariate")
-    merged_fp_path = tick_merged_path(tick_month, "fingerprint")
-
     if args.target:
         target = pd.Timestamp(args.target + "-01")
     else:
-        # Auto-detect on the univariate cube; the same anchor should be the
-        # right one for the fingerprint cube too (both produced by the same
-        # monthly tick).
-        uv = pd.read_parquet(merged_uv_path)
-        target = _detect_isolated_anchor(uv)
+        # Auto-detect on the univariate working cube (historical + live); the
+        # same peg is right for fingerprint (same months).
+        uv = _load_working_cube(
+            HISTORICAL_UNIVARIATE_PARQUET, discover_live_univariate_parquets()
+        )
+        target = _detect_backfill_anchor(uv)
         if target is None:
-            logger.warning("no isolated anchor detected — nothing to backfill")
+            logger.warning(
+                "no backfill needed — the latest live month already has 3 "
+                "contiguous real priors (or no live data found)."
+            )
             return 0
-        logger.info("auto-detected target anchor: %s", target.strftime("%Y-%m"))
+        logger.info("auto-detected peg month: %s", target.strftime("%Y-%m"))
 
-    backfill_univariate(target, args.dry_run, merged_uv_path)
-    backfill_fingerprint(target, args.dry_run, merged_fp_path)
+    generate_univariate(target, args.dry_run)
+    generate_fingerprint(target, args.dry_run)
     return 0
 
 

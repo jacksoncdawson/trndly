@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 import joblib
@@ -96,6 +97,27 @@ def _find_eligible_anchor(cube: pd.DataFrame, *, lag_months: int = 3) -> pd.Time
         f"no anchor with {lag_months} contiguous prior months found in cube; "
         f"cube spans {min(months_sorted_desc)} → {max(months_sorted_desc)}"
     )
+
+
+def _assert_fresh_anchor(anchor: pd.Timestamp, cube: pd.DataFrame) -> None:
+    """Fail loud when ``anchor`` is older than the latest REAL (non-backfill)
+    month in ``cube`` — i.e. the live scrape lacks 3 contiguous priors and
+    predict would silently anchor on years-old history (the 2026-06 anchor=2020-08
+    incident). The persistent synthetic priors (ADR 0002, unioned by aggregate)
+    are the fix; this is the backstop if that artifact is missing/misloaded.
+    Override with ``TRNDLY_ALLOW_STALE_ANCHOR=1``.
+    """
+    real = cube[cube["source"] != "backfill"] if "source" in cube.columns else cube
+    latest_real = pd.to_datetime(real["month"]).max()
+    if anchor < latest_real and not os.environ.get("TRNDLY_ALLOW_STALE_ANCHOR"):
+        raise RuntimeError(
+            f"predict: eligible anchor {anchor:%Y-%m} is older than the latest real "
+            f"live month {latest_real:%Y-%m} — the live month lacks 3 contiguous "
+            f"prior months, so predict would anchor on stale history. Generate the "
+            f"synthetic anchor priors so aggregate can union them "
+            f"(`python -m scripts.backfill_anchor_lags`), then re-run aggregate + "
+            f"predict. Override with TRNDLY_ALLOW_STALE_ANCHOR=1 if intended."
+        )
 
 
 def _model_version(manifest_path) -> str:
@@ -309,22 +331,8 @@ def run_predict(month=None) -> dict[str, int]:
     anchor_fp = _find_eligible_anchor(cube_fp)
     anchor_uni = _find_eligible_anchor(cube_uni)
 
-    # Soft-warn when the chosen anchor isn't the latest month on disk — most
-    # often this means the latest live scrape lacks 3 prior lag months and
-    # predict fell back to the historical block. Surface the backfill stopgap
-    # so the operator can decide whether to run it instead of silently
-    # serving predictions from a years-old anchor.
-    latest_uni_month = pd.to_datetime(cube_uni["month"]).max()
-    if anchor_uni < latest_uni_month:
-        logger.warning(
-            "predict: anchor (%s) is older than the latest month in the cube (%s). "
-            "The newer month lacks 3 contiguous prior lags. If you want the newer "
-            "month as the anchor, run `python scripts/backfill_anchor_lags.py` "
-            "first to manufacture synthetic priors, then re-run this command. "
-            "See TODO.md 'Sparse cube' section for context.",
-            anchor_uni.strftime("%Y-%m"),
-            pd.Timestamp(latest_uni_month).strftime("%Y-%m"),
-        )
+    # Backstop: never silently anchor on stale history (the 2026-06 incident).
+    _assert_fresh_anchor(anchor_uni, cube_uni)
     if anchor_fp != anchor_uni:
         logger.warning(
             "predict: cube anchor mismatch (fingerprint=%s, univariate=%s); "
