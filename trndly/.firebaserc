@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "ml-ops-491417"
+  },
+  "targets": {
+    "ml-ops-491417": {
+      "hosting": {
+        "trndly": [
+          "trndly"
+        ]
+      }
+    }
+  }
+}

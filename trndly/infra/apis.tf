@@ -22,6 +22,10 @@ locals {
     # Phase 2 — Firebase Hosting.
     "firebase.googleapis.com",
     "firebasehosting.googleapis.com",
+    # Phase 2 — CI deploy via Workload Identity Federation (token exchange +
+    # short-lived SA credentials for the GitHub Actions deploy job).
+    "sts.googleapis.com",
+    "iamcredentials.googleapis.com",
     # Phase 5 — dynamic tier (Firestore + Identity Platform / Firebase Auth).
     "firestore.googleapis.com",
     "identitytoolkit.googleapis.com",

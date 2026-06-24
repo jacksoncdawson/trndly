@@ -1,0 +1,25 @@
+{
+  "hosting": {
+    "target": "trndly",
+    "public": "frontend",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**",
+      "**/*.parquet",
+      "**/*.csv",
+      "**/*_[0-9][0-9][0-9][0-9]-[0-9][0-9].json"
+    ],
+    "rewrites": [
+      { "source": "**", "destination": "/index.html" }
+    ],
+    "headers": [
+      {
+        "source": "/data/**",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-cache" }
+        ]
+      }
+    ]
+  }
+}
