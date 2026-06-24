@@ -1,0 +1,20 @@
+# Cloud Build config for the private MLflow image (Phase 3).
+#
+# `gcloud builds submit --tag` only builds a file literally named `Dockerfile`,
+# so building Dockerfile.mlflow needs an explicit `docker build -f`. Run from
+# infra/mlflow/:
+#   gcloud builds submit --config cloudbuild.yaml --project ml-ops-491417 .
+#
+# The image is immutable-tagged (3.14.0), matching the tag the Cloud Run service
+# pulls in infra/mlflow.tf.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.mlflow
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/mlflow/mlflow:3.14.0
+      - .
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/mlflow/mlflow:3.14.0

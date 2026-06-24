@@ -35,13 +35,13 @@ terraform apply -target=google_sql_database_instance.mlflow
 ```
 
 ### 3. 💲 Build + push the image (immutable tag)
+`gcloud builds submit --tag` only builds a file named exactly `Dockerfile`, so
+the named `Dockerfile.mlflow` is built via `infra/mlflow/cloudbuild.yaml` (an
+explicit `docker build -f`):
 ```sh
 cd infra/mlflow
-gcloud builds submit \
-  --tag us-central1-docker.pkg.dev/ml-ops-491417/mlflow/mlflow:3.14.0 \
-  --file Dockerfile.mlflow \
-  --project ml-ops-491417 \
-  .
+gcloud builds submit --config cloudbuild.yaml --project ml-ops-491417 .
+# pushes us-central1-docker.pkg.dev/ml-ops-491417/mlflow/mlflow:3.14.0
 ```
 **Retry once on a transient 403** — IAM propagation lag after the repo-scoped
 writer binding from step 1.
