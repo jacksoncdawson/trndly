@@ -407,16 +407,22 @@ That dev server has since been **retired**; the planned replacement is a
   `MlflowClient.set_registered_model_alias(name=..., alias='champion',
   version=...)` against the rebuilt private MLflow registry. Plumbing
   notes live in `pipelines/monthly/evaluate.py`.
-- The serving path. The `MLFLOW_*` variables in
-  `backend/services/.env` are **leftovers** from an older
-  registry-backed serving design and are **not referenced** by
-  `scheduleServer.py`; the service reads precomputed parquets only.
+- The serving path. The old `backend/services/.env` (leftover `MLFLOW_*`
+  vars + a since-revoked key, from an older registry-backed serving design)
+  has been **deleted** as part of the §2.5 incident remediation; it was never
+  referenced by `scheduleServer.py`. Serving reads precomputed parquet/JSON
+  only — the static publisher's output, with no compute behind it.
 
-### Frontend hosting: same-origin uvicorn → Firebase Hosting + Cloud Run API
+### Frontend hosting: same-origin uvicorn → Firebase Hosting (static)
 
-The React app is served at `/ui/` from the same FastAPI container today.
-Production split: Firebase Hosting for static assets, Cloud Run for the
-API, CORS allowlist between them.
+For local development the React app is served at `/ui/` from `scheduleServer`
+(a dev convenience + live contract reference). The redesign
+([serving-redesign.md](serving-redesign.md), Phase 2) makes serving fully
+**static**: the monthly tick's `publish` stage emits browser-ready JSON, and
+the SPA + JSON ship to **Firebase Hosting** (CDN, same-origin — no CORS).
+There is **no API tier** in the serving path — 0.2 MB of monthly-static data
+is a static-publish problem, not a server one, so FastAPI leaves serving
+entirely and there is no Cloud Run API behind the SPA.
 
 ### Auth: none → Firebase Auth
 
@@ -425,18 +431,13 @@ Inventory becomes per-user (Firestore-backed instead of session state).
 (`frontend/auth.js` is a demo stub — `login()` always succeeds and
 returns a hardcoded demo user.)
 
-### Containers: single Dockerfile → multi-image
+### Containers: the broken serving Dockerfile is gone
 
-`trndly/Dockerfile` is a starting point, but it currently only ships the
-**API**: it copies `backend/services` and runs `uvicorn scheduleServer:app`.
-Its `COPY pipelines/training /app/pipelines/training` line targets a
-directory that **does not exist** in the repo (the real packages are
-`pipelines/monthly` and `pipelines/collectors`), so it silently copies
-nothing — fix or remove that line when splitting the image. Planned
-split:
-
-- `trndly-collectors`: scrapers + `build_live_cube` (Cloud Run Job)
-- `trndly-monthly`: full tick, runs on Vertex (Cloud Run Job)
-- `trndly-api`: FastAPI service (Cloud Run Service)
-
-Each image inherits a shared base layer (Python 3.11 + deps).
+The old `trndly/Dockerfile` shipped the FastAPI server (and a `COPY` of a
+non-existent `pipelines/training` dir). With serving now static (above), it
+served no purpose and was **deleted** (with its orphaned `.dockerignore`) in
+Phase 2. The only container the build defines is the **private MLflow image**
+(`infra/mlflow/Dockerfile.mlflow`, Phase 3 — built via Cloud Build → Artifact
+Registry, run on Cloud Run). If the monthly tick is ever automated unattended,
+it would run as a **Cloud Run Job** from its own image (a clean follow-on, plan
+§11), but the tick has no container today — it runs as a local CLI.
