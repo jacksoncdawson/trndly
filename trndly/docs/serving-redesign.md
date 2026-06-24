@@ -139,8 +139,9 @@ Ordered by dependency. **Why this order:** local-first de-risks the riskiest swa
 | **3 — MLflow rebuilt (private)** | Cloud Run + Cloud SQL + GCS + `sa-mlflow` (TF); image; validate private access | 0 |
 | **4 — Lifecycle wiring** | `train` logs → `evaluate` flips `champion` alias → `predict` loads it (supersedes the local guard) | 3 |
 | **5 — Dynamic tier (deferred)** | Firestore + Auth (TF) → persistent inventory + login | 0 |
+| **6 — Cloud-native tick** *(proposed)* | Scheduled, idempotent tick on Cloud Run Job; **all data in GCS, none local**; Cloud Scheduler; `sa-tick`; GCS→CDN refresh. **Sequenced after Phase 4.** Status: PROPOSED — review first. See [phase6-cloud-native-tick.md](phase6-cloud-native-tick.md) | 4, 0, ADR 0001 |
 
-**Parallelism:** Phases 0+1 overlap. **Phase 3 depends only on Phase 0** (no shared code with 1/2) and its long pole (Cloud SQL provisioning + image build) should **start as soon as Phase 0 lands, in parallel with the Phase-1 local work.** Phase 2 depends on 1 (the JSON) + 0 (Firebase project). 4 requires 3. 5 last.
+**Parallelism:** Phases 0+1 overlap. **Phase 3 depends only on Phase 0** (no shared code with 1/2) and its long pole (Cloud SQL provisioning + image build) should **start as soon as Phase 0 lands, in parallel with the Phase-1 local work.** Phase 2 depends on 1 (the JSON) + 0 (Firebase project). 4 requires 3. 5 last. **6 requires 4** (the MLflow ID-token path) + accepted ADR 0001; it is independent of 5.
 
 ---
 
@@ -203,7 +204,7 @@ Ordered by dependency. **Why this order:** local-first de-risks the riskiest swa
 ## 11. Deferred / out of scope (now)
 - **Résumé accuracy** — evaluate post-build (the GCP-MLflow claim needs revisiting; lead on the verifiable pipeline/contracts/256-tests/CI).
 - **Model performance** — champion quality / drift / synthesis quality — separate phase after wiring.
-- **Tick cadence automation** (Cloud Scheduler + Cloud Run Job + the MLflow ID-token path) — a clean follow-on; note it's also what unblocks unattended Phase-4 champion-flips. **BLOCKED ON A DECISION:** the cloud tick writes `published/` JSON to GCS, but Firebase Hosting can't serve from GCS directly, and the current git-driven CI deploy would clobber cloud-generated data with stale committed JSON. See [decisions/0001-cloud-tick-cdn-refresh.md](decisions/0001-cloud-tick-cdn-refresh.md) (status: **Proposed — review before implementing**) for the conflict + proposed GCS-as-source-of-truth resolution.
+- **Tick cadence automation → now promoted to [Phase 6 — Cloud-native tick](phase6-cloud-native-tick.md)** (scheduled, idempotent, all-GCS tick; sequenced after Phase 4). Status: PROPOSED — review before building. Its serving-refresh sub-decision is **[ADR 0001](decisions/0001-cloud-tick-cdn-refresh.md)** (the cloud tick writes `published/` to GCS, but Firebase Hosting can't serve from GCS directly, and the git-driven CI deploy would clobber cloud data with stale committed JSON — proposed fix: GCS as the single data source of truth). ADR 0001 must be accepted before the Phase-6 serving step is built.
 
 ---
 
