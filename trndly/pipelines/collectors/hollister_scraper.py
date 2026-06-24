@@ -1,39 +1,53 @@
 """
 Hollister retail scraper for trndly trend signals.
 
-Pulls Hollister's full women + men catalog directly from the SSR'd HTML
-of two shop-all PLPs. The product catalog is embedded as an Apollo GraphQL
-cache inside a `<script>` block — there's no separate JSON API to call.
-Plain `httpx` over HTTP/1.1 with a desktop Chrome User-Agent passes
-Akamai's edge fingerprint check (curl and HTTP/2 are blocked, but httpx
-default behavior works).
+Pulls Hollister's full women + men catalog from the SSR'd HTML of two
+shop-all PLPs. The product catalog is embedded as an Apollo GraphQL cache
+inside a `<script>` block — there's no clean public JSON API to call.
+
+ALL FETCHING GOES THROUGH A HEADLESS BROWSER (Playwright/Chromium).
+------------------------------------------------------------------
+Hollister (an Abercrombie & Fitch property) is now behind an Akamai edge
+fingerprint/IP-reputation check that serves a deterministic **403**
+("Bad Request / Reference ID", 149-byte body) to httpx/curl for EVERY
+client shape — UA/header/HTTP-version tweaks do NOT fix it, and there are
+no `_abck`/`bm_sz` handoff cookies to harvest into httpx. The only thing
+that passes is a real headless Chromium issuing a full page navigation.
+
+  * `page.goto("…/shop/us/womens")`            → 200, Apollo state present.
+  * `page.goto("…/shop/us/womens?start=90")`   → 200, the NEXT 90 products.
+  * `context.request.get(PLP, params={start})` → **403** (bare APIRequest-
+    Context is fingerprinted even with full browser headers / referer /
+    sec-fetch-*). So we paginate via real navigations, NOT replayed XHRs.
+
+(History: this file used to claim "httpx HTTP/1.1 passes Akamai." That was
+true once; it is now FALSE. Akamai tightened the edge check and the old
+httpx path silently returned `[], 0` and wrote a header-only CSV — the
+2026-06 incident. Do not reintroduce httpx fetching here.)
 
 OUTPUT
 ------
 items_hollister.csv  — one row per (product × color variant). Schema
 mirrors items_gap.csv. `web_product_type` stays "" for Hollister.
 
-LOAD-BEARING DETAIL
--------------------
-**Use httpx defaults: HTTP/1.1, Accept-Encoding gzip+brotli.** Do NOT set
-`http2=True`. Akamai's bot check is satisfied by httpx's TLS fingerprint
-but rejects HTTP/2 from anything that isn't a real browser. If the
-implementation ever switches to HTTP/2 or to an HTTP client with a
-curl-like fingerprint, you'll get 403 + "Bad Request / Reference ID..."
-and need to fall back to the Playwright cookie-bootstrap pattern (the
-scaffolding for that is in /tmp/hollister_bootstrap_test.py from the
-recon).
-
 PIPELINE SHAPE
 --------------
-Phase 1   — paginate the two shop-all PLPs. Each HTML response carries
-            `productTotalCount` and `totalPages` in its embedded Apollo
-            state. Walk `start in (0, 90, ..., 90*(totalPages-1))` in
-            parallel under a Semaphore.
+Phase 0   — launch ONE headless Chromium + context for the whole run
+            (mirrors american_eagle_scraper._bootstrap_session: browser
+            UA, `--disable-blink-features=AutomationControlled`,
+            navigator.webdriver hidden). Image/font requests are aborted
+            via routing so navigations are fast and gentle on the site.
+
+Phase 1   — paginate the two shop-all PLPs by full navigation. The first
+            response carries `productTotalCount`/`totalPages` in its Apollo
+            state; we then walk `start in (90, 180, …, 90*(totalPages-1))`.
+            A small pool of browser pages gives bounded concurrency; each
+            page navigates its assigned `start` offsets sequentially.
 
 Phase 1.5 — (optional, default ON) For each unique productPageUrl whose
-            title yields no explicit fabric keyword, GET the PDP HTML and
-            regex-extract `"fabricDetails":"..."`.
+            title yields no explicit fabric keyword, navigate to the PDP
+            (browser, NOT httpx — PDPs are Akamai-protected too) and
+            regex-extract `"fabricDetails":"…"`.
 
 Phase 2   — Project each (product × color) combo into the items CSV.
 
@@ -45,12 +59,13 @@ products are gendered; same product never appears in both shop-alls).
 
 Setup
 -----
-  pip install httpx pandas
+  pip install playwright pandas
+  playwright install chromium
 
 Usage
 -----
   python hollister_scraper.py
-  python hollister_scraper.py --concurrency 6
+  python hollister_scraper.py --concurrency 4       # browser pages in flight
   python hollister_scraper.py --max-products-per-page 5
   python hollister_scraper.py --no-enrich-pdp
   python hollister_scraper.py --resume
@@ -63,15 +78,10 @@ import asyncio
 import csv
 import datetime
 import json
-import os
-import random
 import re
 import sys
 import time
 from pathlib import Path
-
-import httpx
-import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -119,11 +129,27 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-HTTP_HEADERS = {
-    "User-Agent":      USER_AGENT,
-    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+
+# Navigation timeout per page.goto, ms. Hollister PLPs are ~1.5 MB of SSR
+# HTML; with image/font requests aborted, DOMContentLoaded lands well under
+# this, but the first navigation per page warms the connection.
+NAV_TIMEOUT_MS = 60_000
+# Default browser-page concurrency. Each page navigates sequentially; this
+# is how many pages navigate at once. 4 is gentle and reliable.
+DEFAULT_CONCURRENCY = 4
+# Retry a navigation this many times before giving up on a single offset.
+NAV_MAX_ATTEMPTS = 3
+# Static-asset request types / hosts to abort so navigations stay fast and
+# light on the live site. The Apollo state we parse is in the document HTML,
+# so none of this is needed.
+_BLOCK_RESOURCE_TYPES = {"image", "media", "font"}
+_BLOCK_URL_RE = re.compile(
+    r"img\.hollisterco\.com"
+    r"|cdn\.gladly\.com"
+    r"|signifyd\.com"
+    r"|\.(?:png|jpe?g|webp|gif|svg|woff2?|ttf|mp4)(?:\?|$)",
+    re.I,
+)
 
 # Apollo state script-block marker. The Hollister page embeds the full
 # catalog cache as: window['APOLLO_STATE__catalog-mfe-web-service-CategoryPageFrontEnd-config'] = {...};
@@ -133,20 +159,115 @@ APOLLO_ASSIGN_RE = re.compile(rf"{re.escape(APOLLO_STATE_PREFIX)}[^=]*=\s*", re.
 # PDP fabric extraction.
 PDP_FABRIC_RE = re.compile(r'"fabricDetails":"((?:[^"\\]|\\.)*)"')
 
-from functools import partial
-
 from pipelines.collectors._http_utils import (  # noqa: E402
     CSV_FIELDNAMES,
-    DEFAULT_MAX_ATTEMPTS,
-    DEFAULT_RETRYABLE_STATUSES,
     StreamingItemWriter,
-    request_with_retry,
 )
 
-# Hollister includes 403 because Akamai sometimes 403s under load and yields
-# on retry — request_with_retry's default set is transient (408/425/429/5xx).
-RETRYABLE_STATUSES = DEFAULT_RETRYABLE_STATUSES | {403}
-_request_with_retry = partial(request_with_retry, retryable_statuses=RETRYABLE_STATUSES)
+
+# --------------------------------------------------------------------------- #
+# Browser session (Playwright) — owns one Chromium + context per run           #
+# --------------------------------------------------------------------------- #
+
+class HollisterBrowser:
+    """Async context manager owning ONE headless Chromium + browser context
+    for the whole run. All fetching (PLP pagination + PDP enrichment) goes
+    through page navigations on this context, because Hollister's Akamai edge
+    403s every non-browser client shape (httpx, curl, even Playwright's bare
+    APIRequestContext). Mirrors american_eagle_scraper._bootstrap_session's
+    launch flags / anti-automation tweaks.
+
+    `fetch_html(url)` runs a `page.goto` with retries and returns the rendered
+    HTML, or None if every attempt failed. It acquires a page from a small
+    pool (`concurrency` pages) so up to `concurrency` navigations run at once;
+    each page navigates sequentially (a single page can only be on one URL).
+    """
+
+    def __init__(self, concurrency: int = DEFAULT_CONCURRENCY, verbose: bool = True) -> None:
+        self.concurrency = max(1, concurrency)
+        self.verbose = verbose
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._pages: asyncio.Queue = asyncio.Queue()
+
+    async def __aenter__(self) -> "HollisterBrowser":
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "playwright not installed. Run: "
+                "pip install playwright && playwright install chromium"
+            ) from exc
+
+        self._pw = await async_playwright().start()
+        self._browser = await self._pw.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        self._context = await self._browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1440, "height": 900},
+            locale="en-US",
+        )
+        await self._context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
+        # Drop heavy/irrelevant requests; the catalog data is in the HTML.
+        async def _route(route):
+            req = route.request
+            if req.resource_type in _BLOCK_RESOURCE_TYPES or _BLOCK_URL_RE.search(req.url):
+                try:
+                    await route.abort()
+                except Exception:
+                    await route.continue_()
+            else:
+                await route.continue_()
+
+        await self._context.route("**/*", _route)
+
+        for _ in range(self.concurrency):
+            page = await self._context.new_page()
+            page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
+            await self._pages.put(page)
+        if self.verbose:
+            print(f"  [browser] launched headless Chromium, {self.concurrency} pages")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._browser is not None:
+            await self._browser.close()
+        if self._pw is not None:
+            await self._pw.stop()
+
+    async def fetch_html(self, url: str, *, label: str = "", verbose: bool | None = None) -> str | None:
+        verbose = self.verbose if verbose is None else verbose
+        page = await self._pages.get()
+        try:
+            for attempt in range(1, NAV_MAX_ATTEMPTS + 1):
+                try:
+                    resp = await page.goto(url, wait_until="domcontentloaded")
+                    status = resp.status if resp is not None else 0
+                    if status == 200:
+                        return await page.content()
+                    if verbose:
+                        print(
+                            f"    [nav] {label or url} got {status}, "
+                            f"retry {attempt}/{NAV_MAX_ATTEMPTS}"
+                        )
+                except Exception as exc:  # navigation timeout / target closed
+                    if verbose:
+                        print(
+                            f"    [nav] {label or url} {type(exc).__name__}: "
+                            f"retry {attempt}/{NAV_MAX_ATTEMPTS}"
+                        )
+                if attempt < NAV_MAX_ATTEMPTS:
+                    await asyncio.sleep(1.5 * attempt)
+            if verbose:
+                print(f"    [nav] {label or url} GAVE UP after {NAV_MAX_ATTEMPTS} attempts")
+            return None
+        finally:
+            await self._pages.put(page)
 
 
 # --------------------------------------------------------------------------- #
@@ -273,32 +394,34 @@ def _extract_combos_from_apollo(
 # --------------------------------------------------------------------------- #
 
 async def _fetch_listing_page(
-    client: httpx.AsyncClient,
+    browser: HollisterBrowser,
     slug: str,
     start: int,
     verbose: bool = True,
 ) -> str | None:
+    """Navigate to one PLP page (start=0 or start=N) and return the rendered
+    HTML. Pagination is `?start=N` (multiples of PAGE_SIZE); start=0 omits the
+    param. Goes through `browser.fetch_html` (real navigation) — `?start=N`
+    via a bare APIRequestContext 403s, so navigation is mandatory.
+    """
     url = PLP_URL_TEMPLATE.format(slug=slug)
-    params = {"start": str(start)} if start else None
-    resp = await _request_with_retry(
-        client, url, params=params,
-        label=f"plp slug={slug} start={start}", verbose=verbose,
+    if start:
+        url = f"{url}?start={start}"
+    return await browser.fetch_html(
+        url, label=f"plp slug={slug} start={start}", verbose=verbose,
     )
-    return resp.text if resp is not None else None
 
 
 async def _fetch_listings_for_target(
-    client: httpx.AsyncClient,
+    browser: HollisterBrowser,
     target: dict,
-    semaphore: asyncio.Semaphore,
     verbose: bool = True,
 ) -> tuple[list[dict], int]:
     slug   = target["slug"]
     gender = target["gender"]
     label  = target["label"]
 
-    async with semaphore:
-        first_html = await _fetch_listing_page(client, slug, start=0, verbose=verbose)
+    first_html = await _fetch_listing_page(browser, slug, start=0, verbose=verbose)
     if first_html is None:
         print(f"  [{label}] FAILED to fetch start=0 — aborting this target")
         return [], 0
@@ -315,8 +438,7 @@ async def _fetch_listings_for_target(
     pages_combos: list[list[dict]] = [first_combos]
     if total_pages > 1:
         async def fetch_one(start: int) -> list[dict]:
-            async with semaphore:
-                html = await _fetch_listing_page(client, slug, start=start, verbose=verbose)
+            html = await _fetch_listing_page(browser, slug, start=start, verbose=verbose)
             if html is None:
                 return []
             st = _parse_apollo_state(html)
@@ -325,6 +447,8 @@ async def _fetch_listings_for_target(
             combos, _, _ = _extract_combos_from_apollo(st, gender)
             return combos
         starts = [PAGE_SIZE * p for p in range(1, total_pages)]
+        # browser.fetch_html bounds concurrency via its internal page pool;
+        # gather all offsets and let the pool serialize them.
         rest = await asyncio.gather(*[fetch_one(s) for s in starts])
         pages_combos.extend(rest)
 
@@ -354,20 +478,18 @@ async def _fetch_listings_for_target(
 
 
 async def _scrape_hollister_via_html(
+    browser: HollisterBrowser,
     targets: list[dict] = HOLLISTER_TARGETS,
-    concurrency: int = 6,
     max_products_per_page: int | None = None,
     verbose: bool = True,
 ) -> tuple[list[dict], dict[str, int]]:
-    timeout = httpx.Timeout(connect=10, read=45, write=15, pool=15)
-    limits  = httpx.Limits(max_connections=max(concurrency * 2, 16))
-    sem     = asyncio.Semaphore(concurrency)
-
-    # Critical: HTTP/1.1 (httpx default). Do NOT pass http2=True.
-    async with httpx.AsyncClient(headers=HTTP_HEADERS, timeout=timeout, limits=limits) as client:
-        results = await asyncio.gather(*[
-            _fetch_listings_for_target(client, t, sem, verbose=verbose) for t in targets
-        ])
+    """Paginate every target through the shared browser. The browser's page
+    pool bounds how many navigations run at once; targets are gathered so
+    both genders' offsets compete for the same pool.
+    """
+    results = await asyncio.gather(*[
+        _fetch_listings_for_target(browser, t, verbose=verbose) for t in targets
+    ])
 
     all_combos: list[dict] = []
     totals: dict[str, int] = {}
@@ -391,27 +513,15 @@ async def _scrape_hollister_via_html(
 # Phase 1.5 — PDP material enrichment                                           #
 # --------------------------------------------------------------------------- #
 
-async def _fetch_pdp_fabric(
-    client: httpx.AsyncClient,
-    url_path: str,
-    semaphore: asyncio.Semaphore,
-    verbose: bool = True,
-) -> str:
-    """Fetch one Hollister PDP HTML and return the joined fabricDetails
-    strings. Empty string on miss.
+def _parse_fabric_from_html(html: str) -> str:
+    """Extract + join the percentage-bearing ``fabricDetails`` strings from PDP
+    HTML. Pure (no I/O) so it's unit-testable; the browser fetch lives in
+    ``_fetch_pdp_fabric``. Multiple swatch variants of the same product can each
+    contribute a fabricDetails string — joining them lets the percentage-aware
+    extractor see all components.
     """
-    if not url_path:
-        return ""
-    url = PDP_BASE + url_path if url_path.startswith("/") else url_path
-    async with semaphore:
-        resp = await _request_with_retry(
-            client, url, label=f"pdp/{url_path[:60]}", verbose=verbose,
-        )
-    if resp is None:
-        return ""
-    matches = PDP_FABRIC_RE.findall(resp.text)
     bullets: list[str] = []
-    for raw in matches:
+    for raw in PDP_FABRIC_RE.findall(html):
         if not raw:
             continue
         try:
@@ -420,26 +530,38 @@ async def _fetch_pdp_fabric(
             decoded = raw
         if "%" in decoded:
             bullets.append(decoded)
-    # Multiple swatch variants of the same product can each contribute a
-    # fabricDetails string. Joining them lets the percentage-aware
-    # extractor see all components.
     return " ".join(bullets)
 
 
+async def _fetch_pdp_fabric(
+    browser: HollisterBrowser,
+    url_path: str,
+    verbose: bool = True,
+) -> str:
+    """Navigate to one Hollister PDP and return the joined fabricDetails
+    strings. Empty string on miss. PDPs are Akamai-protected like the PLPs,
+    so this goes through the browser too (not httpx).
+    """
+    if not url_path:
+        return ""
+    url = PDP_BASE + url_path if url_path.startswith("/") else url_path
+    html = await browser.fetch_html(url, label=f"pdp/{url_path[:60]}", verbose=verbose)
+    if html is None:
+        return ""
+    return _parse_fabric_from_html(html)
+
+
 async def _enrich_materials_via_pdps(
+    browser: HollisterBrowser,
     items: list[tuple[str, str]],   # (product_id, url_path)
-    concurrency: int = 6,
     verbose: bool = True,
 ) -> dict[str, str]:
     if not items:
         return {}
-    timeout = httpx.Timeout(connect=10, read=45, write=15, pool=15)
-    limits  = httpx.Limits(max_connections=max(concurrency * 2, 16))
-    sem     = asyncio.Semaphore(concurrency)
-    async with httpx.AsyncClient(headers=HTTP_HEADERS, timeout=timeout, limits=limits) as client:
-        results = await asyncio.gather(*[
-            _fetch_pdp_fabric(client, url_path, sem, verbose=verbose) for _pid, url_path in items
-        ])
+    # The browser's page pool bounds concurrency; gather all PDP navigations.
+    results = await asyncio.gather(*[
+        _fetch_pdp_fabric(browser, url_path, verbose=verbose) for _pid, url_path in items
+    ])
     return {pid: text for (pid, _u), text in zip(items, results) if text}
 
 
@@ -557,6 +679,62 @@ KNOWN_FEATURE_VALUES: dict[str, list[str]] = {
 
 
 # --------------------------------------------------------------------------- #
+# Orchestration — one browser for Phase 1 (PLPs) + Phase 1.5 (PDPs)             #
+# --------------------------------------------------------------------------- #
+
+async def _run_scrape(
+    *,
+    concurrency: int,
+    max_products_per_page: int | None,
+    enrich_pdp: bool,
+) -> tuple[list[dict], dict[str, int], dict[str, str]]:
+    """Open ONE browser for the whole run; paginate the PLPs (Phase 1) and,
+    if requested, enrich materials via PDP navigation (Phase 1.5) on the same
+    browser. Returns (combos, per-target totals, enriched material map).
+    """
+    async with HollisterBrowser(concurrency=concurrency) as browser:
+        print("Phase 1: paginating Hollister shop-all PLPs ...")
+        combos, totals = await _scrape_hollister_via_html(
+            browser,
+            targets=HOLLISTER_TARGETS,
+            max_products_per_page=max_products_per_page,
+        )
+
+        enriched: dict[str, str] = {}
+        if enrich_pdp:
+            # Enrich every product whose title doesn't carry an explicit
+            # fabric keyword. Keyed by product_id; each gets one PDP fetch
+            # even if the product has many color variants.
+            unknown_pairs: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for c in combos:
+                pid = c["product_id"]
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                if not has_explicit_material_keyword(c["name"]):
+                    unknown_pairs.append((pid, c["url_path"]))
+            if unknown_pairs:
+                print(
+                    f"\nPhase 1.5: enriching material for {len(unknown_pairs)} "
+                    f"products via PDP fabricDetails ..."
+                )
+                t0 = time.perf_counter()
+                enriched = await _enrich_materials_via_pdps(
+                    browser, unknown_pairs, verbose=False,
+                )
+                print(
+                    f"  enriched {len(enriched)}/{len(unknown_pairs)} PDPs "
+                    f"in {time.perf_counter()-t0:.1f}s "
+                    f"({len(unknown_pairs) - len(enriched)} returned no fabric data)"
+                )
+            else:
+                print("\nPhase 1.5: no products need PDP enrichment (skipping).")
+
+    return combos, totals, enriched
+
+
+# --------------------------------------------------------------------------- #
 # CLI                                                                           #
 # --------------------------------------------------------------------------- #
 
@@ -568,7 +746,11 @@ def parse_args() -> argparse.Namespace:
                     "items_*.csv into live_*_<YYYY-MM>.parquet cubes."
     )
     parser.add_argument("--items-path", default=str(default_items))
-    parser.add_argument("--concurrency", type=int, default=6)
+    parser.add_argument(
+        "--concurrency", type=int, default=DEFAULT_CONCURRENCY,
+        help=f"Browser pages navigating at once (default {DEFAULT_CONCURRENCY}). "
+             "Each page navigates its offsets sequentially.",
+    )
     parser.add_argument("--max-products-per-page", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--strict", action="store_true")
@@ -586,7 +768,7 @@ def main() -> None:
 
     cap_msg = "no cap" if args.max_products_per_page is None else f"max {args.max_products_per_page}/target"
     print(
-        f"Hollister retail scraper (HTML/Apollo mode)\n"
+        f"Hollister retail scraper (Playwright/Apollo mode)\n"
         f"  targets:     {len(HOLLISTER_TARGETS)}  concurrency: {args.concurrency}  ({cap_msg})\n"
         f"  output:      {items_path}\n"
         f"  resume:      {args.resume}\n"
@@ -596,43 +778,15 @@ def main() -> None:
     scraped_at = datetime.date.today().isoformat()
     start = time.perf_counter()
 
-    print("Phase 1: paginating Hollister shop-all PLPs ...")
-    combos, totals = asyncio.run(_scrape_hollister_via_html(
-        targets=HOLLISTER_TARGETS,
-        concurrency=args.concurrency,
-        max_products_per_page=args.max_products_per_page,
-    ))
-
-    enriched: dict[str, str] = {}
-    if args.enrich_pdp:
-        # Enrich every product whose title doesn't carry an explicit fabric
-        # keyword. Keyed by product_id; each gets one PDP fetch even if the
-        # product has many color variants.
-        unknown_pairs: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for c in combos:
-            pid = c["product_id"]
-            if pid in seen:
-                continue
-            seen.add(pid)
-            if not has_explicit_material_keyword(c["name"]):
-                unknown_pairs.append((pid, c["url_path"]))
-        if unknown_pairs:
-            print(
-                f"\nPhase 1.5: enriching material for {len(unknown_pairs)} "
-                f"products via PDP fabricDetails ..."
-            )
-            t0 = time.perf_counter()
-            enriched = asyncio.run(_enrich_materials_via_pdps(
-                unknown_pairs, concurrency=args.concurrency, verbose=False,
-            ))
-            print(
-                f"  enriched {len(enriched)}/{len(unknown_pairs)} PDPs "
-                f"in {time.perf_counter()-t0:.1f}s "
-                f"({len(unknown_pairs) - len(enriched)} returned no fabric data)"
-            )
-        else:
-            print("\nPhase 1.5: no products need PDP enrichment (skipping).")
+    try:
+        combos, totals, enriched = asyncio.run(_run_scrape(
+            concurrency=args.concurrency,
+            max_products_per_page=args.max_products_per_page,
+            enrich_pdp=args.enrich_pdp,
+        ))
+    except RuntimeError as exc:
+        print(f"  scrape failed: {exc}")
+        sys.exit(2)
 
     print(f"\nPhase 2: writing items CSV ({len(combos)} combos to project) ...")
     written = 0

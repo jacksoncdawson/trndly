@@ -11,10 +11,8 @@ Test coverage:
 """
 from __future__ import annotations
 
-import asyncio
 import csv
 
-import httpx
 import pytest
 
 from pipelines.collectors import hollister_scraper as hs
@@ -91,23 +89,18 @@ def test_hollister_combo_to_row_emits_18_column_contract():
 # 4. PDP fabric extraction                                                     #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.asyncio
-async def test_hollister_pdp_fabric_extraction(httpx_mock, hollister_pdp_html):
-    """Hollister builds the PDP URL from product slug + product_id; we mock
-    whatever URL _fetch_pdp_fabric requests."""
-    # Mock by regex since the URL builder is fiddly — just match any PDP fetch.
-    import re
-    httpx_mock.add_response(
-        url=re.compile(r"https://www\.hollisterco\.com/shop/us/p/.*"),
-        text=hollister_pdp_html,
-        is_reusable=True,
-    )
-    sem = asyncio.Semaphore(2)
-    async with httpx.AsyncClient() as client:
-        text = await hs._fetch_pdp_fabric(
-            client, "/shop/us/p/test-H999", sem, verbose=False,
-        )
-    assert "60% Cotton" in text
+def test_hollister_pdp_fabric_extraction(hollister_pdp_html):
+    """Fabric extraction is pure parsing over PDP HTML. The PDP fetch now goes
+    through the browser (Akamai-protected, not httpx), so we unit-test the parser
+    `_parse_fabric_from_html` directly against the fixture HTML."""
+    fabric = hs._parse_fabric_from_html(hollister_pdp_html)
+    assert "60% Cotton" in fabric
+    assert "40% Polyester" in fabric
+
+
+def test_hollister_pdp_fabric_extraction_miss():
+    """No fabricDetails (or no percentage) → empty string, not a crash."""
+    assert hs._parse_fabric_from_html("<html><body>no fabric here</body></html>") == ""
 
 
 # --------------------------------------------------------------------------- #
