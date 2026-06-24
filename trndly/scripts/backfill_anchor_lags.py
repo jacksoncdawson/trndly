@@ -30,19 +30,24 @@ When historical doesn't carry a key (or the corresponding live anchor month),
 we fall back to a global ratio across all keys for that month. When even
 that isn't available, we clone share_t backwards (assume flat past).
 
-The output is written **in place** to merged_univariate.parquet and
-merged_fingerprint.parquet so `pipelines.monthly.predict` will naturally
-pick the live month as the anchor on its next run. Backfilled rows are
-marked with `source = 'backfill'` (added as a new category) so they're
-traceable and can be filtered out later.
+The output is written **in place** to the current tick's
+``ticks/<MONTH>/merged_univariate.parquet`` and ``merged_fingerprint.parquet`` so
+`pipelines.monthly.predict` will naturally pick the live month as the anchor on
+its next run. Backfilled rows are marked with `source = 'backfill'` (added as a
+new category) so they're traceable and can be filtered out later.
 
-Re-running `pipelines.monthly.aggregate` rebuilds the merged cubes from raw
-sources and will clobber this backfill — that's intended. The backfill is a
+Re-running `pipelines.monthly.aggregate` rebuilds the tick's merged cubes from
+raw sources and will clobber this backfill — that's intended. The backfill is a
 one-time hack to keep the UI honest until real live history accumulates.
+
+``--month`` selects which tick's merged cubes to operate on (default: the most
+recent tick on disk, else the current calendar month); ``--target`` is the anchor
+month to enable.
 
 Usage:
   python -m scripts.backfill_anchor_lags                   # auto-detects latest isolated live month
-  python -m scripts.backfill_anchor_lags --target 2026-05  # explicit
+  python -m scripts.backfill_anchor_lags --target 2026-05  # explicit anchor
+  python -m scripts.backfill_anchor_lags --month 2026-06   # explicit tick
   python -m scripts.backfill_anchor_lags --dry-run         # print plan, don't write
 """
 
@@ -62,8 +67,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pipelines.paths import (
-    MERGED_FINGERPRINT_PARQUET,
-    MERGED_UNIVARIATE_PARQUET,
+    current_tick_month,
+    discover_ticks,
+    resolve_tick_month,
+    tick_merged_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -227,8 +234,8 @@ def _normalize_shares(cube: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame
     return out
 
 
-def backfill_univariate(target: pd.Timestamp, dry_run: bool) -> None:
-    cube = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
+def backfill_univariate(target: pd.Timestamp, dry_run: bool, merged_path: Path) -> None:
+    cube = pd.read_parquet(merged_path)
     cube["month"] = pd.to_datetime(cube["month"])
     # Drop any prior backfill so re-running is idempotent.
     if "source" in cube.columns and (cube["source"] == "backfill").any():
@@ -254,15 +261,15 @@ def backfill_univariate(target: pd.Timestamp, dry_run: bool) -> None:
 
     if dry_run:
         logger.info("dry-run: would write %d rows (%d synthetic) to %s",
-                    len(out), len(synthetic), MERGED_UNIVARIATE_PARQUET)
+                    len(out), len(synthetic), merged_path)
         return
-    out.to_parquet(MERGED_UNIVARIATE_PARQUET, index=False)
+    out.to_parquet(merged_path, index=False)
     logger.info("wrote %s (%d rows, +%d synthetic backfill)",
-                MERGED_UNIVARIATE_PARQUET, len(out), len(synthetic))
+                merged_path, len(out), len(synthetic))
 
 
-def backfill_fingerprint(target: pd.Timestamp, dry_run: bool) -> None:
-    cube = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
+def backfill_fingerprint(target: pd.Timestamp, dry_run: bool, merged_path: Path) -> None:
+    cube = pd.read_parquet(merged_path)
     cube["month"] = pd.to_datetime(cube["month"])
     if "source" in cube.columns and (cube["source"] == "backfill").any():
         prior = (cube["source"] == "backfill").sum()
@@ -288,11 +295,11 @@ def backfill_fingerprint(target: pd.Timestamp, dry_run: bool) -> None:
 
     if dry_run:
         logger.info("dry-run: would write %d rows (%d synthetic) to %s",
-                    len(out), len(synthetic), MERGED_FINGERPRINT_PARQUET)
+                    len(out), len(synthetic), merged_path)
         return
-    out.to_parquet(MERGED_FINGERPRINT_PARQUET, index=False)
+    out.to_parquet(merged_path, index=False)
     logger.info("wrote %s (%d rows, +%d synthetic backfill)",
-                MERGED_FINGERPRINT_PARQUET, len(out), len(synthetic))
+                merged_path, len(out), len(synthetic))
 
 
 def main() -> int:
@@ -301,6 +308,11 @@ def main() -> int:
         "--target", type=str, default=None,
         help="Anchor month to enable as 'YYYY-MM'. Default: auto-detect the latest "
              "live month that lacks 3 prior lags.",
+    )
+    parser.add_argument(
+        "--month", type=str, default=None,
+        help="Tick month ('YYYY-MM') whose merged cubes to operate on. Default: "
+             "the most recent tick on disk, else the current calendar month.",
     )
     parser.add_argument("--dry-run", action="store_true", help="print plan, don't write")
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -311,21 +323,31 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    if args.month:
+        tick_month = resolve_tick_month(args.month)
+    else:
+        ticks = discover_ticks()
+        tick_month = resolve_tick_month(ticks[-1].name) if ticks else current_tick_month()
+    logger.info("operating on tick %s", tick_month.strftime("%Y-%m"))
+
+    merged_uv_path = tick_merged_path(tick_month, "univariate")
+    merged_fp_path = tick_merged_path(tick_month, "fingerprint")
+
     if args.target:
         target = pd.Timestamp(args.target + "-01")
     else:
         # Auto-detect on the univariate cube; the same anchor should be the
         # right one for the fingerprint cube too (both produced by the same
         # monthly tick).
-        uv = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
+        uv = pd.read_parquet(merged_uv_path)
         target = _detect_isolated_anchor(uv)
         if target is None:
             logger.warning("no isolated anchor detected — nothing to backfill")
             return 0
         logger.info("auto-detected target anchor: %s", target.strftime("%Y-%m"))
 
-    backfill_univariate(target, args.dry_run)
-    backfill_fingerprint(target, args.dry_run)
+    backfill_univariate(target, args.dry_run, merged_uv_path)
+    backfill_fingerprint(target, args.dry_run, merged_fp_path)
     return 0
 
 

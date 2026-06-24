@@ -12,8 +12,8 @@ Public API:
                                     univariate cube
     month_shift(ts, k)            — add k calendar months to a Timestamp
     pick_anchor_month(user, cube) — choose anchor month for inference
-    build_fingerprint_inference_rows(cube, *, anchor_month, dimensions)
-    build_univariate_inference_row(cube_long, *, anchor_month, dimension, level_id)
+    build_fingerprint_inference_rows(cube, *, anchor_month, dimensions, feature_contract_path)
+    build_univariate_inference_row(cube_long, *, anchor_month, dimension, level_id, feature_contract_path)
 """
 
 from __future__ import annotations
@@ -25,11 +25,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import DateOffset
-
-from pipelines.paths import (
-    MERGED_FINGERPRINT_PARQUET,
-    TRAINING_RUN_JSON,
-)
 
 FINGERPRINT_COLS: list[str] = [
     "product_type_id",
@@ -52,15 +47,15 @@ UNIVARIATE_DIMENSIONS: set[str] = {
 HORIZONS: list[str] = [f"y_h{h}" for h in range(1, 7)]
 
 
-def load_feature_contract(path: str | Path | None = None) -> dict[str, Any]:
-    p = Path(path or TRAINING_RUN_JSON)
-    with open(p) as f:
+def load_feature_contract(path: str | Path) -> dict[str, Any]:
+    """Load a feature contract (``training_run.json``) from an explicit path."""
+    with open(Path(path)) as f:
         return json.load(f)
 
 
-def load_merged_fingerprint(path: str | Path | None = None) -> pd.DataFrame:
-    p = Path(path or MERGED_FINGERPRINT_PARQUET)
-    df = pd.read_parquet(p)
+def load_merged_fingerprint(path: str | Path) -> pd.DataFrame:
+    """Load a merged fingerprint cube from an explicit path, month-normalized."""
+    df = pd.read_parquet(Path(path))
     df["month"] = pd.to_datetime(df["month"]).dt.as_unit("ns")
     return df.sort_values("month")
 
@@ -94,11 +89,13 @@ def build_fingerprint_inference_rows(
     *,
     anchor_month: pd.Timestamp,
     dimensions: dict[str, int],
+    feature_contract_path: str | Path,
 ) -> tuple[pd.DataFrame, list[tuple[Any, ...]]]:
     """Return feature rows for every fingerprint matching ``dimensions`` at
     ``anchor_month``. Each row needs t-3..t-1 lags present in the cube.
 
     Pass ``dimensions={}`` to match all fingerprints at the anchor month.
+    ``feature_contract_path`` points at the tick's ``training_run.json``.
     """
     cube = cube.copy()
     cube["month"] = pd.to_datetime(cube["month"]).dt.as_unit("ns")
@@ -107,7 +104,7 @@ def build_fingerprint_inference_rows(
     mask_fp = _fingerprint_mask(cube, dimensions)
     slice_anchor = cube.loc[mask_anchor & mask_fp].drop_duplicates(subset=FINGERPRINT_COLS)
 
-    feature_cols_expected = load_feature_contract()["fingerprint_feature_cols"]
+    feature_cols_expected = load_feature_contract(feature_contract_path)["fingerprint_feature_cols"]
 
     rows: list[dict[str, float]] = []
     keys: list[tuple[Any, ...]] = []
@@ -150,8 +147,12 @@ def build_univariate_inference_row(
     anchor_month: pd.Timestamp,
     dimension: str,
     level_id: int,
+    feature_contract_path: str | Path,
 ) -> pd.Series | None:
-    """Pull one calendar-strict feature row from the long univariate cube."""
+    """Pull one calendar-strict feature row from the long univariate cube.
+
+    ``feature_contract_path`` points at the tick's ``training_run.json``.
+    """
     sub = cube_long[
         (cube_long["dimension"] == dimension)
         & (cube_long["level_id"] == level_id)
@@ -167,7 +168,7 @@ def build_univariate_inference_row(
     if anchor_month not in share.index or not all(m in share.index for m in need_prev):
         return None
 
-    contract = load_feature_contract()
+    contract = load_feature_contract(feature_contract_path)
     fc = contract["univariate_feature_cols"]
 
     return pd.Series(

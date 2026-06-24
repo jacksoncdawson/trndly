@@ -30,31 +30,34 @@ DIRECTORY LAYOUT
       historical_univariate.parquet            ← HISTORICAL_UNIVARIATE_PARQUET (notebook 1, immutable)
       live_fingerprint_<YYYY-MM>.parquet       ← matches LIVE_FINGERPRINT_GLOB (per-snapshot-month)
       live_univariate_<YYYY-MM>.parquet        ← matches LIVE_UNIVARIATE_GLOB
-      merged_fingerprint.parquet               ← MERGED_FINGERPRINT_PARQUET (pipelines.monthly.aggregate)
-      merged_univariate.parquet                ← MERGED_UNIVARIATE_PARQUET (pipelines.monthly.aggregate)
-      training_fingerprint.parquet             ← TRAINING_FINGERPRINT_PARQUET (pipelines.monthly.features)
-      training_univariate.parquet              ← TRAINING_UNIVARIATE_PARQUET
-      training_run.json                        ← TRAINING_RUN_JSON
-    models/                                    ← MODELS_DIR
-      fingerprint_model.joblib                 ← FINGERPRINT_MODEL_JOBLIB
+      (merged_*/training_* now live in ticks/<M>/ per plan §12, not here)
+    models/                                    ← MODELS_DIR (cross-tick CHAMPION)
+      fingerprint_model.joblib                 ← FINGERPRINT_MODEL_JOBLIB (champion weights predict loads)
       univariate_model.joblib                  ← UNIVARIATE_MODEL_JOBLIB
-      model_training_run.json                  ← MODEL_TRAINING_RUN_JSON
-      champion_metrics.json                    ← evaluate.py promotion record (per-model champion)
-      runs/<run_id>/                           ← MODEL_RUNS_DIR / run_id (archived joblibs per run; champion guard)
-    predictions/                               ← PREDICTIONS_DIR
-      predictions_univariate_<YYYY-MM>.parquet  ← matches PREDICTIONS_UNIVARIATE_GLOB
-      predictions_fingerprint_<YYYY-MM>.parquet ← matches PREDICTIONS_FINGERPRINT_GLOB
+      champion.json                            ← CHAMPION_JSON (per-model pointer {role: {month, holdout_wmae}})
+    ticks/<YYYY-MM>/                            ← TICKS_DIR / month (one IMMUTABLE checkpoint per tick)
+      merged_{fingerprint,univariate}.parquet  ← tick_merged_path(month, role)
+      training_{fingerprint,univariate}.parquet ← tick_training_path(month, role)
+      training_run.json                        ← tick_training_run_json(month)
+      model/{role}_model.joblib                ← tick_model_joblib(month, role) (THIS tick's candidate)
+      model/model_training_run.json            ← tick_model_training_run_json(month)
+      predictions_{fingerprint,univariate}.parquet ← tick_predictions_path(month, role)
+      published/{trends,options,health,fingerprint}.json ← tick_published_dir(month)
+      manifest.json                            ← tick_manifest_json(month)
+      _SUCCESS                                 ← tick_success_marker(month) (idempotency marker)
   backend/
   frontend/                                    ← FRONTEND_DIR
   tests/
 
 Cube pipeline stages (left to right):
-  notebook 1                          →  historical_*       (immutable raw cube)
-  build_live_cube                     →  live_*_<YYYY-MM>   (one parquet per snapshot month)
-  pipelines.monthly.aggregate         →  merged_*           (always rebuilt: historical + glob(live_*))
-  pipelines.monthly.features          →  training_*         (lags + targets + splits + weights)
-  pipelines.monthly.train             →  data/models/*.joblib
-  pipelines.monthly.predict           →  data/predictions/*.parquet
+  notebook 1                          →  historical_*               (immutable raw cube)
+  build_live_cube                     →  live_*_<YYYY-MM>           (one parquet per snapshot month)
+  pipelines.monthly.aggregate         →  ticks/<M>/merged_*         (per-tick: historical + glob(live_*))
+  pipelines.monthly.features          →  ticks/<M>/training_*       (lags + targets + splits + weights)
+  pipelines.monthly.train             →  ticks/<M>/model/*.joblib   (this tick's CANDIDATE)
+  pipelines.monthly.evaluate          →  data/models/*.joblib       (promote candidate → champion)
+  pipelines.monthly.predict           →  ticks/<M>/predictions_*    (champion scores the tick's anchor)
+  pipelines.monthly.publish           →  ticks/<M>/published/*.json (+ frontend/data/ canonical copy)
 """
 
 from __future__ import annotations
@@ -107,21 +110,6 @@ PROCESSED_DIR: Path = DATA_DIR / "processed"
 MODELS_DIR: Path = DATA_DIR / "models"
 FINGERPRINT_MODEL_JOBLIB: Path = MODELS_DIR / "fingerprint_model.joblib"
 UNIVARIATE_MODEL_JOBLIB: Path = MODELS_DIR / "univariate_model.joblib"
-MODEL_TRAINING_RUN_JSON: Path = MODELS_DIR / "model_training_run.json"
-
-# Per-run joblib archive for the local champion guard (evaluate.py): each run's
-# canonical joblibs are copied to data/models/runs/<run_id>/ so a losing
-# candidate can be reverted to the prior champion's weights.
-MODEL_RUNS_DIR: Path = MODELS_DIR / "runs"
-
-
-def model_run_dir_for(run_id: str) -> Path:
-    """Directory holding one training run's archived joblibs + manifest."""
-    return MODEL_RUNS_DIR / run_id
-
-PREDICTIONS_DIR: Path = DATA_DIR / "predictions"
-PREDICTIONS_UNIVARIATE_GLOB: str = "predictions_univariate_*.parquet"
-PREDICTIONS_FINGERPRINT_GLOB: str = "predictions_fingerprint_*.parquet"
 
 # --------------------------------------------------------------------------- #
 # Cube outputs (data/processed/ — gitignored batch artifacts)                  #
@@ -136,14 +124,9 @@ HISTORICAL_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "historical_univariate.par
 LIVE_FINGERPRINT_GLOB: str = "live_fingerprint_*.parquet"
 LIVE_UNIVARIATE_GLOB: str = "live_univariate_*.parquet"
 
-# Stage 3: pipelines.monthly.aggregate output — rebuilt from historical + glob(live_*).
-MERGED_FINGERPRINT_PARQUET: Path = PROCESSED_DIR / "merged_fingerprint.parquet"
-MERGED_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "merged_univariate.parquet"
-
-# Stage 4: pipelines.monthly.features output — lag/target/split/weight prepped for training.
-TRAINING_FINGERPRINT_PARQUET: Path = PROCESSED_DIR / "training_fingerprint.parquet"
-TRAINING_UNIVARIATE_PARQUET: Path = PROCESSED_DIR / "training_univariate.parquet"
-TRAINING_RUN_JSON: Path = PROCESSED_DIR / "training_run.json"
+# Stages 3+ (aggregate → features → train → predict → publish) write into the
+# per-tick checkpoint dir, NOT processed/ — see the "Per-tick checkpoints"
+# helpers below (tick_merged_path / tick_training_path / ...).
 
 # --------------------------------------------------------------------------- #
 # Helpers                                                                       #
@@ -246,42 +229,6 @@ def discover_live_univariate_parquets() -> list[Path]:
     return sorted(PROCESSED_DIR.glob(LIVE_UNIVARIATE_GLOB))
 
 
-def predictions_univariate_path_for(month) -> Path:
-    """Path for the per-month univariate predictions parquet, e.g. for May 2026:
-    ``data/predictions/predictions_univariate_2026-05.parquet``."""
-    return PREDICTIONS_DIR / f"predictions_univariate_{_format_month(month)}.parquet"
-
-
-def predictions_fingerprint_path_for(month) -> Path:
-    """Path for the per-month fingerprint predictions parquet, e.g. for May 2026:
-    ``data/predictions/predictions_fingerprint_2026-05.parquet``."""
-    return PREDICTIONS_DIR / f"predictions_fingerprint_{_format_month(month)}.parquet"
-
-
-def discover_predictions_univariate_parquets() -> list[Path]:
-    """Return every ``predictions_univariate_<YYYY-MM>.parquet`` in PREDICTIONS_DIR,
-    sorted by month."""
-    return sorted(PREDICTIONS_DIR.glob(PREDICTIONS_UNIVARIATE_GLOB))
-
-
-def discover_predictions_fingerprint_parquets() -> list[Path]:
-    """Return every ``predictions_fingerprint_<YYYY-MM>.parquet`` in PREDICTIONS_DIR,
-    sorted by month."""
-    return sorted(PREDICTIONS_DIR.glob(PREDICTIONS_FINGERPRINT_GLOB))
-
-
-def latest_predictions_univariate_parquet() -> Path | None:
-    """Return the most-recent ``predictions_univariate_*.parquet`` (or None)."""
-    paths = discover_predictions_univariate_parquets()
-    return paths[-1] if paths else None
-
-
-def latest_predictions_fingerprint_parquet() -> Path | None:
-    """Return the most-recent ``predictions_fingerprint_*.parquet`` (or None)."""
-    paths = discover_predictions_fingerprint_parquets()
-    return paths[-1] if paths else None
-
-
 # --------------------------------------------------------------------------- #
 # Per-tick checkpoints (plan §12)                                               #
 # --------------------------------------------------------------------------- #
@@ -310,6 +257,18 @@ def champion_joblib_for(role: str) -> Path:
 def current_tick_month() -> pd.Timestamp:
     """Default tick month: the current calendar month, normalized to the 1st."""
     return pd.Timestamp.now().normalize().replace(day=1)
+
+
+def resolve_tick_month(month=None) -> pd.Timestamp:
+    """Normalize a tick month to a month-start Timestamp.
+
+    ``None`` resolves to :func:`current_tick_month`. Otherwise accepts a
+    ``'YYYY-MM'`` string or any datetime/Timestamp and snaps it to the 1st of
+    its month (``to_period('M').to_timestamp()`` — robust across pandas builds).
+    """
+    if month is None:
+        return current_tick_month()
+    return pd.Timestamp(month).to_period("M").to_timestamp()
 
 
 def tick_dir(month) -> Path:
@@ -390,7 +349,6 @@ def ensure_data_dirs() -> None:
         REFERENCE_DIR,
         PROCESSED_DIR,
         MODELS_DIR,
-        PREDICTIONS_DIR,
         TICKS_DIR,
     ):
         d.mkdir(parents=True, exist_ok=True)

@@ -29,10 +29,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from pipelines.paths import (  # noqa: E402
     DATA_DIR,
     LOOKUP_CSV,
-    MERGED_UNIVARIATE_PARQUET,
     discover_live_fingerprint_parquets,
     discover_live_univariate_parquets,
+    latest_successful_tick,
     live_fingerprint_path_for,
+    tick_merged_path,
 )
 
 
@@ -176,6 +177,38 @@ def test_items_csv_id_validity():
             assert not invalid, (
                 f"{items_path.name}:{col} has IDs not in lookup.csv[{cat}]: {sorted(invalid)}"
             )
+
+
+def test_latest_tick_merged_univariate_level_ids_in_lookup():
+    """Every (dimension, level_id) in the latest tick's merged univariate cube must
+    be a valid id within its lookup.csv category. Mirrors the items-CSV ID guard,
+    one stage downstream. Skipped when the merged cube is absent (it's gitignored,
+    so a clean checkout won't have it)."""
+    tick = latest_successful_tick()
+    if tick is None:
+        pytest.skip("no successful tick checkpoint on disk")
+    merged = tick_merged_path(tick.name, "univariate")
+    if not merged.exists():
+        pytest.skip(f"merged univariate cube absent (gitignored) at {merged}")
+    if not LOOKUP_CSV.exists():
+        pytest.skip(f"lookup.csv missing at {LOOKUP_CSV}")
+
+    cube = pd.read_parquet(merged)
+    lookup = pd.read_csv(LOOKUP_CSV)
+    valid_ids = {
+        cat: set(g["id"].astype(int)) for cat, g in lookup.groupby("category")
+    }
+    # dimension names map 1:1 to lookup.csv categories.
+    for dimension, grp in cube.groupby("dimension", observed=True):
+        cat = str(dimension)
+        if cat not in valid_ids:
+            continue
+        seen = set(grp["level_id"].dropna().astype(int).unique())
+        invalid = seen - valid_ids[cat]
+        assert not invalid, (
+            f"merged_univariate dimension={cat} has level_ids not in lookup.csv: "
+            f"{sorted(invalid)}"
+        )
 
 
 # ---------------------------------------------------------------------------

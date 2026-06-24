@@ -1,4 +1,4 @@
-"""Merge historical + live cubes into ``merged_*.parquet``.
+"""Merge historical + live cubes into this tick's ``merged_*.parquet``.
 
 Was notebook ``1b_scrape_aggregate_live.ipynb`` (sections 6 + 7).
 
@@ -6,9 +6,9 @@ Reads:
     data/processed/historical_{fingerprint,univariate}.parquet  (immutable)
     data/processed/live_{fingerprint,univariate}_<YYYY-MM>.parquet  (per-month)
 
-Writes:
-    data/processed/merged_fingerprint.parquet
-    data/processed/merged_univariate.parquet
+Writes (immutable per-tick checkpoint, plan §12):
+    data/ticks/<YYYY-MM>/merged_fingerprint.parquet
+    data/ticks/<YYYY-MM>/merged_univariate.parquet
 
 Always rebuilds — no ``.bak`` because ``historical_*`` is never overwritten.
 Dedup keys:
@@ -29,10 +29,11 @@ import pandas as pd
 from pipelines.paths import (
     HISTORICAL_FINGERPRINT_PARQUET,
     HISTORICAL_UNIVARIATE_PARQUET,
-    MERGED_FINGERPRINT_PARQUET,
-    MERGED_UNIVARIATE_PARQUET,
     discover_live_fingerprint_parquets,
     discover_live_univariate_parquets,
+    resolve_tick_month,
+    tick_dir,
+    tick_merged_path,
 )
 from pipelines.cube_slicing import FINGERPRINT_COLS
 
@@ -75,17 +76,21 @@ def _merge_one(
     return len(merged)
 
 
-def run_aggregate() -> dict[str, int]:
-    """Merge historical + live cubes for both fingerprint and univariate.
+def run_aggregate(month=None) -> dict[str, int]:
+    """Merge historical + live cubes for both fingerprint and univariate into the
+    tick's immutable checkpoint dir. ``month`` defaults to the current tick month.
 
     Returns a {target: row_count} summary.
     """
+    month = resolve_tick_month(month)
+    tick_dir(month).mkdir(parents=True, exist_ok=True)
+
     logger.info("aggregate: merging fingerprint cubes")
     fp_rows = _merge_one(
         historical_path=HISTORICAL_FINGERPRINT_PARQUET,
         live_paths=discover_live_fingerprint_parquets(),
         dup_cols=["month", *FINGERPRINT_COLS, "source"],
-        out_path=MERGED_FINGERPRINT_PARQUET,
+        out_path=tick_merged_path(month, "fingerprint"),
         label="fingerprint",
     )
     logger.info("aggregate: merging univariate cubes")
@@ -93,7 +98,7 @@ def run_aggregate() -> dict[str, int]:
         historical_path=HISTORICAL_UNIVARIATE_PARQUET,
         live_paths=discover_live_univariate_parquets(),
         dup_cols=["month", "dimension", "level_id", "source"],
-        out_path=MERGED_UNIVARIATE_PARQUET,
+        out_path=tick_merged_path(month, "univariate"),
         label="univariate",
     )
     return {"merged_fingerprint": fp_rows, "merged_univariate": uv_rows}

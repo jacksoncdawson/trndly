@@ -1,16 +1,20 @@
-"""Train univariate + fingerprint forecasters from the training tables.
+"""Train univariate + fingerprint forecasters from this tick's training tables.
 
 Was notebook ``3_train_models.ipynb``.
 
-Reads:
-    data/processed/training_univariate.parquet
-    data/processed/training_fingerprint.parquet
-    data/processed/training_run.json   (feature contract written by features.py)
+Reads (this tick's immutable checkpoint, plan §12):
+    data/ticks/<YYYY-MM>/training_univariate.parquet
+    data/ticks/<YYYY-MM>/training_fingerprint.parquet
+    data/ticks/<YYYY-MM>/training_run.json   (feature contract written by features.py)
 
-Writes:
-    data/models/univariate_model.joblib
-    data/models/fingerprint_model.joblib
-    data/models/model_training_run.json   (metrics + manifest)
+Writes (this tick's CANDIDATE model — NEVER the canonical data/models/ champion):
+    data/ticks/<YYYY-MM>/model/univariate_model.joblib
+    data/ticks/<YYYY-MM>/model/fingerprint_model.joblib
+    data/ticks/<YYYY-MM>/model/model_training_run.json   (metrics + manifest)
+
+The candidate stays isolated in the tick dir; ``evaluate`` promotes a winning
+candidate into ``data/models/`` (the cross-tick champion). This per-tick model
+isolation is what removes the old "train clobbers the canonical joblib" bug.
 
 Each model is a multi-output ``RandomForestRegressor`` (200 estimators,
 ``min_samples_leaf=2``, no max depth) predicting ``y_h1..y_h6`` (six future
@@ -37,13 +41,12 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from pipelines.paths import (
-    FINGERPRINT_MODEL_JOBLIB,
-    MODEL_TRAINING_RUN_JSON,
-    MODELS_DIR,
-    TRAINING_FINGERPRINT_PARQUET,
-    TRAINING_RUN_JSON,
-    TRAINING_UNIVARIATE_PARQUET,
-    UNIVARIATE_MODEL_JOBLIB,
+    resolve_tick_month,
+    tick_model_dir,
+    tick_model_joblib,
+    tick_model_training_run_json,
+    tick_training_path,
+    tick_training_run_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,11 +192,24 @@ def _train_one(
     return model, metrics, baseline, summary
 
 
-def run_train() -> dict:
-    """Fit both models, persist artifacts, write run manifest. Return summary."""
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+def run_train(month=None) -> dict:
+    """Fit both models, persist the CANDIDATE artifacts, write run manifest.
 
-    with open(TRAINING_RUN_JSON) as f:
+    ``month`` defaults to the current tick month. The artifacts land in the
+    tick's ``model/`` dir — ``evaluate`` decides whether they become the
+    champion in ``data/models/``.
+    """
+    month = resolve_tick_month(month)
+    tick_model_dir(month).mkdir(parents=True, exist_ok=True)
+
+    training_run = tick_training_run_json(month)
+    training_uv = tick_training_path(month, "univariate")
+    training_fp = tick_training_path(month, "fingerprint")
+    cand_uv_joblib = tick_model_joblib(month, "univariate")
+    cand_fp_joblib = tick_model_joblib(month, "fingerprint")
+    cand_run_json = tick_model_training_run_json(month)
+
+    with open(training_run) as f:
         contract = json.load(f)
 
     univariate_feature_cols = contract["univariate_feature_cols"]
@@ -209,8 +225,8 @@ def run_train() -> dict:
             f"{contract['fingerprint_target_cols']} vs {TARGET_COLS}"
         )
 
-    uni = pd.read_parquet(TRAINING_UNIVARIATE_PARQUET)
-    fp = pd.read_parquet(TRAINING_FINGERPRINT_PARQUET)
+    uni = pd.read_parquet(training_uv)
+    fp = pd.read_parquet(training_fp)
     logger.info("loaded univariate=%s fingerprint=%s", uni.shape, fp.shape)
 
     uni_model, uni_metrics, uni_baseline, uni_summary = _train_one(
@@ -220,10 +236,10 @@ def run_train() -> dict:
         label="fingerprint", df=fp, feature_cols=fingerprint_feature_cols,
     )
 
-    joblib.dump(uni_model, UNIVARIATE_MODEL_JOBLIB, compress=3)
-    joblib.dump(fp_model, FINGERPRINT_MODEL_JOBLIB, compress=3)
-    logger.info("wrote %s (%d B)", UNIVARIATE_MODEL_JOBLIB, os.path.getsize(UNIVARIATE_MODEL_JOBLIB))
-    logger.info("wrote %s (%d B)", FINGERPRINT_MODEL_JOBLIB, os.path.getsize(FINGERPRINT_MODEL_JOBLIB))
+    joblib.dump(uni_model, cand_uv_joblib, compress=3)
+    joblib.dump(fp_model, cand_fp_joblib, compress=3)
+    logger.info("wrote %s (%d B)", cand_uv_joblib, os.path.getsize(cand_uv_joblib))
+    logger.info("wrote %s (%d B)", cand_fp_joblib, os.path.getsize(cand_fp_joblib))
 
     meta = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -232,28 +248,28 @@ def run_train() -> dict:
         "target_cols": TARGET_COLS,
         "rf_params": RF_PARAMS,
         "inputs": {
-            "univariate_training": str(TRAINING_UNIVARIATE_PARQUET),
-            "fingerprint_training": str(TRAINING_FINGERPRINT_PARQUET),
-            "feature_contract": str(TRAINING_RUN_JSON),
+            "univariate_training": str(training_uv),
+            "fingerprint_training": str(training_fp),
+            "feature_contract": str(training_run),
         },
         "univariate": {
-            "model_path": str(UNIVARIATE_MODEL_JOBLIB),
+            "model_path": str(cand_uv_joblib),
             "model_class": type(uni_model).__name__,
             "feature_cols": univariate_feature_cols,
             **uni_summary,
             "metrics": {"model": uni_metrics, "persistence_baseline": uni_baseline},
         },
         "fingerprint": {
-            "model_path": str(FINGERPRINT_MODEL_JOBLIB),
+            "model_path": str(cand_fp_joblib),
             "model_class": type(fp_model).__name__,
             "feature_cols": fingerprint_feature_cols,
             **fp_summary,
             "metrics": {"model": fp_metrics, "persistence_baseline": fp_baseline},
         },
     }
-    with open(MODEL_TRAINING_RUN_JSON, "w") as f:
+    with open(cand_run_json, "w") as f:
         json.dump(meta, f, indent=2)
-    logger.info("wrote %s", MODEL_TRAINING_RUN_JSON)
+    logger.info("wrote %s", cand_run_json)
 
     # Sanity: each model should beat its persistence baseline on holdout
     for label, m, b in [

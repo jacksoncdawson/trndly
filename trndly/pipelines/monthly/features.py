@@ -1,15 +1,15 @@
-"""Build calendar-strict training tables from the merged cubes.
+"""Build calendar-strict training tables from this tick's merged cubes.
 
 Was notebook ``2_feature_processing.ipynb``.
 
-Reads:
-    data/processed/merged_univariate.parquet
-    data/processed/merged_fingerprint.parquet
+Reads (this tick's immutable checkpoint, plan §12):
+    data/ticks/<YYYY-MM>/merged_univariate.parquet
+    data/ticks/<YYYY-MM>/merged_fingerprint.parquet
 
-Writes:
-    data/processed/training_univariate.parquet
-    data/processed/training_fingerprint.parquet
-    data/processed/training_run.json   (sample-weight + split contract for nb 3)
+Writes (into the same tick checkpoint dir):
+    data/ticks/<YYYY-MM>/training_univariate.parquet
+    data/ticks/<YYYY-MM>/training_fingerprint.parquet
+    data/ticks/<YYYY-MM>/training_run.json   (sample-weight + split contract for train)
 
 Eligibility:
     For anchor month ``t``, require cube rows on every calendar month in
@@ -44,12 +44,11 @@ import pandas as pd
 from pandas.tseries.offsets import DateOffset
 
 from pipelines.paths import (
-    MERGED_FINGERPRINT_PARQUET,
-    MERGED_UNIVARIATE_PARQUET,
-    PROCESSED_DIR,
-    TRAINING_FINGERPRINT_PARQUET,
-    TRAINING_RUN_JSON,
-    TRAINING_UNIVARIATE_PARQUET,
+    resolve_tick_month,
+    tick_dir,
+    tick_merged_path,
+    tick_training_path,
+    tick_training_run_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,28 +218,38 @@ def _build_fingerprint(fp_cube: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return rows, stats
 
 
-def run_features() -> dict[str, dict]:
-    """Build training tables for both models. Returns summary stats."""
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+def run_features(month=None) -> dict[str, dict]:
+    """Build training tables for both models for the tick. Returns summary stats.
+
+    ``month`` defaults to the current tick month.
+    """
+    month = resolve_tick_month(month)
+    tick_dir(month).mkdir(parents=True, exist_ok=True)
+
+    merged_uv = tick_merged_path(month, "univariate")
+    merged_fp = tick_merged_path(month, "fingerprint")
+    training_uv = tick_training_path(month, "univariate")
+    training_fp = tick_training_path(month, "fingerprint")
+    training_run = tick_training_run_json(month)
 
     logger.info("features: loading merged univariate cube")
-    uv_cube = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
+    uv_cube = pd.read_parquet(merged_uv)
     logger.info("features: building univariate training rows")
     univariate, uni_stats = _build_univariate(uv_cube)
-    univariate.to_parquet(TRAINING_UNIVARIATE_PARQUET, index=False)
+    univariate.to_parquet(training_uv, index=False)
     logger.info(
         "features: wrote %s | rows=%d | stats=%s",
-        TRAINING_UNIVARIATE_PARQUET, len(univariate), uni_stats,
+        training_uv, len(univariate), uni_stats,
     )
 
     logger.info("features: loading merged fingerprint cube")
-    fp_cube = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
+    fp_cube = pd.read_parquet(merged_fp)
     logger.info("features: building fingerprint training rows")
     fingerprint, fp_stats = _build_fingerprint(fp_cube)
-    fingerprint.to_parquet(TRAINING_FINGERPRINT_PARQUET, index=False)
+    fingerprint.to_parquet(training_fp, index=False)
     logger.info(
         "features: wrote %s | rows=%d | stats=%s",
-        TRAINING_FINGERPRINT_PARQUET, len(fingerprint), fp_stats,
+        training_fp, len(fingerprint), fp_stats,
     )
 
     meta = {
@@ -260,17 +269,17 @@ def run_features() -> dict[str, dict]:
             "cap": SAMPLE_WEIGHT_MAX,
         },
         "inputs": {
-            "univariate": str(MERGED_UNIVARIATE_PARQUET),
-            "fingerprint": str(MERGED_FINGERPRINT_PARQUET),
+            "univariate": str(merged_uv),
+            "fingerprint": str(merged_fp),
         },
         "outputs": {
             "univariate_training": {
-                "path": str(TRAINING_UNIVARIATE_PARQUET),
+                "path": str(training_uv),
                 "rows": int(len(univariate)),
                 "cols": list(univariate.columns) if not univariate.empty else [],
             },
             "fingerprint_training": {
-                "path": str(TRAINING_FINGERPRINT_PARQUET),
+                "path": str(training_fp),
                 "rows": int(len(fingerprint)),
                 "cols": list(fingerprint.columns) if not fingerprint.empty else [],
             },
@@ -282,9 +291,9 @@ def run_features() -> dict[str, dict]:
         "fingerprint_feature_cols": FINGERPRINT_FEATURE_COLS,
         "fingerprint_target_cols": FINGERPRINT_TARGET_COLS,
     }
-    with open(TRAINING_RUN_JSON, "w") as f:
+    with open(training_run, "w") as f:
         json.dump(meta, f, indent=2)
-    logger.info("features: wrote %s", TRAINING_RUN_JSON)
+    logger.info("features: wrote %s", training_run)
 
     return {"univariate_stats": uni_stats, "fingerprint_stats": fp_stats}
 

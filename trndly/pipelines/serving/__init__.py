@@ -28,10 +28,9 @@ from pipelines.contracts import (
 )
 from pipelines.paths import (
     LOOKUP_CSV,
-    MERGED_FINGERPRINT_PARQUET,
-    MERGED_UNIVARIATE_PARQUET,
-    latest_predictions_fingerprint_parquet,
-    latest_predictions_univariate_parquet,
+    latest_successful_tick,
+    tick_merged_path,
+    tick_predictions_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -205,39 +204,56 @@ def load_bundle(
     ``(None, error_message)`` on failure (no exceptions for the missing-parquet
     case — the server reports it via /health, the publisher raises on it).
 
-    Paths default to the latest predictions parquets + the canonical merged
-    cubes; tests and the publisher inject explicit paths.
+    Paths default to the latest *successful* tick checkpoint
+    (``ticks/<M>/predictions_*.parquet`` + ``ticks/<M>/merged_*.parquet``); tests
+    and the publisher inject explicit paths.
     """
     try:
+        # When any path isn't injected we need the latest successful tick to
+        # resolve the defaults. If there's no checkpoint and nothing injected,
+        # there's nothing to serve.
+        need_default = (
+            univariate_path is None
+            or fingerprint_path is None
+            or merged_univariate_path is None
+            or merged_fingerprint_path is None
+        )
+        latest_tick = latest_successful_tick() if need_default else None
+        if need_default and latest_tick is None and (
+            univariate_path is None and fingerprint_path is None
+        ):
+            return None, "no successful tick checkpoint; run the monthly tick"
+        tick_month = latest_tick.name if latest_tick is not None else None
+
         uv_path = (
             univariate_path
             if univariate_path is not None
-            else latest_predictions_univariate_parquet()
+            else (tick_predictions_path(tick_month, "univariate") if tick_month else None)
         )
         fp_path = (
             fingerprint_path
             if fingerprint_path is not None
-            else latest_predictions_fingerprint_parquet()
+            else (tick_predictions_path(tick_month, "fingerprint") if tick_month else None)
         )
         merged_uv_path = (
             merged_univariate_path
             if merged_univariate_path is not None
-            else MERGED_UNIVARIATE_PARQUET
+            else (tick_merged_path(tick_month, "univariate") if tick_month else None)
         )
         merged_fp_path = (
             merged_fingerprint_path
             if merged_fingerprint_path is not None
-            else MERGED_FINGERPRINT_PARQUET
+            else (tick_merged_path(tick_month, "fingerprint") if tick_month else None)
         )
 
         if uv_path is None:
             return None, (
-                "no predictions_univariate_*.parquet found; "
+                "no univariate predictions found; "
                 "run `python -m pipelines.monthly run`"
             )
         if fp_path is None:
             return None, (
-                "no predictions_fingerprint_*.parquet found; "
+                "no fingerprint predictions found; "
                 "run `python -m pipelines.monthly run`"
             )
 
@@ -253,7 +269,7 @@ def load_bundle(
         lag_months = {anchor_dt - pd.DateOffset(months=k) for k in (1, 2, 3)}
         lags_synthetic = False
 
-        if Path(merged_uv_path).exists():
+        if merged_uv_path is not None and Path(merged_uv_path).exists():
             merged_uv = pd.read_parquet(merged_uv_path)
             merged_uv["month"] = pd.to_datetime(merged_uv["month"])
             if "source" in merged_uv.columns and (
@@ -262,7 +278,7 @@ def load_bundle(
             ).any():
                 lags_synthetic = True
             uv = _attach_lag_shares(uv, merged_uv, key_cols=["dimension", "level_id"])
-        if Path(merged_fp_path).exists():
+        if merged_fp_path is not None and Path(merged_fp_path).exists():
             merged_fp = pd.read_parquet(merged_fp_path)
             merged_fp["month"] = pd.to_datetime(merged_fp["month"])
             if "source" in merged_fp.columns and (

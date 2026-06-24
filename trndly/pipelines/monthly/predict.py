@@ -4,10 +4,15 @@ Iterates every ``(dimension, level_id)`` and every distinct 5-D fingerprint
 present at the latest anchor month of the merged cubes; scores each via the
 champion model; classifies the trajectory via :mod:`pipelines.monthly.state`
 (forward-first hybrid rule consuming share_lag1, share_t, and y_h1..h6);
-decodes IDs to human names via ``lookup.csv``; writes two parquet files:
+decodes IDs to human names via ``lookup.csv``; writes two parquet files into the
+tick's immutable checkpoint dir (plan §12):
 
-    data/predictions/predictions_univariate_<YYYY-MM>.parquet
-    data/predictions/predictions_fingerprint_<YYYY-MM>.parquet
+    data/ticks/<YYYY-MM>/predictions_univariate.parquet
+    data/ticks/<YYYY-MM>/predictions_fingerprint.parquet
+
+The scoring model is the canonical CHAMPION (``data/models/<role>_model.joblib``,
+promoted by ``evaluate``) — never the tick's own candidate. The cube it scores is
+this tick's ``merged_*`` checkpoint.
 
 Anchor selection: ``_find_eligible_anchor`` picks the latest month with
 3 contiguous prior months in the cube. When the latest live month is
@@ -45,15 +50,14 @@ from pipelines.contracts import (
     validate_predictions_univariate_frame,
 )
 from pipelines.paths import (
-    FINGERPRINT_MODEL_JOBLIB,
     LOOKUP_CSV,
-    MERGED_FINGERPRINT_PARQUET,
-    MERGED_UNIVARIATE_PARQUET,
-    MODEL_TRAINING_RUN_JSON,
-    PREDICTIONS_DIR,
-    UNIVARIATE_MODEL_JOBLIB,
-    predictions_fingerprint_path_for,
-    predictions_univariate_path_for,
+    champion_joblib_for,
+    resolve_tick_month,
+    tick_dir,
+    tick_merged_path,
+    tick_model_training_run_json,
+    tick_predictions_path,
+    tick_training_run_json,
 )
 from pipelines.monthly.state import classify_state
 from pipelines.cube_slicing import (
@@ -94,16 +98,16 @@ def _find_eligible_anchor(cube: pd.DataFrame, *, lag_months: int = 3) -> pd.Time
     )
 
 
-def _model_version() -> str:
-    """Return the current model version string from MODEL_TRAINING_RUN_JSON.
+def _model_version(manifest_path) -> str:
+    """Return the model version string from a model_training_run manifest.
 
     Falls back to ``"unknown"`` if the manifest is missing. The model version
     is informational metadata in the predictions parquet.
     """
-    if not MODEL_TRAINING_RUN_JSON.exists():
+    if not manifest_path.exists():
         return "unknown"
     try:
-        with open(MODEL_TRAINING_RUN_JSON) as f:
+        with open(manifest_path) as f:
             meta = json.load(f)
         return str(meta.get("generated_at_utc") or "unknown")
     except Exception:
@@ -138,6 +142,7 @@ def _univariate_rows(
     model: Any,
     lookup_index: dict[tuple[str, int], str],
     model_version: str,
+    feature_contract_path,
 ) -> list[dict]:
     """Score every (dimension, level_id) at the anchor month."""
     pairs = (
@@ -149,7 +154,8 @@ def _univariate_rows(
     rows: list[dict] = []
     for dimension, level_id in pairs:
         feat = build_univariate_inference_row(
-            cube, anchor_month=anchor, dimension=dimension, level_id=int(level_id)
+            cube, anchor_month=anchor, dimension=dimension, level_id=int(level_id),
+            feature_contract_path=feature_contract_path,
         )
         if feat is None:
             continue  # insufficient lag history
@@ -206,11 +212,13 @@ def _fingerprint_rows(
     model: Any,
     lookup_index: dict[tuple[str, int], str],
     model_version: str,
+    feature_contract_path,
 ) -> list[dict]:
     """Score every distinct 5-D fingerprint at the anchor month."""
     # Empty dimensions = all fingerprints at the anchor month with lag coverage.
     X, keys = build_fingerprint_inference_rows(
-        cube, anchor_month=anchor, dimensions={}
+        cube, anchor_month=anchor, dimensions={},
+        feature_contract_path=feature_contract_path,
     )
     if X.empty:
         return []
@@ -257,23 +265,40 @@ def _fingerprint_rows(
 # Stage driver                                                                 #
 # --------------------------------------------------------------------------- #
 
-def run_predict() -> dict[str, int]:
-    """Score the universe; write predictions parquets. Returns row counts."""
-    PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+def run_predict(month=None) -> dict[str, int]:
+    """Score the universe with the champion; write the tick's predictions parquets.
 
-    if not FINGERPRINT_MODEL_JOBLIB.exists():
-        raise FileNotFoundError(f"missing fingerprint joblib at {FINGERPRINT_MODEL_JOBLIB}")
-    if not UNIVARIATE_MODEL_JOBLIB.exists():
-        raise FileNotFoundError(f"missing univariate joblib at {UNIVARIATE_MODEL_JOBLIB}")
+    ``month`` defaults to the current tick month. The champion weights come from
+    ``data/models/`` (promoted by ``evaluate``); the cube comes from this tick's
+    ``merged_*`` checkpoint.
+
+    Returns row counts.
+    """
+    month = resolve_tick_month(month)
+    tick_dir(month).mkdir(parents=True, exist_ok=True)
+
+    champ_fp = champion_joblib_for("fingerprint")
+    champ_uni = champion_joblib_for("univariate")
+    if not champ_fp.exists():
+        raise FileNotFoundError(
+            f"missing fingerprint champion joblib at {champ_fp} — run evaluate first."
+        )
+    if not champ_uni.exists():
+        raise FileNotFoundError(
+            f"missing univariate champion joblib at {champ_uni} — run evaluate first."
+        )
+
+    merged_fp_path = tick_merged_path(month, "fingerprint")
+    merged_uni_path = tick_merged_path(month, "univariate")
 
     logger.info("predict: loading champion models")
-    fp_model = joblib.load(FINGERPRINT_MODEL_JOBLIB)
-    uni_model = joblib.load(UNIVARIATE_MODEL_JOBLIB)
+    fp_model = joblib.load(champ_fp)
+    uni_model = joblib.load(champ_uni)
 
     logger.info("predict: loading cubes + lookup")
-    cube_fp = pd.read_parquet(MERGED_FINGERPRINT_PARQUET)
+    cube_fp = pd.read_parquet(merged_fp_path)
     cube_fp["month"] = pd.to_datetime(cube_fp["month"]).dt.as_unit("ns")
-    cube_uni = pd.read_parquet(MERGED_UNIVARIATE_PARQUET)
+    cube_uni = pd.read_parquet(merged_uni_path)
     cube_uni["month"] = pd.to_datetime(cube_uni["month"]).dt.as_unit("ns")
     lookup = pd.read_csv(LOOKUP_CSV)
     lookup_index = _decode_lookup(lookup)
@@ -306,13 +331,16 @@ def run_predict() -> dict[str, int]:
             "predictions will use each cube's own eligible anchor",
             anchor_fp, anchor_uni,
         )
-    model_version = _model_version()
+    contract_path = tick_model_training_run_json(month)
+    model_version = _model_version(contract_path)
+    feature_contract_path = tick_training_run_json(month)
 
     # Univariate
     logger.info("predict: scoring univariate at anchor=%s", anchor_uni.isoformat())
     uv_rows = _univariate_rows(
         cube=cube_uni, anchor=anchor_uni, model=uni_model,
         lookup_index=lookup_index, model_version=model_version,
+        feature_contract_path=feature_contract_path,
     )
     if not uv_rows:
         raise RuntimeError(
@@ -320,7 +348,7 @@ def run_predict() -> dict[str, int]:
         )
     df_uv = pd.DataFrame(uv_rows)
     df_uv = validate_predictions_univariate_frame(df_uv)
-    out_uv = predictions_univariate_path_for(anchor_uni)
+    out_uv = tick_predictions_path(month, "univariate")
     df_uv.to_parquet(out_uv, index=False)
     logger.info("predict: wrote %s | rows=%d", out_uv, len(df_uv))
 
@@ -329,6 +357,7 @@ def run_predict() -> dict[str, int]:
     fp_rows = _fingerprint_rows(
         cube=cube_fp, anchor=anchor_fp, model=fp_model,
         lookup_index=lookup_index, model_version=model_version,
+        feature_contract_path=feature_contract_path,
     )
     if not fp_rows:
         raise RuntimeError(
@@ -336,7 +365,7 @@ def run_predict() -> dict[str, int]:
         )
     df_fp = pd.DataFrame(fp_rows)
     df_fp = validate_predictions_fingerprint_frame(df_fp)
-    out_fp = predictions_fingerprint_path_for(anchor_fp)
+    out_fp = tick_predictions_path(month, "fingerprint")
     df_fp.to_parquet(out_fp, index=False)
     logger.info("predict: wrote %s | rows=%d", out_fp, len(df_fp))
 

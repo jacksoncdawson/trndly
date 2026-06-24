@@ -1,5 +1,5 @@
 """Unit tests for ``pipelines.monthly.evaluate`` — the decision rule and the
-local champion guard (archive + revert-on-loss)."""
+promote-copy flow (candidate joblib → canonical champion on a per-model win)."""
 from __future__ import annotations
 
 import json
@@ -77,185 +77,151 @@ def test_decide_reads_nested_metrics_fallback():
 
 
 # --------------------------------------------------------------------------- #
-# Local champion guard (Phase 1.3): archive + revert-on-loss                    #
+# Promote-copy flow (plan §12): candidate joblib → canonical champion on a win   #
 # --------------------------------------------------------------------------- #
 
 
 @pytest.fixture
-def guard_env(tmp_path, monkeypatch):
-    """Point evaluate's paths at a tmp models dir. Returns the path handles."""
+def promote_env(tmp_path, monkeypatch):
+    """Point evaluate's champion + tick paths at a tmp tree. Returns handles.
+
+    The candidate joblib lives in this MONTH's tick model dir; the canonical
+    champion joblibs + champion.json live in a tmp models dir. The guard copies
+    files, never loads them, so small text-byte stand-ins suffice.
+    """
+    import pandas as pd
+
     models = tmp_path / "models"
     models.mkdir()
-    uni = models / "univariate_model.joblib"
-    fp = models / "fingerprint_model.joblib"
-    runs = models / "runs"
-    champ = models / "champion_metrics.json"
-    cand = models / "model_training_run.json"
-    monkeypatch.setattr(evaluate, "MODEL_RUNS_DIR", runs)
-    monkeypatch.setattr(evaluate, "MODEL_TRAINING_RUN_JSON", cand)
-    monkeypatch.setattr(evaluate, "CHAMPION_METRICS_JSON", champ)
-    monkeypatch.setattr(evaluate, "_CANONICAL_JOBLIB", {"univariate": uni, "fingerprint": fp})
-    return {"models": models, "uni": uni, "fp": fp, "runs": runs, "champ": champ, "cand": cand}
+    canon_uni = models / "univariate_model.joblib"
+    canon_fp = models / "fingerprint_model.joblib"
+    champ = models / "champion.json"
+    ticks = tmp_path / "ticks"
+
+    monkeypatch.setattr(evaluate, "MODELS_DIR", models)
+    monkeypatch.setattr(evaluate, "CHAMPION_JSON", champ)
+    monkeypatch.setattr(
+        evaluate, "champion_joblib_for",
+        lambda role: canon_fp if role == "fingerprint" else canon_uni,
+    )
+
+    def _tick_model_dir(month):
+        return ticks / pd.Timestamp(month).strftime("%Y-%m") / "model"
+
+    def _tick_model_joblib(month, role):
+        return _tick_model_dir(month) / f"{role}_model.joblib"
+
+    def _tick_model_training_run_json(month):
+        return _tick_model_dir(month) / "model_training_run.json"
+
+    monkeypatch.setattr(evaluate, "tick_model_joblib", _tick_model_joblib)
+    monkeypatch.setattr(
+        evaluate, "tick_model_training_run_json", _tick_model_training_run_json
+    )
+
+    return {
+        "canon_uni": canon_uni, "canon_fp": canon_fp, "champ": champ,
+        "tick_model_dir": _tick_model_dir,
+        "tick_model_joblib": _tick_model_joblib,
+        "tick_model_training_run_json": _tick_model_training_run_json,
+    }
 
 
-def _write_candidate(env, *, ts, uni_wmae, fp_wmae, uni_blob, fp_blob):
-    """Simulate a train run: overwrite canonical joblibs + write the candidate manifest."""
-    env["uni"].write_text(uni_blob)
-    env["fp"].write_text(fp_blob)
-    env["cand"].write_text(
+def _write_candidate(env, *, month, uni_wmae, fp_wmae, uni_blob, fp_blob):
+    """Simulate a train run for ``month``: write the candidate joblibs + manifest
+    into that tick's model dir (canonical/champion is left for evaluate to set)."""
+    env["tick_model_dir"](month).mkdir(parents=True, exist_ok=True)
+    env["tick_model_joblib"](month, "univariate").write_text(uni_blob)
+    env["tick_model_joblib"](month, "fingerprint").write_text(fp_blob)
+    env["tick_model_training_run_json"](month).write_text(
         json.dumps(
             {
-                "generated_at_utc": ts,
-                "univariate": {"holdout_wmae": uni_wmae, "model_path": str(env["uni"])},
-                "fingerprint": {"holdout_wmae": fp_wmae, "model_path": str(env["fp"])},
+                "univariate": {"holdout_wmae": uni_wmae},
+                "fingerprint": {"holdout_wmae": fp_wmae},
             }
         )
     )
 
 
-def test_guard_first_run_promotes_and_archives(guard_env):
-    env = guard_env
+def test_promote_first_run_copies_candidate_to_canonical(promote_env):
+    """First run (no incumbent): both promote, candidate joblib → canonical, and
+    champion.json records this month."""
+    env = promote_env
     _write_candidate(
-        env, ts="2026-05-01T00:00:00+00:00", uni_wmae=0.01, fp_wmae=0.001,
+        env, month="2026-05", uni_wmae=0.01, fp_wmae=0.001,
         uni_blob="UNI-A", fp_blob="FP-A",
     )
-    summary = run_evaluate()
-    run_id = summary["run_id"]
+    summary = run_evaluate("2026-05")
 
     assert summary["action"] == "promoted"
     assert set(summary["promoted"]) == {"univariate", "fingerprint"}
-    # Canonical weights untouched on a promotion.
-    assert env["uni"].read_text() == "UNI-A"
-    assert env["fp"].read_text() == "FP-A"
-    # Run archive captured both joblibs + the manifest.
-    archived = env["runs"] / run_id
-    assert (archived / "univariate_model.joblib").read_text() == "UNI-A"
-    assert (archived / "fingerprint_model.joblib").read_text() == "FP-A"
-    assert (archived / "model_training_run.json").exists()
-    # Champion record points each model at this run.
+    assert summary["month"] == "2026-05"
+    # Candidate weights copied into the canonical champion joblibs.
+    assert env["canon_uni"].read_text() == "UNI-A"
+    assert env["canon_fp"].read_text() == "FP-A"
     champ = json.loads(env["champ"].read_text())
-    assert champ["univariate"]["champion_run"] == run_id
-    assert champ["fingerprint"]["champion_run"] == run_id
+    assert champ["univariate"]["month"] == "2026-05"
+    assert champ["fingerprint"]["month"] == "2026-05"
+    assert champ["univariate"]["holdout_wmae"] == 0.01
 
 
-def test_guard_reverts_canonical_on_loss(guard_env):
-    env = guard_env
-    # Round 1: establish a champion at run A.
-    _write_candidate(
-        env, ts="2026-05-01T00:00:00+00:00", uni_wmae=0.01, fp_wmae=0.001,
-        uni_blob="UNI-A", fp_blob="FP-A",
-    )
-    run_evaluate()
-
-    # Round 2: train overwrote canonical with WORSE weights (B).
-    _write_candidate(
-        env, ts="2026-06-01T00:00:00+00:00", uni_wmae=0.02, fp_wmae=0.002,
-        uni_blob="UNI-B", fp_blob="FP-B",
-    )
-    summary = run_evaluate()
-
-    assert summary["action"] == "reverted"
-    assert set(summary["reverted"]) == {"univariate", "fingerprint"}
-    # Canonical reverted to the champion's (A) weights — predict won't load B.
-    assert env["uni"].read_text() == "UNI-A"
-    assert env["fp"].read_text() == "FP-A"
-    # The losing run B's weights are still archived for the record.
-    run_b = summary["run_id"]
-    assert (env["runs"] / run_b / "univariate_model.joblib").read_text() == "UNI-B"
-
-
-def test_guard_mixed_promote_one_revert_other(guard_env):
-    env = guard_env
-    _write_candidate(
-        env, ts="2026-05-01T00:00:00+00:00", uni_wmae=0.01, fp_wmae=0.001,
-        uni_blob="UNI-A", fp_blob="FP-A",
-    )
-    run_a = run_evaluate()["run_id"]
-
-    # univariate improves (0.005 < 0.01), fingerprint regresses (0.002 > 0.001).
-    _write_candidate(
-        env, ts="2026-06-01T00:00:00+00:00", uni_wmae=0.005, fp_wmae=0.002,
-        uni_blob="UNI-B", fp_blob="FP-B",
-    )
-    summary = run_evaluate()
-    run_b = summary["run_id"]
-
-    assert summary["promoted"] == ["univariate"]
-    assert summary["reverted"] == ["fingerprint"]
-    # univariate keeps the new (better) B weights; fingerprint reverts to A.
-    assert env["uni"].read_text() == "UNI-B"
-    assert env["fp"].read_text() == "FP-A"
-    champ = json.loads(env["champ"].read_text())
-    assert champ["univariate"]["champion_run"] == run_b
-    assert champ["fingerprint"]["champion_run"] == run_a
-
-
-def test_guard_unrevertable_keep_warns_and_holds(guard_env, caplog):
-    """A champion_metrics.json predating the guard has no champion_run, so a loss
-    can't be reverted — the canonical keeps the candidate's weights, with a warning."""
-    env = guard_env
-    # Pre-guard champion record: per-model blocks, NO champion_run, no runs archive.
+def test_promote_loss_keeps_canonical_unchanged(promote_env):
+    """A per-model loss leaves the canonical joblib untouched (champion stays the
+    prior month) and champion.json[role].month is unchanged."""
+    env = promote_env
+    # Pre-seed a strong incumbent champion (May) better than the June candidate.
+    env["canon_uni"].write_text("UNI-MAY")
+    env["canon_fp"].write_text("FP-MAY")
     env["champ"].write_text(
         json.dumps(
             {
-                "univariate": {"holdout_wmae": 0.01},
-                "fingerprint": {"holdout_wmae": 0.001},
+                "univariate": {"month": "2026-05", "holdout_wmae": 0.005},
+                "fingerprint": {"month": "2026-05", "holdout_wmae": 0.0005},
             }
         )
     )
+    # June candidate is worse on both models → keep.
     _write_candidate(
-        env, ts="2026-06-01T00:00:00+00:00", uni_wmae=0.02, fp_wmae=0.002,
-        uni_blob="UNI-B", fp_blob="FP-B",
+        env, month="2026-06", uni_wmae=0.02, fp_wmae=0.002,
+        uni_blob="UNI-JUN", fp_blob="FP-JUN",
     )
-    import logging
+    summary = run_evaluate("2026-06")
 
-    with caplog.at_level(logging.WARNING):
-        summary = run_evaluate()
-
-    assert summary["action"] == "unrevertable"
-    assert summary["reverted"] == []
-    assert set(summary["unrevertable"]) == {"univariate", "fingerprint"}
-    # Cannot revert — canonical holds the candidate's weights; the champion record
-    # now matches the deployed joblib (records reality so quality can self-heal).
-    assert env["uni"].read_text() == "UNI-B"
+    assert summary["action"] == "kept"
+    assert summary["promoted"] == []
+    # Canonical bytes unchanged — the May champion still serves.
+    assert env["canon_uni"].read_text() == "UNI-MAY"
+    assert env["canon_fp"].read_text() == "FP-MAY"
     champ = json.loads(env["champ"].read_text())
-    assert champ["univariate"]["holdout_wmae"] == 0.02
-    assert champ["univariate"]["champion_run"] == summary["run_id"]
-    assert "cannot revert" in caplog.text
+    assert champ["univariate"]["month"] == "2026-05"  # unchanged
+    assert champ["fingerprint"]["month"] == "2026-05"
 
 
-def test_guard_records_reality_when_archive_missing(guard_env):
-    """A real loss whose champion archive was deleted: can't revert, so record the
-    deployed candidate as champion (not the prior champion's vanished WMAE), and
-    self-heal when a better candidate arrives."""
-    import shutil
-
-    env = guard_env
-    # Round 1: champion A.
-    _write_candidate(
-        env, ts="2026-05-01T00:00:00+00:00", uni_wmae=0.01, fp_wmae=0.001,
-        uni_blob="UNI-A", fp_blob="FP-A",
+def test_promote_mixed_one_promote_one_keep(promote_env):
+    """Mixed: univariate improves (promote → canonical updated, month=this month),
+    fingerprint regresses (keep → canonical + month unchanged)."""
+    env = promote_env
+    env["canon_uni"].write_text("UNI-MAY")
+    env["canon_fp"].write_text("FP-MAY")
+    env["champ"].write_text(
+        json.dumps(
+            {
+                "univariate": {"month": "2026-05", "holdout_wmae": 0.01},
+                "fingerprint": {"month": "2026-05", "holdout_wmae": 0.0005},
+            }
+        )
     )
-    run_a = run_evaluate()["run_id"]
-    shutil.rmtree(env["runs"] / run_a)  # champion archive gone
-
-    # Round 2: worse candidate; revert target is missing.
+    # June: univariate better (0.005 < 0.01), fingerprint worse (0.002 > 0.0005).
     _write_candidate(
-        env, ts="2026-06-01T00:00:00+00:00", uni_wmae=0.02, fp_wmae=0.002,
-        uni_blob="UNI-B", fp_blob="FP-B",
+        env, month="2026-06", uni_wmae=0.005, fp_wmae=0.002,
+        uni_blob="UNI-JUN", fp_blob="FP-JUN",
     )
-    summary = run_evaluate()
-    assert set(summary["unrevertable"]) == {"univariate", "fingerprint"}
-    assert summary["reverted"] == []
-    assert env["uni"].read_text() == "UNI-B"  # couldn't revert
+    summary = run_evaluate("2026-06")
+
+    assert summary["promoted"] == ["univariate"]
+    # univariate canonical updated to June candidate; fingerprint untouched.
+    assert env["canon_uni"].read_text() == "UNI-JUN"
+    assert env["canon_fp"].read_text() == "FP-MAY"
     champ = json.loads(env["champ"].read_text())
-    assert champ["univariate"]["holdout_wmae"] == 0.02  # record matches deployed reality
-
-    # Round 3: a better candidate now promotes against the recorded 0.02 → self-heal.
-    _write_candidate(
-        env, ts="2026-07-01T00:00:00+00:00", uni_wmae=0.015, fp_wmae=0.0015,
-        uni_blob="UNI-C", fp_blob="FP-C",
-    )
-    s3 = run_evaluate()
-    assert "univariate" in s3["promoted"]
-    assert env["uni"].read_text() == "UNI-C"
+    assert champ["univariate"]["month"] == "2026-06"   # promoted this month
+    assert champ["fingerprint"]["month"] == "2026-05"  # kept prior month
