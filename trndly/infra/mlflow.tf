@@ -181,24 +181,37 @@ resource "google_cloud_run_v2_service" "mlflow" {
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.mlflow.repository_id}/mlflow:3.14.0"
 
-      # The image is generic; the full server command lives here. `$(DB_PASSWORD)`
-      # is a Cloud Run runtime env substitution (NOT Terraform `${}`) — it is
-      # replaced with the secret value at container start.
+      # The image is generic; the full server command lives here. The DB password
+      # is NOT in the URI: Cloud Run's `$(VAR)` substitution inside args is
+      # unreliable for secret-backed env vars (it left the literal value,
+      # failing Postgres auth). Instead libpq reads it natively from the
+      # PGPASSWORD env var below — also avoids URL-encoding the password.
       args = [
         "mlflow", "server",
-        "--backend-store-uri", "postgresql+psycopg2://${google_sql_user.mlflow.name}:$(DB_PASSWORD)@/${google_sql_database.mlflow.name}?host=/cloudsql/${google_sql_database_instance.mlflow.connection_name}",
+        "--backend-store-uri", "postgresql+psycopg2://${google_sql_user.mlflow.name}@/${google_sql_database.mlflow.name}?host=/cloudsql/${google_sql_database_instance.mlflow.connection_name}",
         "--serve-artifacts",
         "--artifacts-destination", "gs://${google_storage_bucket.mlflow_artifacts.name}/mlflow",
         "--host", "0.0.0.0",
         "--port", "8080",
+        # mlflow 3.x defaults to 4 uvicorn workers (~1GB+, OOMs at 1Gi). One
+        # worker is plenty for an interactive single-operator tracking server.
+        "--workers", "1",
+        # mlflow 3.x host-header/CORS middleware is localhost-only by default,
+        # which would 403 access via the proxy / *.run.app URL. The service is
+        # already private (IAM run.invoker, no allUsers), so this redundant
+        # browser-oriented layer is opened to keep authenticated access working.
+        "--allowed-hosts", "*",
+        "--cors-allowed-origins", "*",
       ]
 
       ports {
         container_port = 8080
       }
 
+      # libpq/psycopg2 reads PGPASSWORD automatically when the URI omits the
+      # password — no arg substitution needed.
       env {
-        name = "DB_PASSWORD"
+        name = "PGPASSWORD"
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.db_password.secret_id
@@ -215,7 +228,7 @@ resource "google_cloud_run_v2_service" "mlflow" {
       resources {
         limits = {
           cpu    = "1"
-          memory = "1Gi"
+          memory = "2Gi" # headroom over mlflow's import + DB-migration startup spike
         }
       }
     }
