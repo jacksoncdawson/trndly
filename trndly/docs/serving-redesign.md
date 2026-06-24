@@ -203,7 +203,7 @@ Ordered by dependency. **Why this order:** local-first de-risks the riskiest swa
 ## 11. Deferred / out of scope (now)
 - **Résumé accuracy** — evaluate post-build (the GCP-MLflow claim needs revisiting; lead on the verifiable pipeline/contracts/256-tests/CI).
 - **Model performance** — champion quality / drift / synthesis quality — separate phase after wiring.
-- **Tick cadence automation** (Cloud Scheduler + Cloud Run Job + the MLflow ID-token path) — a clean follow-on; note it's also what unblocks unattended Phase-4 champion-flips.
+- **Tick cadence automation** (Cloud Scheduler + Cloud Run Job + the MLflow ID-token path) — a clean follow-on; note it's also what unblocks unattended Phase-4 champion-flips. **BLOCKED ON A DECISION:** the cloud tick writes `published/` JSON to GCS, but Firebase Hosting can't serve from GCS directly, and the current git-driven CI deploy would clobber cloud-generated data with stale committed JSON. See [decisions/0001-cloud-tick-cdn-refresh.md](decisions/0001-cloud-tick-cdn-refresh.md) (status: **Proposed — review before implementing**) for the conflict + proposed GCS-as-source-of-truth resolution.
 
 ---
 
