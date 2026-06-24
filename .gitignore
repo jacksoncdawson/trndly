@@ -64,5 +64,10 @@ env/
 **/mlflow.db
 **/mlruns/
 
+# Firebase CLI deploy cache (hosting upload hashes)
+.firebase/
+firebase-debug.log
+**/.firebase/
+
 # Claude
 .claude

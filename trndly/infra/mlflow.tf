@@ -234,6 +234,14 @@ resource "google_cloud_run_v2_service" "mlflow" {
     }
   }
 
+  lifecycle {
+    # Cloud Run v2 returns a service-level top-level `scaling` block (API
+    # defaults min/manual_instance_count = 0) that this config does not set,
+    # producing a harmless perpetual plan diff. Real scaling is template.scaling
+    # above; ignore only the top-level block to keep `terraform plan` clean.
+    ignore_changes = [scaling]
+  }
+
   # The service can't start until the secret version exists and sa-mlflow can
   # read it + reach Cloud SQL; the image must be pushed to the repo first.
   depends_on = [
