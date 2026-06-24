@@ -84,7 +84,8 @@ trndly/
 │   ├── contracts.py        — schema validators (live cubes + predictions)
 │   ├── cube_slicing.py     — shared cube → feature-row helpers
 │   ├── collectors/         — 4 retail scrapers + build_live_cube.py
-│   ├── monthly/            — the monthly tick (scrape→aggregate→...→predict)
+│   ├── serving/            — shared lag-join + schemas (publish + dev API import this)
+│   ├── monthly/            — the monthly tick (scrape→build_cube→...→predict→publish)
 │   │   ├── scrape.py
 │   │   ├── aggregate.py
 │   │   ├── features.py
@@ -92,27 +93,23 @@ trndly/
 │   │   ├── evaluate.py
 │   │   ├── state.py        — trend-state classifier
 │   │   ├── predict.py
+│   │   ├── publish.py      — emits browser-ready JSON
 │   │   └── cli.py          — `python -m pipelines.monthly`
 │   └── ...
 ├── backend/services/
-│   └── scheduleServer.py   — FastAPI service (read-only over predictions)
-├── frontend/               — React SPA, no build step
+│   └── scheduleServer.py   — slimmed dev API over pipelines/serving (no .env)
+├── frontend/               — React SPA, no build step (fetches data/*.json)
 ├── notebooks/              — 0 (Kaggle clean), 1 (historical agg), 4 (HP sweep)
 ├── tests/
 └── data/
-    ├── raw/{items,kaggle}/
+    ├── raw/{items,kaggle}/ — items_<retailer>_<YYYY-MM>.csv
     ├── reference/          — lookup.csv, SCHEMA.md
-    ├── processed/          — historical/live/merged/training parquets
+    ├── processed/          — historical_* / live_*_<YYYY-MM> (shared cube inputs)
     ├── models/             — fingerprint_model.joblib, univariate_model.joblib,
-    │                         champion_metrics.json
-    └── predictions/        — predictions_*_<YYYY-MM>.parquet (per monthly tick)
+    │                         champion.json   (cross-tick CHAMPION)
+    └── ticks/<YYYY-MM>/    — immutable per-tick checkpoint (merged/training/model/
+                              predictions/published + manifest.json + _SUCCESS)
 ```
-
-> Note: `pipelines/paths.py` is the canonical path registry; its module
-> docstring mentions a `pipelines/serving/` directory that does **not**
-> exist in the repo — the shipped service lives at
-> `backend/services/scheduleServer.py`. Treat that docstring line as
-> stale.
 
 ---
 
@@ -121,14 +118,20 @@ trndly/
 Stages in order (`pipelines/monthly/cli.py`, `FULL_ORDER`):
 
 
-| #   | Stage       | Inputs                                         | Outputs                                                                                 |
-| --- | ----------- | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
-| 1   | `scrape`    | retailer APIs                                  | `data/raw/items/items_*.csv`, `data/processed/live_*_<YYYY-MM>.parquet`                 |
-| 2   | `aggregate` | historical + live cubes                        | `data/processed/merged_*.parquet`                                                       |
-| 3   | `features`  | merged cubes                                   | `data/processed/training_*.parquet`, `training_run.json`                                |
-| 4   | `train`     | training tables                                | `data/models/*.joblib`, `model_training_run.json`                                       |
-| 5   | `evaluate`  | candidate manifest + `champion_metrics.json`   | promotion decision; updates `champion_metrics.json` if candidate wins                   |
-| 6   | `predict`   | champion joblibs + merged cubes + `lookup.csv` | `data/predictions/predictions_*_<YYYY-MM>.parquet` (with state classification baked in) |
+Every per-tick artifact lands in an immutable checkpoint `data/ticks/<YYYY-MM>/`
+(plan §12); `historical_*`/`live_*` stay in `data/processed/` as shared inputs,
+the cross-tick champion in `data/models/`.
+
+| #   | Stage        | Inputs                                            | Outputs                                                                                       |
+| --- | ------------ | ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 1   | `scrape`     | retailer APIs                                     | `data/raw/items/items_<retailer>_<YYYY-MM>.csv`                                                |
+| 2   | `build_cube` | `items_*.csv`                                     | `data/processed/live_*_<YYYY-MM>.parquet`                                                      |
+| 3   | `aggregate`  | historical + live cubes                           | `data/ticks/<YYYY-MM>/merged_*.parquet`                                                        |
+| 4   | `features`   | tick merged cubes                                 | `data/ticks/<YYYY-MM>/training_*.parquet`, `training_run.json`                                 |
+| 5   | `train`      | tick training tables                              | `data/ticks/<YYYY-MM>/model/*.joblib` + `model_training_run.json` (this tick's **candidate**)  |
+| 6   | `evaluate`   | candidate manifest + `data/models/champion.json`  | per-model promote-copy: winner's joblib → `data/models/`, repoint `champion.json`              |
+| 7   | `predict`    | canonical champion + tick merged + `lookup.csv`   | `data/ticks/<YYYY-MM>/predictions_*.parquet` (state classification baked in)                   |
+| 8   | `publish`    | tick predictions + merged + `lookup.csv`          | `data/ticks/<YYYY-MM>/published/*.json` + refreshed `frontend/data/*.json`                     |
 
 
 Stages can be invoked individually:
@@ -144,22 +147,20 @@ chain. Cloud Scheduler / Vertex AI wiring is in the `Future` section.
 **Model:** each model is a multi-output `RandomForestRegressor`
 (`n_estimators=200`, `min_samples_leaf=2`, `max_depth=None`,
 `random_state=42`) predicting `y_h1..y_h6`. A persistence baseline
-(ŷ_h = `share_t`) is computed as a sanity floor. `train.py` overwrites
-the canonical joblibs in `data/models/` every run; `predict.py` then
-loads those same joblibs (logged as "champion models").
+(ŷ_h = `share_t`) is computed as a sanity floor. `train.py` writes the
+candidate joblibs into `data/ticks/<YYYY-MM>/model/` — it never touches the
+canonical `data/models/` champion. `predict.py` loads the **canonical champion**
+joblibs from `data/models/`.
 
-**Promotion rule** (`evaluate.py`, the *local-MVP* champion): for each
-model independently, if candidate `holdout_wmae <= incumbent.holdout_wmae`,
-promote (copy `model_training_run.json` → `champion_metrics.json`). With
-no incumbent recorded, the candidate is promoted. On a tie, candidate
-wins. The champion is a **local `champion_metrics.json` file**, not an
-MLflow registry alias.
-
-> Caveat (acknowledged in `evaluate.py`): because `train.py` has already
-> overwritten the joblibs before `evaluate.py` runs, a candidate that
-> *loses* the comparison does **not** get its weights reverted — evaluate
-> only refuses to advance the champion-metrics pointer. Auto-revert is a
-> `Future` item.
+**Promotion rule** (`evaluate.py`, the *local-MVP* champion): for each model
+independently, if candidate `holdout_wmae <= incumbent.holdout_wmae`, promote.
+With no incumbent recorded, the candidate is promoted; on a tie the candidate
+wins. **Promote-copy (plan §12):** on a win, evaluate copies the tick's candidate
+joblib over `data/models/<role>_model.joblib` and repoints `data/models/champion.json[role]`
+at this month; on a loss it does nothing (the reigning champion keeps serving).
+Because `train` never clobbers the canonical joblib, there is **no revert** — a
+losing candidate can never reach serving. Target state: an MLflow registry
+`champion` alias against the rebuilt private MLflow.
 
 **Trend state classification** (`pipelines/monthly/state.py`) — a
 forward-first hybrid mapping a `(past3 lags + anchor + 6 forward)`
@@ -399,11 +400,11 @@ That dev server has since been **retired**; the planned replacement is a
 **not** yet wired up:
 
 - The monthly tick's champion management. `evaluate.py` is explicitly the
-  local-MVP version — the champion is the local `champion_metrics.json`
-  file, not a registry alias. The target is
+  local-MVP version — the champion is the local `data/models/champion.json`
+  pointer + canonical joblibs (per-tick model isolation + promote-copy, no
+  revert; plan §12), not a registry alias. The target is
   `MlflowClient.set_registered_model_alias(name=..., alias='champion',
-  version=...)` against the registry model (`listing_timeline_experiments@champion`),
-  with a `runs/` archive + auto-revert when a candidate loses. Plumbing
+  version=...)` against the rebuilt private MLflow registry. Plumbing
   notes live in `pipelines/monthly/evaluate.py`.
 - The serving path. The `MLFLOW_*` variables in
   `backend/services/.env` are **leftovers** from an older

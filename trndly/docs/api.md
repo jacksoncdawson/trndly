@@ -146,8 +146,8 @@ curl -s 'http://localhost:8000/trends?dimension=color_master&state=rising'
 
 `share_lag3` / `share_lag2` / `share_lag1` / `share_t` are the observed
 catalog shares at anchor − 3, − 2, − 1, and the anchor month itself. They
-are joined onto the predictions cube at service startup from
-`data/processed/merged_univariate.parquet` so the chart has 3 months of
+are joined onto the predictions cube at service startup from the latest tick's
+`merged_univariate.parquet` (`data/ticks/<YYYY-MM>/`) so the chart has 3 months of
 real context to draw before the forecasted 6. May be `null` if the
 underlying cube row is missing — in practice the predictions cube only
 emits rows where the lag history is complete, so this is rare.
@@ -196,8 +196,8 @@ curl -s 'http://localhost:8000/forecast/fingerprint?product_type_id=1&gender_id=
 
 The `share_lag3` / `share_lag2` / `share_lag1` / `share_t` fields are the
 observed shares for this 5-D fingerprint at anchor − 3..0 months,
-joined onto the predictions cube at startup from
-`data/processed/merged_fingerprint.parquet`.
+joined onto the predictions cube at startup from the latest tick's
+`merged_fingerprint.parquet` (`data/ticks/<YYYY-MM>/`).
 
 ```bash
 # Missing fingerprint → 404

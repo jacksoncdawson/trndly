@@ -85,6 +85,41 @@ def test_run_full_skips_respect_flags(stub_stages):
     assert calls == [s for s in cli.FULL_ORDER if s not in ("scrape", "build_cube")]
 
 
+def test_force_rerun_crash_clears_stale_success(stub_stages, monkeypatch):
+    """A --force re-run that crashes mid-chain must NOT leave the prior good
+    _SUCCESS behind — otherwise the half-overwritten tick reads as complete and a
+    later plain run (and serving) would trust the corrupted checkpoint."""
+    calls, ticks = stub_stages
+    # Prior good run left a _SUCCESS marker.
+    (ticks / "2026-06").mkdir()
+    (ticks / "2026-06" / "_SUCCESS").touch()
+
+    def _raise_on_predict(name, month):
+        calls.append(name)
+        if name == "predict":
+            raise RuntimeError("boom")
+        return {"stage": name}
+
+    monkeypatch.setattr(cli, "_call_stage", _raise_on_predict)
+    with pytest.raises(RuntimeError, match="boom"):
+        cli.run_full(month="2026-06", force=True)
+
+    # The stale marker was cleared up front and never re-touched (crash before the end).
+    assert not (ticks / "2026-06" / "_SUCCESS").exists()
+
+    # A subsequent plain run now correctly RE-RUNS the corrupted tick (not skipped).
+    calls.clear()
+
+    def _record(name, month):
+        calls.append(name)
+        return {"stage": name}
+
+    monkeypatch.setattr(cli, "_call_stage", _record)
+    summary = cli.run_full(month="2026-06")
+    assert "skipped" not in summary
+    assert calls == list(cli.FULL_ORDER)
+
+
 def test_publish_is_after_predict_in_full_order():
     order = cli.FULL_ORDER
     assert order.index("publish") == order.index("predict") + 1

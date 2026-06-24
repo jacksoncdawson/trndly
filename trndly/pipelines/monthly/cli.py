@@ -153,6 +153,13 @@ def run_full(
         )
         return {"skipped": month_str}
 
+    # We are (re-)running this tick: clear any prior _SUCCESS marker up front.
+    # Stages overwrite the checkpoint in place, so on a --force re-run a crash
+    # mid-chain would otherwise leave a half-overwritten tick still marked
+    # complete (the guard + serving would then trust it). _SUCCESS is re-touched
+    # LAST, only after every stage succeeds.
+    tick_success_marker(month).unlink(missing_ok=True)
+
     skips: set[str] = set()
     if skip_scrape:
         skips.add("scrape")

@@ -23,8 +23,8 @@ how to invoke each stage, what to expect, and how to debug a failure.
 
 3. **MLflow tracking URI** *(optional — not used by the monthly tick).*
    The monthly tick's champion management is fully local: promotion is
-   decided by comparing `model_training_run.json` against
-   `champion_metrics.json` on disk (see the `evaluate` stage). The
+   decided by comparing this tick's candidate `model_training_run.json` against
+   `data/models/champion.json` (see the `evaluate` stage). The
    self-hosted MLflow server used during **model development / hyperparameter
    sweeps** (`notebooks/_gen_4_hyperparameter_search.py`) has since been
    retired and is being rebuilt private (see `serving-redesign.md`); it was
@@ -48,16 +48,25 @@ how to invoke each stage, what to expect, and how to debug a failure.
 .venv/bin/python -m pipelines.monthly run
 ```
 
-Stage order: `scrape → build_cube → aggregate → features → train → evaluate → predict`.
+Stage order: `scrape → build_cube → aggregate → features → train → evaluate → predict → publish`.
 Wall-clock: ~15 minutes, dominated by the scrape stage (~9–10 min with
 PDP enrichment).
 
-The `run` subcommand takes two options, `--skip-scrape` and
-`--skip-build-cube` (see below). It does **not** forward scraper flags — to
-control the scrapers (subset of retailers, PDP enrichment) call the standalone
-scrape module directly (see the `scrape` stage section).
+**Per-tick checkpoints + idempotency (plan §12).** A `run` writes an immutable
+checkpoint under `data/ticks/<YYYY-MM>/` (merged → training → model candidate →
+predictions → published), keyed by the **tick month** (current calendar month by
+default, or `--month YYYY-MM`). `run` is a **no-op when the tick's `_SUCCESS`
+marker already exists** — pass `--force` to re-run and overwrite that month. The
+manifest is written and `_SUCCESS` is touched **last**, so a crash never leaves a
+tick marked complete. `historical_*`/`live_*` stay in `data/processed/` as shared
+inputs; the cross-tick champion lives in `data/models/`.
 
-### Skip stages
+The `run` subcommand takes `--month`, `--force`, `--skip-scrape`, and
+`--skip-build-cube`. It does **not** forward scraper flags — to control the
+scrapers (subset of retailers, PDP enrichment) call the standalone scrape module
+directly (see the `scrape` stage section).
+
+### Skip stages / re-run
 
 If `data/raw/items/items_*.csv` are already on disk, skip the scrape:
 
@@ -72,7 +81,14 @@ the rebuild too:
 .venv/bin/python -m pipelines.monthly run --skip-scrape --skip-build-cube
 ```
 
-This typically takes ~1–2 minutes (train usually dominates).
+To re-run a month that already has a `_SUCCESS` marker:
+
+```bash
+.venv/bin/python -m pipelines.monthly run --force
+.venv/bin/python -m pipelines.monthly run --month 2026-06 --force   # an explicit month
+```
+
+The skip path typically takes ~1–2 minutes (train usually dominates).
 
 ### Individual stages
 
@@ -84,7 +100,11 @@ This typically takes ~1–2 minutes (train usually dominates).
 .venv/bin/python -m pipelines.monthly train
 .venv/bin/python -m pipelines.monthly evaluate
 .venv/bin/python -m pipelines.monthly predict
+.venv/bin/python -m pipelines.monthly publish
 ```
+
+Individual stage subcommands run for the **current** tick month with no
+idempotency guard (handy for debugging a single stage in place).
 
 Each of these monthly-CLI subcommands takes **no options** other than
 `-h`. They call the corresponding `run_<stage>()` with default
@@ -141,7 +161,7 @@ Reads `historical_{fingerprint,univariate}.parquet` + globs every
 `live_*_<YYYY-MM>.parquet`; concatenates with dedup on
 `(month, *FINGERPRINT_COLS, source)` (fingerprint) or
 `(month, dimension, level_id, source)` (univariate) keeping `last`;
-writes `merged_*.parquet`.
+writes the tick's `data/ticks/<YYYY-MM>/merged_{fingerprint,univariate}.parquet`.
 
 Always rebuilds — `historical_*` is never overwritten. If no live
 parquets are found, the merged cube is historical-only.
@@ -151,10 +171,10 @@ parquets are found, the merged cube is historical-only.
 Builds calendar-strict training rows from the merged cubes. For each
 anchor month `t`, requires cube rows on every month in `t-3..t+6` (10
 months: 3 lags + anchor + 6 horizons). Rows that don't qualify are
-silently dropped. Outputs:
-- `data/processed/training_univariate.parquet`
-- `data/processed/training_fingerprint.parquet`
-- `data/processed/training_run.json` (feature/target column manifest +
+silently dropped. Outputs (into the tick checkpoint):
+- `data/ticks/<YYYY-MM>/training_univariate.parquet`
+- `data/ticks/<YYYY-MM>/training_fingerprint.parquet`
+- `data/ticks/<YYYY-MM>/training_run.json` (feature/target column manifest +
   split/sample-weight contract)
 
 Sample weights = `min(sqrt(n_articles_at_anchor), 100.0)`; split groups
@@ -171,52 +191,42 @@ persistence baseline (`ŷ_h = share_t`) is computed as a sanity floor;
 a model that doesn't beat baseline on weighted holdout MAE gets a
 `WARNING` (it does not block promotion).
 
-Outputs:
-- `data/models/fingerprint_model.joblib`
-- `data/models/univariate_model.joblib`
-- `data/models/model_training_run.json` (metrics + manifest)
+Outputs this tick's **candidate** model (never the canonical champion):
+- `data/ticks/<YYYY-MM>/model/fingerprint_model.joblib`
+- `data/ticks/<YYYY-MM>/model/univariate_model.joblib`
+- `data/ticks/<YYYY-MM>/model/model_training_run.json` (metrics + manifest)
 
 ### `evaluate` — `pipelines.monthly.evaluate`
 
-Compares the just-written candidate manifest
-(`model_training_run.json`) against
-`data/models/champion_metrics.json` (the prior champion's record). The
-comparison is made **per model** (univariate, fingerprint):
+Compares this tick's candidate manifest
+(`data/ticks/<YYYY-MM>/model/model_training_run.json`) against
+`data/models/champion.json` (the cross-tick champion pointer). The
+comparison is **per model** (univariate, fingerprint):
 - No incumbent recorded → promote
 - `candidate.holdout_wmae <= incumbent.holdout_wmae` → promote
-- Else → keep that model's incumbent
+- Else → keep that model's reigning champion
 
-These per-model decisions drive the logged action. The **file write,
-however, is all-or-nothing**: if *any* model is promoted, evaluate
-copies the entire candidate `model_training_run.json` over
-`champion_metrics.json` (`shutil.copyfile`). So if one model improves
-and its co-trained sibling regresses this month, the regressed model's
-metrics are *also* written into the champion record. The champion file
-is left untouched only when **neither** model improves.
-
-The joblibs in `data/models/` are always the just-trained candidate's
-weights — `train.py` overwrites them before `evaluate.py` runs.
-**A candidate that loses still leaves the canonical joblibs as the
-candidate's**; evaluate only refuses to advance the champion-metrics
-pointer, it does not revert the joblibs. Recovery requires retraining
-from a prior month or restoring from backup. This is the local-MVP
-trade-off; the target state uses MLflow registry alias swaps with
-snapshot semantics (see "MVP vs. target").
+**Promote-copy (plan §12).** Because `train` writes the candidate into the
+tick (never the canonical `data/models/` joblib), there is **no clobber and no
+revert**: on a per-model **win**, evaluate copies the tick's candidate joblib
+over `data/models/<role>_model.joblib` (the weights `predict` loads) and
+repoints `champion.json[role]` at this month; on a **loss**, the canonical
+joblib is left untouched and the reigning champion stays. Decisions are
+independent per model. A losing candidate can therefore never reach serving —
+`predict` always loads the canonical champion. (Superseded later by Phase 4's
+MLflow `champion` alias.)
 
 ### `predict` — `pipelines.monthly.predict`
 
-Loads the joblib models, iterates the universe, scores everything that
-has lag coverage, classifies state via `pipelines.monthly.state`,
-decodes IDs to names via `lookup.csv`, validates via
-`pipelines/contracts.py`, writes:
-- `data/predictions/predictions_univariate_<YYYY-MM>.parquet`
-  (low hundreds of rows)
-- `data/predictions/predictions_fingerprint_<YYYY-MM>.parquet`
-  (a few thousand rows)
+Loads the **canonical champion** joblibs from `data/models/`, iterates the
+universe, scores everything that has lag coverage, classifies state via
+`pipelines.monthly.state`, decodes IDs to names via `lookup.csv`, validates via
+`pipelines/contracts.py`, writes into the tick checkpoint:
+- `data/ticks/<YYYY-MM>/predictions_univariate.parquet` (low hundreds of rows)
+- `data/ticks/<YYYY-MM>/predictions_fingerprint.parquet` (a few thousand rows)
 
-Exact counts depend on the eligible anchor (e.g., the dense historical
-2020-08 anchor yields ~182 univariate / ~6,500 fingerprint rows; the
-sparse live 2026-05 anchor yields ~120 / ~3,800).
+Exact counts depend on the eligible anchor (the sparse live 2026-05 anchor
+yields ~120 univariate / ~3,830 fingerprint rows).
 
 Anchor month is the latest cube month with 3 contiguous prior months,
 picked separately per cube (`_find_eligible_anchor`). If the latest
@@ -245,21 +255,38 @@ Direction (rising/falling) is decided off the **forward window only**
 (`share_t → y_h6`); past lags feed only the peak band. Any non-finite
 value, or a zero anchor denominator, classifies as flat/stable.
 
+### `publish` — `pipelines.monthly.publish`
+
+The final stage. Reads the tick's `predictions_*` + `merged_*` + `lookup.csv`
+through the shared `pipelines/serving` module (the same code the dev API uses)
+and emits browser-ready JSON:
+- `data/ticks/<YYYY-MM>/published/{trends,options,health,fingerprint}.json`
+  (the immutable checkpoint copy)
+- and refreshes `frontend/data/{trends,options,health,fingerprint}.json` — the
+  canonical files the static SPA / CDN fetch.
+
+`fingerprint.json` is the single 5-D-keyed bundle the client looks up. The
+lag-join (`share_lag*`/`share_t`) is attached here and gated by the golden-file
+test (`tests/serving/test_publish.py`).
+
 ---
 
 ## After the tick
 
-Restart the FastAPI service so it loads the new predictions parquet:
+The serving path is **static**: `publish` already wrote the canonical JSON into
+`frontend/data/`, so the static SPA (Firebase Hosting / a local static server)
+serves the new tick with no process to restart.
+
+The local `scheduleServer` FastAPI app is a dev convenience over the same shared
+module — it reads the **latest successful tick** at startup, so restart it to
+pick up a new tick:
 
 ```bash
-# In whichever process / container the API runs:
-pkill -f 'uvicorn.*scheduleServer'  # or your usual restart
-.venv/bin/python -m uvicorn backend.services.scheduleServer:app --port 8000 &
+bash scripts/run_api.sh   # uvicorn backend.services.scheduleServer:app on :8000
 ```
 
-The service is read-only over the precomputed predictions parquets — it
-loads them once at startup and makes no live model calls in the request
-path. Verify via `/health`:
+It is read-only and makes no live model calls in the request path. Verify via
+`/health`:
 
 ```bash
 curl -s http://localhost:8000/health | python3 -m json.tool
@@ -316,27 +343,21 @@ sections. Most common fixes:
 
 ## What to do if WMAE regresses
 
-If `evaluate` flips a model from promote→keep this month after promoting
-it last month, the candidate model is worse than the now-locked
-incumbent. Investigate by comparing
-`data/models/model_training_run.json` (candidate) vs
-`data/models/champion_metrics.json` (incumbent):
+If `evaluate` keeps a model this month (the candidate lost), the candidate is
+worse than the reigning champion. Investigate by comparing this tick's candidate
+manifest `data/ticks/<YYYY-MM>/model/model_training_run.json` against
+`data/models/champion.json` (which records the champion's month + holdout WMAE):
 
 - Did the new live month introduce noisy outliers?
 - Did `feature_importances_` shift drastically?
 - Is the holdout split still representative of recent months?
 
-Remember the all-or-nothing champion-file write (see the `evaluate`
-section): if the *other* model was promoted this month, the regressed
-model's record in `champion_metrics.json` was overwritten anyway — so
-compare against last month's archived manifest if you kept one.
-
-The candidate joblib is preserved at
-`data/models/{fingerprint,univariate}_model.joblib`, but restoring the
-prior champion would currently require retraining from the prior
-month's data or a backup. Document failures in the repo-root `TODO.md`
-(`../TODO.md` relative to `trndly/`) and decide whether to extend the
-runs/ archive + auto-revert logic in `evaluate.py`.
+There is nothing to recover: the promote-copy flow means a losing candidate
+never overwrites the canonical `data/models/<role>_model.joblib`, so the reigning
+champion keeps serving. The losing candidate's weights remain archived in
+`data/ticks/<YYYY-MM>/model/` for inspection. Decisions are per model, so one
+model can keep while its sibling promotes. Document notable regressions in the
+repo-root `TODO.md` (`../TODO.md` relative to `trndly/`).
 
 ---
 
@@ -345,14 +366,13 @@ runs/ archive + auto-revert logic in `evaluate.py`.
 The monthly tick is the **local-MVP**. The following are deliberately
 deferred to cloud deployment and are NOT how the tick works today:
 
-- **Champion management.** *Now:* local file comparison
-  (`champion_metrics.json` vs `model_training_run.json`); the whole
-  candidate manifest is copied when any model is promoted; no auto-revert
-  of joblibs. *Target:* MLflow model-registry alias
+- **Champion management.** *Now:* per-tick model isolation + promote-copy
+  (`data/models/champion.json`; the winning candidate joblib is copied over the
+  canonical `data/models/<role>_model.joblib` on a win, no clobber/revert since
+  `train` writes only the tick candidate). *Target:* MLflow model-registry alias
   (`MlflowClient.set_registered_model_alias(name=..., alias='champion',
   version=...)`) against the rebuilt private MLflow registry (Cloud Run +
-  Cloud SQL + GCS, see `serving-redesign.md`), with a runs/ archive +
-  auto-revert on demotion.
+  Cloud SQL + GCS, see `serving-redesign.md`).
 - **Anchor lag backfill.** *Now:* `scripts/backfill_anchor_lags.py` is a
   manual stopgap run outside the tick when the latest live month is
   isolated. *Target:* automated synthetic-lag synthesis within the tick.

@@ -30,7 +30,7 @@ in `trndly/`.
     │   ├── contracts.py       — schema validators
     │   ├── cube_slicing.py    — shared cube → feature-row helpers
     │   ├── collectors/        — 4 retail scrapers + build_live_cube.py
-    │   └── monthly/           — the monthly tick (scrape → ... → predict)
+    │   └── monthly/           — the monthly tick (scrape → ... → predict → publish)
     ├── backend/services/
     │   └── scheduleServer.py  — FastAPI service (read-only over predictions)
     ├── frontend/              — React SPA, no build step (JSX-via-Babel + in-house useFetch hook)
@@ -57,7 +57,7 @@ python -m venv .venv
 .venv/bin/python notebooks/_run_notebook.py notebooks/0_clean_historical.ipynb
 .venv/bin/python notebooks/_run_notebook.py notebooks/1_aggregate_historical.ipynb
 
-# Monthly tick: scrape → build_cube → aggregate → features → train → evaluate → predict
+# Monthly tick: scrape → build_cube → aggregate → features → train → evaluate → predict → publish
 .venv/bin/python -m pipelines.monthly run
 
 # Or skip scrape if items_*.csv already on disk

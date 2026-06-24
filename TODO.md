@@ -272,7 +272,7 @@ for the full method.
 cd /Users/jackcdawson/Desktop/trndly/trndly
 
 # Full monthly tick (scrape → build_cube → aggregate → features → train →
-# evaluate → predict). ~15 min including scrape.
+# evaluate → predict → publish). ~15 min including scrape. Writes data/ticks/<YYYY-MM>/.
 .venv/bin/python -m pipelines.monthly run
 
 # Skip scrape stage (use existing items_*.csv). ~1 min.
