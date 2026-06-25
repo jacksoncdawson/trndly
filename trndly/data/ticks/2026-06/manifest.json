@@ -1,0 +1,140 @@
+{
+  "month": "2026-06",
+  "generated_at_utc": "2026-06-24T23:38:07+00:00",
+  "git_sha": "c698fd569a865db7a9a076e378a0168e0a6e2297",
+  "anchor_month": "2026-06",
+  "champion_decisions": {
+    "univariate": {
+      "action": "keep",
+      "reason": "candidate WMAE 0.00988531 > incumbent 0.00969344",
+      "candidate_wmae": 0.009885308874949345,
+      "incumbent_wmae": 0.009693444798972965
+    },
+    "fingerprint": {
+      "action": "keep",
+      "reason": "candidate WMAE 0.000101038 > incumbent 9.86552e-05",
+      "candidate_wmae": 0.00010103783515374972,
+      "incumbent_wmae": 9.865518729761852e-05
+    }
+  },
+  "stage_summaries": {
+    "scrape": null,
+    "build_cube": {
+      "months": [
+        "2026-05",
+        "2026-06"
+      ],
+      "n_articles": 63759,
+      "n_collapsed": 2121,
+      "fingerprint_rows": 7837,
+      "univariate_rows": 241,
+      "files": [
+        [
+          "/Users/jackcdawson/Desktop/trndly/trndly/data/processed/live_fingerprint_2026-05.parquet",
+          "/Users/jackcdawson/Desktop/trndly/trndly/data/processed/live_univariate_2026-05.parquet"
+        ],
+        [
+          "/Users/jackcdawson/Desktop/trndly/trndly/data/processed/live_fingerprint_2026-06.parquet",
+          "/Users/jackcdawson/Desktop/trndly/trndly/data/processed/live_univariate_2026-06.parquet"
+        ]
+      ]
+    },
+    "aggregate": {
+      "merged_fingerprint": 211795,
+      "merged_univariate": 4804
+    },
+    "features": {
+      "univariate_stats": {
+        "n_groups": 191,
+        "n_candidates": 4804,
+        "n_rows": 2456
+      },
+      "fingerprint_stats": {
+        "n_groups": 19183,
+        "n_candidates": 211795,
+        "n_rows": 54605
+      }
+    },
+    "train": {
+      "univariate": {
+        "n_train": 1752,
+        "n_val": 352,
+        "n_holdout": 352,
+        "fit_seconds": 0.15813994407653809,
+        "feature_importances": {
+          "share_t": 0.32834259676074584,
+          "share_lag3": 0.23966295457197298,
+          "share_lag1": 0.2255920348455648,
+          "share_lag2": 0.20586517274750366,
+          "month_of_year": 0.0005372410742126407
+        },
+        "holdout_wmae": 0.009885308874949345,
+        "holdout_baseline_wmae": 0.008739379924158082
+      },
+      "fingerprint": {
+        "n_train": 39619,
+        "n_val": 7521,
+        "n_holdout": 7465,
+        "fit_seconds": 2.456838846206665,
+        "feature_importances": {
+          "share_t": 0.6383325054178207,
+          "share_lag3": 0.13088985810774212,
+          "share_lag1": 0.12676047105488308,
+          "share_lag2": 0.10010704704040212,
+          "month_of_year": 0.003910118379151988
+        },
+        "holdout_wmae": 0.00010103783515374972,
+        "holdout_baseline_wmae": 9.502891077346969e-05
+      }
+    },
+    "evaluate": {
+      "action": "kept",
+      "decisions": {
+        "univariate": {
+          "action": "keep",
+          "reason": "candidate WMAE 0.00988531 > incumbent 0.00969344",
+          "candidate_wmae": 0.009885308874949345,
+          "incumbent_wmae": 0.009693444798972965
+        },
+        "fingerprint": {
+          "action": "keep",
+          "reason": "candidate WMAE 0.000101038 > incumbent 9.86552e-05",
+          "candidate_wmae": 0.00010103783515374972,
+          "incumbent_wmae": 9.865518729761852e-05
+        }
+      },
+      "month": "2026-06",
+      "promoted": []
+    },
+    "predict": {
+      "univariate": 119,
+      "fingerprint": 3181
+    },
+    "publish": {
+      "anchor_month": "2026-06",
+      "out_dir": "/Users/jackcdawson/Desktop/trndly/trndly/data/ticks/2026-06/published",
+      "files": [
+        "trends_2026-06.json",
+        "trends.json",
+        "fingerprint_2026-06.json",
+        "fingerprint.json",
+        "options_2026-06.json",
+        "options.json",
+        "health_2026-06.json",
+        "health.json"
+      ],
+      "counts": {
+        "trends_rows": 119,
+        "fingerprint_keys": 3181,
+        "options_categories": {
+          "colors": 14,
+          "categories": 96,
+          "materials": 35,
+          "appearances": 27,
+          "genders": 3
+        },
+        "lags_synthetic": true
+      }
+    }
+  }
+}
