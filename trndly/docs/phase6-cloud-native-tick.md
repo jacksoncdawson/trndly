@@ -49,7 +49,9 @@ serving-refresh path at once — too much to leave as a §11 footnote.
 2. **Repoint storage local→GCS in `paths.py`.** Make the backend switchable
    (`gs://` vs local) via env/config so the same code runs locally for dev and on
    GCS in the cloud. Cover `ticks/`, `processed/`, `reference/lookup.csv`.
-   Confirm `_SUCCESS`/idempotency works against GCS object existence.
+   Confirm `_SUCCESS`/idempotency works against GCS object existence. **Settle the
+   per-tick storage model here** — materialized merged cube vs. manifest-of-
+   pointers (open question 6); it determines the GCS layout.
 3. **One-time data migration.** Upload current local `data/` (reference, the
    latest tick checkpoint, the committed seed) to the bucket; verify the first
    cloud run reads it and produces an identical `published/` (reuse the golden
@@ -119,3 +121,30 @@ serving-refresh path at once — too much to leave as a §11 footnote.
 4. Does the tick Job itself deploy to Hosting, or hand off to the CI (per the
    ADR 0001 alternatives)?
 5. Alerting/observability for failed scheduled runs — what and where?
+6. **Per-tick storage model: materialized merged cube vs. manifest-of-pointers
+   — i.e. how the many data versions are handled.** Today every tick
+   re-materializes `historical ∪ live ∪ backfill` into
+   `ticks/<month>/merged_*.parquet` (per §12); `features`/`predict` then slice
+   the `t-3…t+6` windows out of that one file. That's O(n) duplication per tick,
+   dominated by re-copying the ~1 MB historical block (per-month live data is
+   ~21 KB, so the cube is ~97% re-copied history). Locally it's a few MB and the
+   simplicity + frozen-snapshot reproducibility are worth it. **In the cloud it
+   becomes a re-uploaded GCS object every tick**, so the choice should be made as
+   part of the GCS repoint (concrete move #2 — it changes the data layout):
+   - **(a) Keep materialized** — each tick's merged is a self-contained frozen
+     snapshot; one-file reads; reproducible by copy. Fine while data is small.
+   - **(b) Manifest-of-pointers** — store each data file once (the inputs —
+     `historical_*`, `live_*_<month>`, `backfill_*` — are already immutable), drop
+     the materialized `merged_*`, and have `features`/`predict` assemble the cube
+     in-memory from the files each tick's `manifest.json` pins (paths + content
+     hashes). Reproducibility then comes from immutable inputs + the manifest, not
+     from copying. Maps naturally to GCS (objects written once; manifest lists
+     them) and to the "data entirely in cloud" goal. Cost: read-time assembly, a
+     weaker-than-a-copy guarantee (depends on inputs surviving), and the golden
+     test currently reads `merged_*` fixtures so it would need rework.
+   - **(c) A table format (Iceberg/Delta/Hudi)** — the grown-up version of (b):
+     snapshots are manifests, data files written once, time-travel built in.
+     Overkill at current scale; the destination if data grows large.
+   Leaning toward (b) for the cloud (pointers fit GCS), but (a) is correct to keep
+   until there's a reason — so also decide a **trigger** to flip (e.g. merged /
+   historical size, or aggregate I/O time crossing a threshold).
