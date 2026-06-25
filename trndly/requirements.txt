@@ -6,6 +6,7 @@ scikit-learn
 gcsfs
 uvicorn
 pytest
+pytest-asyncio
 pytest-httpx
 pytrends
 playwright
